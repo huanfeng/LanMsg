@@ -79,14 +79,14 @@ class ChatList extends StatelessWidget {
                     title: Text(
                       chat.name,
                       style: TextStyle(
-                        fontSize: 16.sp,
+                        fontSize: 14.sp,
                         fontWeight: FontWeight.w500,
                       ),
                     ),
                     subtitle: Text(
                       chat.lastMessage,
                       style: TextStyle(
-                        fontSize: 14.sp,
+                        fontSize: 12.sp,
                         color: Colors.grey[600],
                       ),
                       maxLines: 1,
@@ -99,7 +99,7 @@ class ChatList extends StatelessWidget {
                         Text(
                           _formatTime(chat.lastMessageTime),
                           style: TextStyle(
-                            fontSize: 12.sp,
+                            fontSize: 10.sp,
                             color: Colors.grey,
                           ),
                         ),

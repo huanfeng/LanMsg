@@ -203,7 +203,7 @@ class _MessageBubble extends StatelessWidget {
           message.content,
           style: TextStyle(
             color: message.isMe ? Colors.white : null,
-            fontSize: 16.sp,
+            fontSize: 13.sp,
           ),
         ),
       ),
