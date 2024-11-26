@@ -29,6 +29,14 @@ class _ChatDetailState extends State<ChatDetail> {
     _loadMessages();
   }
 
+  @override
+  void didUpdateWidget(ChatDetail oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.chatId != widget.chatId) {
+      _loadMessages();
+    }
+  }
+
   void _loadMessages() {
     final messages = _messageService.getMessagesForChat(widget.chatId);
     setState(() {
@@ -74,6 +82,13 @@ class _ChatDetailState extends State<ChatDetail> {
     final double messagePadding = isSmallScreen ? 8 : 16;
     final double messageSpacing = isSmallScreen ? 4 : 8;
 
+    // 获取当前聊天信息
+    final chats = _messageService.getAllChats();
+    final currentChat = chats.firstWhere(
+      (chat) => chat.chatId == widget.chatId,
+      orElse: () => throw Exception('Chat not found'),
+    );
+
     return Scaffold(
       appBar: AppBar(
         leading: MediaQuery.of(context).size.width <= 800
@@ -82,7 +97,7 @@ class _ChatDetailState extends State<ChatDetail> {
                 onPressed: () => Navigator.pop(context),
               )
             : null,
-        title: const Text('张三'),
+        title: Text(currentChat.name),
         actions: [
           IconButton(
             icon: const Icon(Icons.more_horiz),
