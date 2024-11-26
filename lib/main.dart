@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:lanmsg/config/theme.dart';
 import 'package:lanmsg/gen/strings.g.dart';
+import 'package:lanmsg/models/message.dart';
+import 'package:lanmsg/services/message_service.dart';
 import 'package:lanmsg/utils/platform_utils.dart';
+import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'screens/home_screen.dart';
@@ -11,14 +15,27 @@ import 'config/settings.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // 初始化Hive
+  await Hive.initFlutter();
+  Hive.registerAdapter(MessageAdapter());
+
+  final messageService = MessageService();
+  await messageService.init();
+
+  // 生成一些模拟数据
+  await messageService.generateSimulatedMessages('chat1', count: 20);
+
   if (PlatformUtils.isDesktop()) {
     await windowManager.ensureInitialized();
 
     WindowOptions windowOptions = WindowOptions(
       // size: Size(1024, 768),
-      // minimumSize: Size(800, 600),
-      title: t.app_name,
+      // minimumSize: const Size(800, 600),
+      backgroundColor: Colors.transparent,
+      skipTaskbar: false,
       center: true,
+      title: t.app_name,
+      titleBarStyle: TitleBarStyle.normal,
     );
 
     await windowManager.waitUntilReadyToShow(windowOptions);
@@ -31,10 +48,15 @@ void main() async {
     }
 
     await windowManager.show();
+    await windowManager.focus();
   }
-
   LocaleSettings.useDeviceLocale();
-  runApp(TranslationProvider(child: const MyApp()));
+  runApp(
+    Provider<MessageService>.value(
+      value: messageService,
+      child: TranslationProvider(child: const MyApp()),
+    ),
+  );
 }
 
 class MyApp extends StatelessWidget {

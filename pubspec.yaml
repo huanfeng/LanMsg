@@ -16,18 +16,21 @@ dependencies:
   provider: ^6.1.1
   intl: ^0.19.0
   cached_network_image: ^3.4.0
-  slang: 4.2.1
-  slang_flutter: 4.2.0
+  slang: ^4.2.1
+  slang_flutter: ^4.2.0
   shared_preferences: ^2.2.2
   window_manager: ^0.3.8
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+  path_provider: ^2.1.2
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-
   flutter_lints: ^5.0.0
-  # build_runner: 2.4.13
-  slang_build_runner: 4.2.0
+  slang_build_runner: ^4.2.0
+  hive_generator: ^2.0.1
+  build_runner: ^2.4.8
 
 flutter:
   uses-material-design: true
