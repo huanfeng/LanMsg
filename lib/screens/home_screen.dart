@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
 import '../widgets/chat_list.dart';
 import '../widgets/chat_detail.dart';
 import '../widgets/navigation_bar.dart';
+import '../config/settings.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -10,9 +12,27 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WindowListener {
   int _selectedIndex = 0;
   String? _selectedChatId;
+
+  @override
+  void initState() {
+    windowManager.addListener(this);
+    super.initState();
+  }
+
+  @override
+  void dispose() {
+    windowManager.removeListener(this);
+    super.dispose();
+  }
+
+  @override
+  void onWindowResized() async {
+    final size = await windowManager.getSize();
+    await SettingsService.saveWindowSize(size);
+  }
 
   void _onNavigationItemSelected(int index) {
     setState(() {

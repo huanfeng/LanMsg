@@ -2,11 +2,37 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:lanmsg/config/theme.dart';
 import 'package:lanmsg/gen/strings.g.dart';
+import 'package:lanmsg/utils/platform_utils.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'screens/home_screen.dart';
+import 'config/settings.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  if (PlatformUtils.isDesktop()) {
+    await windowManager.ensureInitialized();
+
+    WindowOptions windowOptions = WindowOptions(
+      // size: Size(1024, 768),
+      // minimumSize: Size(800, 600),
+      title: t.app_name,
+      center: true,
+    );
+
+    await windowManager.waitUntilReadyToShow(windowOptions);
+    await SettingsService.init();
+
+    // 恢复上次保存的窗口大小
+    final savedSize = SettingsService.getWindowSize();
+    if (savedSize != null) {
+      await windowManager.setSize(savedSize);
+    }
+
+    await windowManager.show();
+  }
+
   LocaleSettings.useDeviceLocale();
   runApp(TranslationProvider(child: const MyApp()));
 }

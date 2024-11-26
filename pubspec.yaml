@@ -18,6 +18,8 @@ dependencies:
   cached_network_image: ^3.4.0
   slang: 4.2.1
   slang_flutter: 4.2.0
+  shared_preferences: ^2.2.2
+  window_manager: ^0.3.8
 
 dev_dependencies:
   flutter_test:
