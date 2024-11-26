@@ -15,9 +15,29 @@ void main() async {
 
   final messageService = MessageService();
   await messageService.init();
+  // await messageService.clearMessages(); // 清理旧数据
 
   // 生成一些模拟数据
-  await messageService.generateSimulatedMessages('chat1', count: 20);
+  await Future.wait([
+    messageService.generateSimulatedMessages(
+      'chat1',
+      count: 20,
+      name: '张三',
+      avatar: 'https://via.placeholder.com/50?text=张三',
+    ),
+    messageService.generateSimulatedMessages(
+      'chat2',
+      count: 15,
+      name: '李四',
+      avatar: 'https://via.placeholder.com/50?text=李四',
+    ),
+    messageService.generateSimulatedMessages(
+      'chat3',
+      count: 10,
+      name: '王五',
+      avatar: 'https://via.placeholder.com/50?text=王五',
+    ),
+  ]);
 
   if (PlatformUtils.isDesktop()) {
     await windowManager.ensureInitialized();

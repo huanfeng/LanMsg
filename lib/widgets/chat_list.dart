@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
-import '../models/chat.dart';
+import 'package:provider/provider.dart';
+
+import '../services/message_service.dart';
 import 'chat_detail.dart';
 
 class ChatList extends StatelessWidget {
@@ -30,7 +32,6 @@ class ChatList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
-    // 根据屏幕宽度调整尺寸
     final screenWidth = MediaQuery.of(context).size.width;
     final isSmallScreen = screenWidth < 600;
 
@@ -38,26 +39,8 @@ class ChatList extends StatelessWidget {
     final double horizontalPadding = isSmallScreen ? 8 : 16;
     final double verticalPadding = isSmallScreen ? 4 : 8;
 
-    // 模拟聊天数据
-    final chats = [
-      Chat(
-        id: '1',
-        name: '张三',
-        lastMessage: '你好，在吗？',
-        lastMessageTime: DateTime.now().subtract(const Duration(minutes: 5)),
-        avatar: 'https://via.placeholder.com/50',
-        unreadCount: 2,
-      ),
-      Chat(
-        id: '2',
-        name: '李四',
-        lastMessage: '下午开会记得准时',
-        lastMessageTime: DateTime.now().subtract(const Duration(hours: 1)),
-        avatar: 'https://via.placeholder.com/50',
-        unreadCount: 0,
-      ),
-      // 添加更多模拟数据...
-    ];
+    final messageService = context.watch<MessageService>();
+    final chats = messageService.getAllChats();
 
     return Column(
       children: [
@@ -78,16 +61,16 @@ class ChatList extends StatelessWidget {
             itemCount: chats.length,
             itemBuilder: (context, index) {
               final chat = chats[index];
-              final isSelected = chat.id == selectedChatId;
+              final isSelected = chat.chatId == selectedChatId;
 
               return InkWell(
                 onTap: () {
-                  onChatSelected(chat.id);
+                  onChatSelected(chat.chatId);
                   if (MediaQuery.of(context).size.width <= 800) {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (context) => ChatDetail(chatId: chat.id),
+                        builder: (context) => ChatDetail(chatId: chat.chatId),
                       ),
                     );
                   }
