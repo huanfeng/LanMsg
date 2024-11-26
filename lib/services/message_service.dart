@@ -1,38 +1,41 @@
 import 'dart:io';
 import 'dart:math';
 
-import 'package:hive/hive.dart';
 import 'package:lanmsg/config/config.dart';
 import 'package:lanmsg/models/message.dart';
+import 'package:lanmsg/objectbox.g.dart';
 import 'package:path/path.dart' as path;
 
 class MessageService {
-  static const String _boxName = 'messages';
-  late Box<Message> _messageBox;
+  late final Store _store;
+  late final Box<Message> _messageBox;
 
   Future<void> init() async {
-    _messageBox = await Hive.openBox<Message>(_boxName);
-
-    // 打印存储位置
-    final location = await Config.getHiveStorageLocation();
-    print('Hive storage location: $location');
+    final docsDir = await Config.getStorageLocation();
+    final dir = Directory(docsDir);
+    if (!dir.existsSync()) {
+      dir.createSync(recursive: true);
+    }
+    _store = await openStore(directory: path.join(docsDir, 'db'));
+    _messageBox = _store.box<Message>();
   }
 
   Future<void> saveMessage(Message message) async {
-    await _messageBox.put(message.id, message);
+    _messageBox.put(message);
   }
 
-  Future<List<Message>> getMessagesForChat(String chatId) async {
-    return _messageBox.values
-        .where((message) => message.chatId == chatId)
-        .toList();
+  List<Message> getMessagesForChat(String chatId) {
+    return _messageBox.query(Message_.chatId.equals(chatId)).build().find();
   }
 
   Future<void> markAsRead(String messageId) async {
-    final message = _messageBox.get(messageId);
+    final message = _messageBox
+        .query(Message_.messageId.equals(messageId))
+        .build()
+        .findFirst();
     if (message != null) {
       final updatedMessage = message.copyWith(isRead: true);
-      await _messageBox.put(messageId, updatedMessage);
+      _messageBox.put(updatedMessage);
     }
   }
 
@@ -49,64 +52,23 @@ class MessageService {
       '要一起出去玩吗？',
       '好的，没问题',
       '改天再聊',
-      '晚安',
-      '早上好',
-      '中午吃什么？',
     ];
-
-    final now = DateTime.now();
 
     for (var i = 0; i < count; i++) {
       final message = Message(
-        id: 'msg_${DateTime.now().millisecondsSinceEpoch}_$i',
+        messageId:
+            DateTime.now().millisecondsSinceEpoch.toString() + i.toString(),
         chatId: chatId,
-        senderId: senders[random.nextInt(2)],
+        senderId: senders[random.nextInt(senders.length)],
         content: messages[random.nextInt(messages.length)],
-        timestamp: now.subtract(Duration(minutes: random.nextInt(60))),
-        isRead: random.nextBool(),
+        timestamp:
+            DateTime.now().subtract(Duration(minutes: random.nextInt(60))),
       );
-
       await saveMessage(message);
     }
   }
 
-  Future<void> clearMessages() async {
-    await _messageBox.clear();
-  }
-
-  // 获取数据库大小
-  Future<String> getDatabaseSize() async {
-    final storageDir = await Config.getHiveStorageLocation();
-    final file = File(path.join(storageDir, '$_boxName.hive'));
-    if (await file.exists()) {
-      final bytes = await file.length();
-      if (bytes < 1024) {
-        return '$bytes B';
-      } else if (bytes < 1024 * 1024) {
-        return '${(bytes / 1024).toStringAsFixed(2)} KB';
-      } else {
-        return '${(bytes / (1024 * 1024)).toStringAsFixed(2)} MB';
-      }
-    }
-    return '0 B';
-  }
-
-  // 备份数据
-  Future<String> backupDatabase() async {
-    final storageDir = await Config.getHiveStorageLocation();
-    final sourceFile = File(path.join(storageDir, '$_boxName.hive'));
-    final backupFile = File(path.join(storageDir, 'backups',
-        '${_boxName}_backup_${DateTime.now().millisecondsSinceEpoch}.hive'));
-
-    if (await sourceFile.exists()) {
-      // 确保备份目录存在
-      final backupDir = Directory(path.dirname(backupFile.path));
-      if (!await backupDir.exists()) {
-        await backupDir.create(recursive: true);
-      }
-      await sourceFile.copy(backupFile.path);
-      return backupFile.path;
-    }
-    throw Exception('Database file not found');
+  void dispose() {
+    _store.close();
   }
 }

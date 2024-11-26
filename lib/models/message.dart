@@ -1,29 +1,30 @@
-import 'package:hive/hive.dart';
+import 'package:objectbox/objectbox.dart';
 
-part 'message.g.dart';
+@Entity()
+class Message {
+  @Id()
+  int id = 0;
 
-@HiveType(typeId: 0)
-class Message extends HiveObject {
-  @HiveField(0)
-  final String id;
+  @Property()
+  final String messageId;
 
-  @HiveField(1)
+  @Property()
   final String chatId;
 
-  @HiveField(2)
+  @Property()
   final String senderId;
 
-  @HiveField(3)
+  @Property()
   final String content;
 
-  @HiveField(4)
+  @Property()
   final DateTime timestamp;
 
-  @HiveField(5)
+  @Property()
   final bool isRead;
 
   Message({
-    required this.id,
+    required this.messageId,
     required this.chatId,
     required this.senderId,
     required this.content,
@@ -32,7 +33,7 @@ class Message extends HiveObject {
   });
 
   Message copyWith({
-    String? id,
+    String? messageId,
     String? chatId,
     String? senderId,
     String? content,
@@ -40,7 +41,7 @@ class Message extends HiveObject {
     bool? isRead,
   }) {
     return Message(
-      id: id ?? this.id,
+      messageId: messageId ?? this.messageId,
       chatId: chatId ?? this.chatId,
       senderId: senderId ?? this.senderId,
       content: content ?? this.content,

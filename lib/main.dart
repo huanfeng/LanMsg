@@ -1,12 +1,7 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'package:hive_flutter/hive_flutter.dart';
-import 'package:lanmsg/config/config.dart';
 import 'package:lanmsg/config/theme.dart';
 import 'package:lanmsg/gen/strings.g.dart';
-import 'package:lanmsg/models/message.dart';
 import 'package:lanmsg/services/message_service.dart';
 import 'package:lanmsg/utils/platform_utils.dart';
 import 'package:provider/provider.dart';
@@ -17,14 +12,6 @@ import 'screens/home_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // 初始化Hive
-  final hiveDir = Directory(await Config.getHiveStorageLocation());
-  if (!await hiveDir.exists()) {
-    await hiveDir.create(recursive: true);
-  }
-  await Hive.initFlutter(hiveDir.path);
-  Hive.registerAdapter(MessageAdapter());
 
   final messageService = MessageService();
   await messageService.init();

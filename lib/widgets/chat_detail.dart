@@ -29,8 +29,8 @@ class _ChatDetailState extends State<ChatDetail> {
     _loadMessages();
   }
 
-  Future<void> _loadMessages() async {
-    final messages = await _messageService.getMessagesForChat(widget.chatId);
+  void _loadMessages() {
+    final messages = _messageService.getMessagesForChat(widget.chatId);
     setState(() {
       _messages = messages;
     });
@@ -52,17 +52,17 @@ class _ChatDetailState extends State<ChatDetail> {
     if (content.isEmpty) return;
 
     final message = Message(
-      id: 'msg_${DateTime.now().millisecondsSinceEpoch}',
+      messageId: DateTime.now().millisecondsSinceEpoch.toString(),
       chatId: widget.chatId,
       senderId: 'user1', // 当前用户ID
       content: content,
       timestamp: DateTime.now(),
-      isRead: true,
+      isRead: false,
     );
 
     await _messageService.saveMessage(message);
     _messageController.clear();
-    await _loadMessages();
+    _loadMessages();
   }
 
   @override
