@@ -1,26 +1,9 @@
-import 'package:objectbox/objectbox.dart';
-
-@Entity()
 class Message {
-  @Id()
-  int id = 0;
-
-  @Property()
   final String messageId;
-
-  @Property()
   final String chatId;
-
-  @Property()
   final String senderId;
-
-  @Property()
   final String content;
-
-  @Property()
   final DateTime timestamp;
-
-  @Property()
   final bool isRead;
 
   Message({
@@ -49,4 +32,22 @@ class Message {
       isRead: isRead ?? this.isRead,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'messageId': messageId,
+        'chatId': chatId,
+        'senderId': senderId,
+        'content': content,
+        'timestamp': timestamp.toIso8601String(),
+        'isRead': isRead,
+      };
+
+  factory Message.fromJson(Map<String, dynamic> json) => Message(
+        messageId: json['messageId'] as String,
+        chatId: json['chatId'] as String,
+        senderId: json['senderId'] as String,
+        content: json['content'] as String,
+        timestamp: DateTime.parse(json['timestamp'] as String),
+        isRead: json['isRead'] as bool,
+      );
 }

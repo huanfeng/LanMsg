@@ -1,41 +1,69 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:lanmsg/config/config.dart';
 import 'package:lanmsg/models/message.dart';
 import 'package:lanmsg/models/chat.dart';
-import 'package:lanmsg/objectbox.g.dart';
 import 'package:path/path.dart' as path;
 
 class MessageService {
-  late final Store _store;
-  late final Box<Message> _messageBox;
-  late final Box<Chat> _chatBox;
+  late final String _dataDir;
+  late final File _chatsFile;
+  late final File _messagesFile;
+  List<Chat> _chats = [];
+  List<Message> _messages = [];
 
   Future<void> init() async {
-    final docsDir = await Config.getStorageLocation();
-    final dir = Directory(docsDir);
-    if (!dir.existsSync()) {
-      dir.createSync(recursive: true);
-    }
-    _store = await openStore(directory: path.join(docsDir, 'db'));
-    _messageBox = _store.box<Message>();
-    _chatBox = _store.box<Chat>();
-    await clearAllData(); // 在初始化时调用清理数据的方法
+    _dataDir = await Config.getStorageLocation();
+    _chatsFile = File(path.join(_dataDir, 'chats.json'));
+    _messagesFile = File(path.join(_dataDir, 'messages.json'));
+    await _loadData();
   }
 
-  // 清理所有数据
+  Future<void> _loadData() async {
+    try {
+      if (await _chatsFile.exists()) {
+        final chatsJson = await _chatsFile.readAsString();
+        final chatsList = jsonDecode(chatsJson) as List;
+        _chats = chatsList.map((e) => Chat.fromJson(e)).toList();
+      }
+
+      if (await _messagesFile.exists()) {
+        final messagesJson = await _messagesFile.readAsString();
+        final messagesList = jsonDecode(messagesJson) as List;
+        _messages = messagesList.map((e) => Message.fromJson(e)).toList();
+      }
+    } catch (e) {
+      print('Error loading data: $e');
+      // 如果加载失败，使用空列表
+      _chats = [];
+      _messages = [];
+    }
+  }
+
+  Future<void> _saveData() async {
+    try {
+      await _chatsFile.writeAsString(jsonEncode(_chats.map((e) => e.toJson()).toList()));
+      await _messagesFile.writeAsString(jsonEncode(_messages.map((e) => e.toJson()).toList()));
+    } catch (e) {
+      print('Error saving data: $e');
+    }
+  }
+
   Future<void> clearAllData() async {
-    _messageBox.removeAll();
-    _chatBox.removeAll();
+    _chats = [];
+    _messages = [];
+    await _saveData();
   }
 
   Future<void> saveMessage(Message message) async {
-    // 更新或创建聊天
-    final chat =
-        _chatBox.query(Chat_.chatId.equals(message.chatId)).build().findFirst();
+    _messages.add(message);
 
-    if (chat != null) {
+    // 更新或创建聊天
+    final chatIndex = _chats.indexWhere((chat) => chat.chatId == message.chatId);
+    if (chatIndex != -1) {
+      final chat = _chats[chatIndex];
       final updatedChat = chat.copyWith(
         lastMessage: message.content,
         lastMessageTime: message.timestamp,
@@ -43,44 +71,42 @@ class MessageService {
             ? chat.unreadCount + 1
             : chat.unreadCount,
       );
-      _chatBox.put(updatedChat);
+      _chats[chatIndex] = updatedChat;
     }
+
+    await _saveData();
   }
 
   List<Message> getMessagesForChat(String chatId) {
-    return _messageBox
-        .query(Message_.chatId.equals(chatId))
-        .order(Message_.timestamp)
-        .build()
-        .find();
+    return _messages
+        .where((msg) => msg.chatId == chatId)
+        .toList()
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
   }
 
   List<Chat> getAllChats() {
-    return _chatBox
-        .query()
-        .order(Chat_.lastMessageTime, flags: Order.descending)
-        .build()
-        .find();
+    return _chats
+      ..sort((a, b) => b.lastMessageTime.compareTo(a.lastMessageTime));
   }
 
   Future<void> markAsRead(String messageId) async {
-    final message = _messageBox
-        .query(Message_.messageId.equals(messageId))
-        .build()
-        .findFirst();
-    if (message != null) {
+    final messageIndex = _messages.indexWhere((msg) => msg.messageId == messageId);
+    if (messageIndex != -1) {
+      final message = _messages[messageIndex];
       final updatedMessage = message.copyWith(isRead: true);
-      _messageBox.put(updatedMessage);
+      _messages[messageIndex] = updatedMessage;
 
       // 更新聊天的未读消息数
-      final chat = _chatBox
-          .query(Chat_.chatId.equals(message.chatId))
-          .build()
-          .findFirst();
-      if (chat != null && chat.unreadCount > 0) {
-        final updatedChat = chat.copyWith(unreadCount: chat.unreadCount - 1);
-        _chatBox.put(updatedChat);
+      final chatIndex = _chats.indexWhere((chat) => chat.chatId == message.chatId);
+      if (chatIndex != -1) {
+        final chat = _chats[chatIndex];
+        if (chat.unreadCount > 0) {
+          final updatedChat = chat.copyWith(unreadCount: chat.unreadCount - 1);
+          _chats[chatIndex] = updatedChat;
+        }
       }
+
+      await _saveData();
     }
   }
 
@@ -104,11 +130,11 @@ class MessageService {
     ];
 
     // 检查聊天是否已存在
-    var chat = _chatBox.query(Chat_.chatId.equals(chatId)).build().findFirst();
-
+    var chatIndex = _chats.indexWhere((chat) => chat.chatId == chatId);
+    
     // 如果聊天不存在，创建新的聊天
-    if (chat == null) {
-      chat = Chat(
+    if (chatIndex == -1) {
+      final chat = Chat(
         chatId: chatId,
         name: name ?? '联系人 $chatId',
         lastMessage: '',
@@ -116,7 +142,8 @@ class MessageService {
         avatar: avatar ?? 'https://via.placeholder.com/50',
         unreadCount: 0,
       );
-      _chatBox.put(chat);
+      _chats.add(chat);
+      chatIndex = _chats.length - 1;
     }
 
     final baseTime = DateTime.now();
@@ -126,8 +153,7 @@ class MessageService {
         chatId: chatId,
         senderId: senders[random.nextInt(senders.length)],
         content: messages[random.nextInt(messages.length)],
-        timestamp:
-            baseTime.subtract(Duration(minutes: i * 5 + random.nextInt(5))),
+        timestamp: baseTime.subtract(Duration(minutes: i * 5 + random.nextInt(5))),
       );
       try {
         await saveMessage(message);
@@ -138,6 +164,6 @@ class MessageService {
   }
 
   void dispose() {
-    _store.close();
+    // No need to close the store as we are not using ObjectBox anymore
   }
 }
