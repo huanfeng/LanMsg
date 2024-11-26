@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
 import '../widgets/chat_list.dart';
 import '../widgets/chat_detail.dart';
 import '../widgets/navigation_bar.dart';
@@ -62,7 +61,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Text(
                     '选择一个聊天',
                     style: TextStyle(
-                      fontSize: 16.sp,
+                      fontSize: 16,
                       color: Colors.grey,
                     ),
                   ),

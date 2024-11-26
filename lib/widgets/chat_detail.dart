@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 class ChatDetail extends StatefulWidget {
   final String chatId;
@@ -16,41 +15,28 @@ class ChatDetail extends StatefulWidget {
 class _ChatDetailState extends State<ChatDetail> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  final List<ChatMessage> _messages = [];
 
-  @override
-  void initState() {
-    super.initState();
-    // 模拟加载消息历史
-    _messages.addAll([
-      ChatMessage(
-        content: '你好，在吗？',
-        isMe: false,
-        timestamp: DateTime.now().subtract(const Duration(minutes: 5)),
-      ),
-      ChatMessage(
-        content: '在的，什么事？',
-        isMe: true,
-        timestamp: DateTime.now().subtract(const Duration(minutes: 4)),
-      ),
-      // 添加更多模拟消息...
-    ]);
-  }
-
-  @override
-  void dispose() {
-    _messageController.dispose();
-    _scrollController.dispose();
-    super.dispose();
-  }
+  final List<ChatMessage> _messages = [
+    ChatMessage(
+      content: '你好，在吗？',
+      isMe: false,
+      timestamp: DateTime.now().subtract(const Duration(minutes: 5)),
+    ),
+    ChatMessage(
+      content: '在的，什么事？',
+      isMe: true,
+      timestamp: DateTime.now().subtract(const Duration(minutes: 4)),
+    ),
+  ];
 
   void _sendMessage() {
-    if (_messageController.text.trim().isEmpty) return;
+    final content = _messageController.text.trim();
+    if (content.isEmpty) return;
 
     setState(() {
       _messages.add(
         ChatMessage(
-          content: _messageController.text,
+          content: content,
           isMe: true,
           timestamp: DateTime.now(),
         ),
@@ -58,23 +44,23 @@ class _ChatDetailState extends State<ChatDetail> {
     });
 
     _messageController.clear();
-    _scrollToBottom();
-  }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
-    });
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isSmallScreen = screenWidth < 600;
+
+    final double messagePadding = isSmallScreen ? 8 : 16;
+    final double messageSpacing = isSmallScreen ? 4 : 8;
+    final double bubbleRadius = isSmallScreen ? 12 : 16;
+
     return Scaffold(
       appBar: AppBar(
         leading: MediaQuery.of(context).size.width <= 800
@@ -98,16 +84,25 @@ class _ChatDetailState extends State<ChatDetail> {
           Expanded(
             child: ListView.builder(
               controller: _scrollController,
-              padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 8.h),
+              padding: EdgeInsets.symmetric(
+                horizontal: messagePadding,
+                vertical: messageSpacing,
+              ),
               itemCount: _messages.length,
               itemBuilder: (context, index) {
                 final message = _messages[index];
-                return _MessageBubble(message: message);
+                return _MessageBubble(
+                  message: message,
+                  textTheme: textTheme,
+                  bubbleRadius: bubbleRadius,
+                  messagePadding: messagePadding,
+                  messageSpacing: messageSpacing,
+                );
               },
             ),
           ),
           Container(
-            padding: EdgeInsets.all(8.w),
+            padding: EdgeInsets.all(messagePadding),
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.surface,
               boxShadow: [
@@ -130,17 +125,23 @@ class _ChatDetailState extends State<ChatDetail> {
                   Expanded(
                     child: TextField(
                       controller: _messageController,
+                      style: textTheme.bodyMedium,
                       decoration: InputDecoration(
                         hintText: '输入消息...',
+                        hintStyle: textTheme.bodyMedium?.copyWith(
+                          color: Colors.grey,
+                        ),
                         border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(20.r),
+                          borderRadius: BorderRadius.circular(bubbleRadius),
                           borderSide: BorderSide.none,
                         ),
                         filled: true,
-                        fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+                        fillColor: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHighest,
                         contentPadding: EdgeInsets.symmetric(
-                          horizontal: 16.w,
-                          vertical: 8.h,
+                          horizontal: messagePadding,
+                          vertical: messageSpacing,
                         ),
                       ),
                       maxLines: null,
@@ -148,7 +149,7 @@ class _ChatDetailState extends State<ChatDetail> {
                       onSubmitted: (_) => _sendMessage(),
                     ),
                   ),
-                  SizedBox(width: 8.w),
+                  const SizedBox(width: 8),
                   IconButton(
                     icon: const Icon(Icons.send),
                     onPressed: _sendMessage,
@@ -177,9 +178,17 @@ class ChatMessage {
 
 class _MessageBubble extends StatelessWidget {
   final ChatMessage message;
+  final TextTheme textTheme;
+  final double bubbleRadius;
+  final double messagePadding;
+  final double messageSpacing;
 
   const _MessageBubble({
     required this.message,
+    required this.textTheme,
+    required this.bubbleRadius,
+    required this.messagePadding,
+    required this.messageSpacing,
   });
 
   @override
@@ -188,22 +197,24 @@ class _MessageBubble extends StatelessWidget {
       alignment: message.isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         margin: EdgeInsets.only(
-          left: message.isMe ? 64.w : 0,
-          right: message.isMe ? 0 : 64.w,
-          bottom: 8.h,
+          left: message.isMe ? 64 : 0,
+          right: message.isMe ? 0 : 64,
+          bottom: messageSpacing,
         ),
-        padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 10.h),
+        padding: EdgeInsets.symmetric(
+          horizontal: messagePadding,
+          vertical: messageSpacing,
+        ),
         decoration: BoxDecoration(
           color: message.isMe
               ? Theme.of(context).colorScheme.primary
               : Theme.of(context).colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(16.r),
+          borderRadius: BorderRadius.circular(bubbleRadius),
         ),
         child: Text(
           message.content,
-          style: TextStyle(
+          style: textTheme.bodyMedium?.copyWith(
             color: message.isMe ? Colors.white : null,
-            fontSize: 13.sp,
           ),
         ),
       ),

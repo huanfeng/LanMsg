@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'screens/home_screen.dart';
 
 void main() {
@@ -11,23 +10,24 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ScreenUtilInit(
-      designSize: const Size(360, 690),
-      minTextAdapt: true,
-      splitScreenMode: true,
-      builder: (context, child) {
-        return MaterialApp(
-          debugShowCheckedModeBanner: false,
-          title: 'LanMsg',
-          theme: ThemeData(
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFF07C160),
-            ),
-            useMaterial3: true,
-          ),
-          home: const HomeScreen(),
-        );
-      },
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'LanMsg',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF07C160),
+        ),
+        useMaterial3: true,
+        textTheme: const TextTheme(
+          bodyLarge: TextStyle(fontSize: 14),
+          bodyMedium: TextStyle(fontSize: 13),
+          bodySmall: TextStyle(fontSize: 12),
+          labelLarge: TextStyle(fontSize: 14),
+          labelMedium: TextStyle(fontSize: 13),
+          labelSmall: TextStyle(fontSize: 12),
+        ),
+      ),
+      home: const HomeScreen(),
     );
   }
 }

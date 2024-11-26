@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_screenutil/flutter_screenutil.dart';
 import '../models/chat.dart';
 import 'chat_detail.dart';
 
@@ -13,8 +12,32 @@ class ChatList extends StatelessWidget {
     this.selectedChatId,
   });
 
+  String _formatTime(DateTime time) {
+    final now = DateTime.now();
+    final difference = now.difference(time);
+
+    if (difference.inMinutes < 60) {
+      return '${difference.inMinutes}分钟前';
+    } else if (difference.inHours < 24) {
+      return '${difference.inHours}小时前';
+    } else if (difference.inDays < 7) {
+      return '${difference.inDays}天前';
+    } else {
+      return '${time.month}-${time.day}';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    // 根据屏幕宽度调整尺寸
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isSmallScreen = screenWidth < 600;
+
+    final double avatarSize = isSmallScreen ? 40 : 44;
+    final double horizontalPadding = isSmallScreen ? 8 : 16;
+    final double verticalPadding = isSmallScreen ? 4 : 8;
+
     // 模拟聊天数据
     final chats = [
       Chat(
@@ -70,23 +93,27 @@ class ChatList extends StatelessWidget {
                   }
                 },
                 child: Container(
-                  color: isSelected ? Theme.of(context).colorScheme.primaryContainer : null,
+                  color: isSelected
+                      ? Theme.of(context).colorScheme.primaryContainer
+                      : null,
                   child: ListTile(
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: horizontalPadding,
+                      vertical: verticalPadding,
+                    ),
                     leading: CircleAvatar(
                       backgroundImage: NetworkImage(chat.avatar),
-                      radius: 20.r,
+                      radius: avatarSize / 2,
                     ),
                     title: Text(
                       chat.name,
-                      style: TextStyle(
-                        fontSize: 14.sp,
+                      style: textTheme.bodyLarge?.copyWith(
                         fontWeight: FontWeight.w500,
                       ),
                     ),
                     subtitle: Text(
                       chat.lastMessage,
-                      style: TextStyle(
-                        fontSize: 12.sp,
+                      style: textTheme.bodySmall?.copyWith(
                         color: Colors.grey[600],
                       ),
                       maxLines: 1,
@@ -98,27 +125,25 @@ class ChatList extends StatelessWidget {
                       children: [
                         Text(
                           _formatTime(chat.lastMessageTime),
-                          style: TextStyle(
-                            fontSize: 10.sp,
+                          style: textTheme.bodySmall?.copyWith(
                             color: Colors.grey,
                           ),
                         ),
                         if (chat.unreadCount > 0)
                           Container(
-                            margin: EdgeInsets.only(top: 4.h),
-                            padding: EdgeInsets.symmetric(
-                              horizontal: 6.w,
-                              vertical: 2.h,
+                            margin: const EdgeInsets.only(top: 4),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 2,
                             ),
                             decoration: BoxDecoration(
                               color: Theme.of(context).colorScheme.error,
-                              borderRadius: BorderRadius.circular(10.r),
+                              borderRadius: BorderRadius.circular(10),
                             ),
                             child: Text(
                               chat.unreadCount.toString(),
-                              style: TextStyle(
+                              style: textTheme.labelSmall?.copyWith(
                                 color: Colors.white,
-                                fontSize: 12.sp,
                               ),
                             ),
                           ),
@@ -132,20 +157,5 @@ class ChatList extends StatelessWidget {
         ),
       ],
     );
-  }
-
-  String _formatTime(DateTime time) {
-    final now = DateTime.now();
-    final difference = now.difference(time);
-
-    if (difference.inMinutes < 60) {
-      return '${difference.inMinutes}分钟前';
-    } else if (difference.inHours < 24) {
-      return '${difference.inHours}小时前';
-    } else if (difference.inDays < 7) {
-      return '${difference.inDays}天前';
-    } else {
-      return '${time.month}-${time.day}';
-    }
   }
 }
