@@ -18,3 +18,8 @@ bool checkPlatform(List<TargetPlatform> list) {
   }
   return false;
 }
+
+class PlatformUtils {
+  static bool isDesktop() =>
+      Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+}

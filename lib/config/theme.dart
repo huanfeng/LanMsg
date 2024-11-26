@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:lanmsg/gen/strings.g.dart';
-import 'package:lanmsg/utils/platform.dart';
+import 'package:lanmsg/utils/platform_utils.dart';
 
 ThemeData getTheme(Brightness brightness) {
   final String? fontFamily;
