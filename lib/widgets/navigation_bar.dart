@@ -42,6 +42,13 @@ class CustomNavigationBar extends StatelessWidget {
         selectedIndex: selectedIndex,
         onDestinationSelected: onItemSelected,
         labelType: NavigationRailLabelType.all,
+        // backgroundColor: Colors.white,
+        // selectedIconTheme: const IconThemeData(
+        //   color: Color(0xFF0084FF),
+        // ),
+        // unselectedIconTheme: const IconThemeData(
+        //   color: Color(0xFF666666),
+        // ),
         destinations: items
             .map((item) => NavigationRailDestination(
                   icon: item.icon,

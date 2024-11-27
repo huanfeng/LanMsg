@@ -45,7 +45,7 @@ class _MessageBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    
+
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -79,8 +79,8 @@ class _MessageBubble extends StatelessWidget {
             Text(
               DateFormat('HH:mm').format(message.timestamp),
               style: TextStyle(
-                color: isMe 
-                    ? Colors.white.withOpacity(0.7) 
+                color: isMe
+                    ? Colors.white.withOpacity(0.7)
                     : theme.textTheme.bodySmall?.color,
                 fontSize: 12,
               ),

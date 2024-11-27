@@ -20,8 +20,11 @@ ThemeData getTheme(Brightness brightness) {
   return ThemeData(
     brightness: brightness,
     colorScheme: ColorScheme.fromSeed(
-      seedColor: Colors.blue,
+      seedColor: const Color(0xFF0084FF),
+      brightness: brightness,
     ),
+    scaffoldBackgroundColor: Colors.white,
+    dividerColor: const Color(0xFFE6E6E6),
     textTheme: const TextTheme(
       bodyLarge: TextStyle(fontSize: 14),
       bodyMedium: TextStyle(fontSize: 13),
