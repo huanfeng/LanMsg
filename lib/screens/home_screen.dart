@@ -31,7 +31,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
   @override
   void onWindowResized() async {
     final size = await windowManager.getSize();
-    await SettingsService.saveWindowSize(size);
+    SettingsService.saveWindowSize(size);
   }
 
   void _onNavigationItemSelected(int index) {

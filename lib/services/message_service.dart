@@ -18,7 +18,7 @@ class MessageService {
     _dataDir = await Config.getStorageLocation();
     _chatsFile = File(path.join(_dataDir, 'chats.json'));
     _messagesFile = File(path.join(_dataDir, 'messages.json'));
-    await _loadData();
+    _loadData();
   }
 
   Future<void> _loadData() async {
@@ -44,8 +44,10 @@ class MessageService {
 
   Future<void> _saveData() async {
     try {
-      await _chatsFile.writeAsString(jsonEncode(_chats.map((e) => e.toJson()).toList()));
-      await _messagesFile.writeAsString(jsonEncode(_messages.map((e) => e.toJson()).toList()));
+      await _chatsFile
+          .writeAsString(jsonEncode(_chats.map((e) => e.toJson()).toList()));
+      await _messagesFile
+          .writeAsString(jsonEncode(_messages.map((e) => e.toJson()).toList()));
     } catch (e) {
       print('Error saving data: $e');
     }
@@ -61,7 +63,8 @@ class MessageService {
     _messages.add(message);
 
     // 更新或创建聊天
-    final chatIndex = _chats.indexWhere((chat) => chat.chatId == message.chatId);
+    final chatIndex =
+        _chats.indexWhere((chat) => chat.chatId == message.chatId);
     if (chatIndex != -1) {
       final chat = _chats[chatIndex];
       final updatedChat = chat.copyWith(
@@ -78,9 +81,7 @@ class MessageService {
   }
 
   List<Message> getMessagesForChat(String chatId) {
-    return _messages
-        .where((msg) => msg.chatId == chatId)
-        .toList()
+    return _messages.where((msg) => msg.chatId == chatId).toList()
       ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
   }
 
@@ -90,14 +91,16 @@ class MessageService {
   }
 
   Future<void> markAsRead(String messageId) async {
-    final messageIndex = _messages.indexWhere((msg) => msg.messageId == messageId);
+    final messageIndex =
+        _messages.indexWhere((msg) => msg.messageId == messageId);
     if (messageIndex != -1) {
       final message = _messages[messageIndex];
       final updatedMessage = message.copyWith(isRead: true);
       _messages[messageIndex] = updatedMessage;
 
       // 更新聊天的未读消息数
-      final chatIndex = _chats.indexWhere((chat) => chat.chatId == message.chatId);
+      final chatIndex =
+          _chats.indexWhere((chat) => chat.chatId == message.chatId);
       if (chatIndex != -1) {
         final chat = _chats[chatIndex];
         if (chat.unreadCount > 0) {
@@ -131,7 +134,7 @@ class MessageService {
 
     // 检查聊天是否已存在
     var chatIndex = _chats.indexWhere((chat) => chat.chatId == chatId);
-    
+
     // 如果聊天不存在，创建新的聊天
     if (chatIndex == -1) {
       final chat = Chat(
@@ -153,7 +156,8 @@ class MessageService {
         chatId: chatId,
         senderId: senders[random.nextInt(senders.length)],
         content: messages[random.nextInt(messages.length)],
-        timestamp: baseTime.subtract(Duration(minutes: i * 5 + random.nextInt(5))),
+        timestamp:
+            baseTime.subtract(Duration(minutes: i * 5 + random.nextInt(5))),
       );
       try {
         await saveMessage(message);

@@ -3,6 +3,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:lanmsg/config/theme.dart';
 import 'package:lanmsg/gen/strings.g.dart';
 import 'package:lanmsg/services/message_service.dart';
+import 'package:lanmsg/utils/log_utils.dart';
 import 'package:lanmsg/utils/platform_utils.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
@@ -13,57 +14,54 @@ import 'screens/home_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  LogUtils.initLogger();
+
   final messageService = MessageService();
   await messageService.init();
   // await messageService.clearMessages(); // 清理旧数据
 
   // 生成一些模拟数据
-  await Future.wait([
-    messageService.generateSimulatedMessages(
-      'chat1',
-      count: 20,
-      name: '张三',
-      avatar: 'https://via.placeholder.com/50?text=张三',
-    ),
-    messageService.generateSimulatedMessages(
-      'chat2',
-      count: 15,
-      name: '李四',
-      avatar: 'https://via.placeholder.com/50?text=李四',
-    ),
-    messageService.generateSimulatedMessages(
-      'chat3',
-      count: 10,
-      name: '王五',
-      avatar: 'https://via.placeholder.com/50?text=王五',
-    ),
-  ]);
+  // await Future.wait([
+  //   messageService.generateSimulatedMessages(
+  //     'chat1',
+  //     count: 20,
+  //     name: '张三',
+  //     avatar: 'https://via.placeholder.com/50?text=张三',
+  //   ),
+  //   messageService.generateSimulatedMessages(
+  //     'chat2',
+  //     count: 15,
+  //     name: '李四',
+  //     avatar: 'https://via.placeholder.com/50?text=李四',
+  //   ),
+  //   messageService.generateSimulatedMessages(
+  //     'chat3',
+  //     count: 10,
+  //     name: '王五',
+  //     avatar: 'https://via.placeholder.com/50?text=王五',
+  //   ),
+  // ]);
+
+  await SettingsService.init();
 
   if (PlatformUtils.isDesktop()) {
     await windowManager.ensureInitialized();
 
+    final windowSize = SettingsService.getWindowSize();
+
     WindowOptions windowOptions = WindowOptions(
-      // size: Size(1024, 768),
+      size: windowSize,
       // minimumSize: const Size(800, 600),
       backgroundColor: Colors.transparent,
       skipTaskbar: false,
-      center: true,
+      // center: true,
       title: t.app_name,
       titleBarStyle: TitleBarStyle.normal,
     );
 
-    await windowManager.waitUntilReadyToShow(windowOptions);
-    await SettingsService.init();
-
-    // 恢复上次保存的窗口大小
-    final savedSize = SettingsService.getWindowSize();
-    if (savedSize != null) {
-      await windowManager.setSize(savedSize);
-    }
-
-    await windowManager.show();
-    await windowManager.focus();
+    windowManager.waitUntilReadyToShow(windowOptions);
   }
+
   LocaleSettings.useDeviceLocale();
   runApp(
     Provider<MessageService>.value(
