@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-
+import '../models/chat.dart';
 import '../services/message_service.dart';
+import '../utils/avatar_utils.dart';
 import 'chat_detail.dart';
 
 class ChatList extends StatelessWidget {
@@ -84,9 +85,11 @@ class ChatList extends StatelessWidget {
                       horizontal: horizontalPadding,
                       vertical: verticalPadding,
                     ),
-                    leading: CircleAvatar(
-                      backgroundImage: NetworkImage(chat.avatar),
-                      radius: avatarSize / 2,
+                    leading: AvatarUtils.getAvatar(
+                      userId: chat.chatId,
+                      name: chat.name,
+                      avatarPath: chat.avatarPath,
+                      size: avatarSize,
                     ),
                     title: Text(
                       chat.name,
@@ -109,7 +112,7 @@ class ChatList extends StatelessWidget {
                         Text(
                           _formatTime(chat.lastMessageTime),
                           style: textTheme.bodySmall?.copyWith(
-                            color: Colors.grey,
+                            color: Colors.grey[600],
                           ),
                         ),
                         if (chat.unreadCount > 0)
@@ -120,7 +123,7 @@ class ChatList extends StatelessWidget {
                               vertical: 2,
                             ),
                             decoration: BoxDecoration(
-                              color: Theme.of(context).colorScheme.error,
+                              color: Theme.of(context).colorScheme.primary,
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Text(

@@ -3,7 +3,7 @@ class Chat {
   final String name;
   final String lastMessage;
   final DateTime lastMessageTime;
-  final String avatar;
+  final String? avatarPath; // 本地头像路径
   final int unreadCount;
 
   Chat({
@@ -11,7 +11,7 @@ class Chat {
     required this.name,
     required this.lastMessage,
     required this.lastMessageTime,
-    required this.avatar,
+    this.avatarPath,
     required this.unreadCount,
   });
 
@@ -20,7 +20,7 @@ class Chat {
     String? name,
     String? lastMessage,
     DateTime? lastMessageTime,
-    String? avatar,
+    String? avatarPath,
     int? unreadCount,
   }) {
     return Chat(
@@ -28,7 +28,7 @@ class Chat {
       name: name ?? this.name,
       lastMessage: lastMessage ?? this.lastMessage,
       lastMessageTime: lastMessageTime ?? this.lastMessageTime,
-      avatar: avatar ?? this.avatar,
+      avatarPath: avatarPath ?? this.avatarPath,
       unreadCount: unreadCount ?? this.unreadCount,
     );
   }
@@ -38,7 +38,7 @@ class Chat {
         'name': name,
         'lastMessage': lastMessage,
         'lastMessageTime': lastMessageTime.toIso8601String(),
-        'avatar': avatar,
+        'avatarPath': avatarPath,
         'unreadCount': unreadCount,
       };
 
@@ -47,7 +47,7 @@ class Chat {
         name: json['name'] as String,
         lastMessage: json['lastMessage'] as String,
         lastMessageTime: DateTime.parse(json['lastMessageTime'] as String),
-        avatar: json['avatar'] as String,
+        avatarPath: json['avatarPath'] as String?,
         unreadCount: json['unreadCount'] as int,
       );
 }

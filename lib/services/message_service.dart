@@ -142,7 +142,6 @@ class MessageService {
         name: name ?? '联系人 $chatId',
         lastMessage: '',
         lastMessageTime: DateTime.now(),
-        avatar: avatar ?? 'https://via.placeholder.com/50',
         unreadCount: 0,
       );
       _chats.add(chat);
