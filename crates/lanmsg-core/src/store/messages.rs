@@ -1,0 +1,474 @@
+// P1 核心骨架：消息存储（Task 6）。
+// MsgStateRow 存为小写字符串；envelope 存完整 CBOR；text 冗余存放 MsgBody::Text。
+// 注释中文，标识符英文。
+
+use lanmsg_proto::ids::{ConvId, DeviceId, MsgId};
+use lanmsg_proto::types::{Envelope, MsgBody, VersionVector};
+
+use crate::store::Store;
+
+/// 消息状态行，DB 中存为小写字符串。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MsgStateRow {
+    Sending,
+    Sent,
+    Delivered,
+    Read,
+    Failed,
+    Recalled,
+}
+
+impl MsgStateRow {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MsgStateRow::Sending => "sending",
+            MsgStateRow::Sent => "sent",
+            MsgStateRow::Delivered => "delivered",
+            MsgStateRow::Read => "read",
+            MsgStateRow::Failed => "failed",
+            MsgStateRow::Recalled => "recalled",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Result<Self, crate::store::StoreError> {
+        match s {
+            "sending" => Ok(MsgStateRow::Sending),
+            "sent" => Ok(MsgStateRow::Sent),
+            "delivered" => Ok(MsgStateRow::Delivered),
+            "read" => Ok(MsgStateRow::Read),
+            "failed" => Ok(MsgStateRow::Failed),
+            "recalled" => Ok(MsgStateRow::Recalled),
+            _ => Err(crate::store::StoreError::Codec(format!(
+                "未知消息状态: {s}"
+            ))),
+        }
+    }
+}
+
+/// 存储的消息。
+#[derive(Debug, Clone)]
+pub struct StoredMessage {
+    pub env: Envelope,
+    pub state: MsgStateRow,
+    pub received_at: i64,
+}
+
+impl Store {
+    /// 返回 (seq, conv_seq)：作者全局最大 seq+1、会话内最大 conv_seq+1（无记录为 1）。
+    pub fn next_seqs(
+        &self,
+        author: &DeviceId,
+        conv: &ConvId,
+    ) -> Result<(u64, u64), crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let seq: Option<i64> = conn.query_row(
+            "SELECT MAX(seq) FROM messages WHERE author = ?1",
+            rusqlite::params![author.to_hex()],
+            |r| r.get::<_, Option<i64>>(0),
+        )?;
+        let conv_seq: Option<i64> = conn.query_row(
+            "SELECT MAX(conv_seq) FROM messages WHERE conv_id = ?1 AND author = ?2",
+            rusqlite::params![conv.to_hex(), author.to_hex()],
+            |r| r.get::<_, Option<i64>>(0),
+        )?;
+        Ok((
+            (seq.unwrap_or(0) + 1) as u64,
+            (conv_seq.unwrap_or(0) + 1) as u64,
+        ))
+    }
+
+    /// INSERT OR IGNORE 插入信封，返回是否新插入；新插入时在同一事务内推进 version_vectors。
+    pub fn insert_envelope(
+        &self,
+        env: &Envelope,
+        state: MsgStateRow,
+        received_at: i64,
+    ) -> Result<bool, crate::store::StoreError> {
+        use rusqlite::OptionalExtension;
+        let mut conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let tx = conn.transaction()?;
+
+        let author_hex = env.id.author.to_hex();
+        let conv_hex = env.conv.to_hex();
+        let contiguous: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(contiguous), 0) FROM version_vectors WHERE conv_id = ?1 AND author = ?2",
+            rusqlite::params![conv_hex, author_hex],
+            |r| r.get(0),
+        ).optional()?.unwrap_or(0);
+
+        let text = match &env.body {
+            MsgBody::Text { text } => Some(text.clone()),
+            _ => None,
+        };
+        let envelope_bytes = lanmsg_proto::to_cbor(env);
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO messages(author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                author_hex,
+                env.id.seq as i64,
+                conv_hex,
+                env.conv_seq as i64,
+                env.hlc.millis,
+                env.hlc.counter as i64,
+                envelope_bytes,
+                state.as_str(),
+                received_at,
+                text,
+            ],
+        )? > 0;
+
+        if inserted && (env.conv_seq as i64) == contiguous + 1 {
+            let mut cont = env.conv_seq;
+            loop {
+                let exists: Option<i64> = tx.query_row(
+                    "SELECT 1 FROM messages WHERE conv_id = ?1 AND author = ?2 AND conv_seq = ?3",
+                    rusqlite::params![conv_hex, author_hex, (cont + 1) as i64],
+                    |r| r.get(0),
+                ).optional()?;
+                match exists {
+                    Some(_) => cont += 1,
+                    None => break,
+                }
+            }
+            tx.execute(
+                "INSERT INTO version_vectors(conv_id, author, contiguous) VALUES(?1, ?2, ?3)
+                 ON CONFLICT(conv_id, author) DO UPDATE SET contiguous = excluded.contiguous",
+                rusqlite::params![conv_hex, author_hex, cont as i64],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    /// 设置消息状态。
+    pub fn set_message_state(
+        &self,
+        id: &MsgId,
+        state: MsgStateRow,
+    ) -> Result<(), crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        conn.execute(
+            "UPDATE messages SET state = ?1 WHERE author = ?2 AND seq = ?3",
+            rusqlite::params![state.as_str(), id.author.to_hex(), id.seq as i64],
+        )?;
+        Ok(())
+    }
+
+    /// 查询单条消息。
+    pub fn get_message(
+        &self,
+        id: &MsgId,
+    ) -> Result<Option<StoredMessage>, crate::store::StoreError> {
+        use rusqlite::OptionalExtension;
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let row: Option<(String, i64, String, i64, i64, i64, Vec<u8>, String, i64, Option<String>)> = conn
+            .query_row(
+                "SELECT author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text
+                 FROM messages WHERE author = ?1 AND seq = ?2",
+                rusqlite::params![id.author.to_hex(), id.seq as i64],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            _author,
+            _seq,
+            _conv_hex,
+            _conv_seq,
+            _hlc_millis,
+            _hlc_counter,
+            envelope,
+            state,
+            received_at,
+            _text,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let env: Envelope = lanmsg_proto::from_cbor(&envelope)
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let state = MsgStateRow::from_str(&state)?;
+        Ok(Some(StoredMessage {
+            env,
+            state,
+            received_at,
+        }))
+    }
+
+    /// 列出会话消息：按 (hlc_millis, hlc_counter, author, seq) 降序取 limit 条，返回升序。
+    pub fn list_messages(
+        &self,
+        conv: &ConvId,
+        before: Option<&MsgId>,
+        limit: u32,
+    ) -> Result<Vec<StoredMessage>, crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let conv_hex = conv.to_hex();
+        let mut out: Vec<StoredMessage> = Vec::new();
+
+        match before {
+            Some(before_id) => {
+                use rusqlite::OptionalExtension;
+                let brow: Option<(i64, i64, String, i64)> = conn
+                    .query_row(
+                        "SELECT hlc_millis, hlc_counter, author, seq FROM messages WHERE author = ?1 AND seq = ?2",
+                        rusqlite::params![before_id.author.to_hex(), before_id.seq as i64],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .optional()?;
+                let Some((bmillis, bcounter, bauthor, bseq)) = brow else {
+                    return Ok(out);
+                };
+                let mut stmt = conn.prepare(
+                    "SELECT author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text
+                     FROM messages WHERE conv_id = ?1
+                       AND (hlc_millis < ?2 OR (hlc_millis = ?2 AND hlc_counter < ?3) OR (hlc_millis = ?2 AND hlc_counter = ?3 AND author < ?4) OR (hlc_millis = ?2 AND hlc_counter = ?3 AND author = ?4 AND seq < ?5))
+                     ORDER BY hlc_millis DESC, hlc_counter DESC, author DESC, seq DESC
+                     LIMIT ?6",
+                )?;
+                let rows = stmt.query_map(
+                    rusqlite::params![conv_hex, bmillis, bcounter, bauthor, bseq, limit as i64],
+                    stored_message_from_row,
+                )?;
+                for r in rows {
+                    out.push(r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?);
+                }
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text
+                     FROM messages WHERE conv_id = ?1
+                     ORDER BY hlc_millis DESC, hlc_counter DESC, author DESC, seq DESC
+                     LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(
+                    rusqlite::params![conv_hex, limit as i64],
+                    stored_message_from_row,
+                )?;
+                for r in rows {
+                    out.push(r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?);
+                }
+            }
+        }
+
+        out.reverse();
+        Ok(out)
+    }
+
+    /// 返回会话中该作者 conv_seq > after_conv_seq 的信封（升序）。
+    pub fn messages_after(
+        &self,
+        conv: &ConvId,
+        author: &DeviceId,
+        after_conv_seq: u64,
+        limit: u32,
+    ) -> Result<Vec<Envelope>, crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let conv_hex = conv.to_hex();
+        let author_hex = author.to_hex();
+        let mut stmt = conn.prepare(
+            "SELECT envelope FROM messages WHERE conv_id = ?1 AND author = ?2 AND conv_seq > ?3
+             ORDER BY conv_seq ASC LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![conv_hex, author_hex, after_conv_seq as i64, limit as i64],
+            |row| {
+                let bytes: Vec<u8> = row.get(0)?;
+                lanmsg_proto::from_cbor::<Envelope>(&bytes).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Blob,
+                        Box::new(e),
+                    )
+                })
+            },
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// 返回会话的版本向量。
+    pub fn version_vector(&self, conv: &ConvId) -> Result<VersionVector, crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let conv_hex = conv.to_hex();
+        let mut stmt =
+            conn.prepare("SELECT author, contiguous FROM version_vectors WHERE conv_id = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![conv_hex], |row| {
+            let author_hex: String = row.get(0)?;
+            let author = DeviceId::from_hex(&author_hex).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            let contiguous: i64 = row.get(1)?;
+            Ok((author, contiguous as u64))
+        })?;
+        let mut map = std::collections::BTreeMap::new();
+        for r in rows {
+            let (k, v) = r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+            map.insert(k, v);
+        }
+        Ok(VersionVector(map))
+    }
+}
+
+fn stored_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
+    let env_bytes: Vec<u8> = row.get(6)?;
+    let env: Envelope = lanmsg_proto::from_cbor(&env_bytes).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Blob, Box::new(e))
+    })?;
+    let state: String = row.get(7)?;
+    let state = MsgStateRow::from_str(&state)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    Ok(StoredMessage {
+        env,
+        state,
+        received_at: row.get(8)?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Store;
+
+    const CONV: ConvId = ConvId([1u8; 32]);
+    const AUTHOR: DeviceId = DeviceId([2u8; 32]);
+
+    fn store() -> Store {
+        Store::open_in_memory().unwrap()
+    }
+
+    fn env(seq: u64, conv_seq: u64) -> Envelope {
+        Envelope {
+            conv: CONV,
+            id: MsgId {
+                author: AUTHOR,
+                seq,
+            },
+            conv_seq,
+            hlc: lanmsg_proto::types::Hlc {
+                millis: seq as i64,
+                counter: 0,
+            },
+            body: MsgBody::Text { text: "x".into() },
+            enc: None,
+            sig: lanmsg_proto::types::Signature64([0u8; 64]),
+        }
+    }
+
+    #[test]
+    fn migrations_set_user_version() {
+        let s = store();
+        assert_eq!(s.schema_version().unwrap(), 1);
+    }
+
+    #[test]
+    fn insert_envelope_is_idempotent() {
+        let s = store();
+        let e = env(1, 1);
+        assert!(s.insert_envelope(&e, MsgStateRow::Sent, 0).unwrap());
+        assert!(!s.insert_envelope(&e, MsgStateRow::Sent, 0).unwrap());
+    }
+
+    #[test]
+    fn version_vector_tracks_contiguous_prefix_only() {
+        let s = store();
+        s.insert_envelope(&env(1, 1), MsgStateRow::Sent, 0).unwrap();
+        s.insert_envelope(&env(3, 3), MsgStateRow::Sent, 0).unwrap();
+        assert_eq!(s.version_vector(&CONV).unwrap().0[&AUTHOR], 1);
+        s.insert_envelope(&env(2, 2), MsgStateRow::Sent, 0).unwrap();
+        assert_eq!(s.version_vector(&CONV).unwrap().0[&AUTHOR], 3);
+    }
+
+    #[test]
+    fn list_messages_pages_backwards_in_ascending_order() {
+        let s = store();
+        for i in 1..=5 {
+            let e = env(i, i);
+            s.insert_envelope(&e, MsgStateRow::Sent, i.try_into().unwrap())
+                .unwrap();
+        }
+        let first = s.list_messages(&CONV, None, 2).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].env.conv_seq, 4);
+        assert_eq!(first[1].env.conv_seq, 5);
+        // 游标取页面最旧一条（升序首元素），下一页取严格更早且不重叠。
+        let before = first[0].env.id.clone();
+        let second = s.list_messages(&CONV, Some(&before), 2).unwrap();
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].env.conv_seq, 2);
+        assert_eq!(second[1].env.conv_seq, 3);
+    }
+
+    #[test]
+    fn next_seqs_starts_at_one_and_increments() {
+        let s = store();
+        assert_eq!(s.next_seqs(&AUTHOR, &CONV).unwrap(), (1, 1));
+        let e = env(1, 1);
+        s.insert_envelope(&e, MsgStateRow::Sent, 1).unwrap();
+        assert_eq!(s.next_seqs(&AUTHOR, &CONV).unwrap(), (2, 2));
+        let other = ConvId([3u8; 32]);
+        assert_eq!(s.next_seqs(&AUTHOR, &other).unwrap(), (2, 1));
+    }
+
+    #[test]
+    fn reopen_file_db_keeps_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        {
+            let s = Store::open(&path).unwrap();
+            let e = env(1, 1);
+            s.insert_envelope(&e, MsgStateRow::Sent, 1).unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert!(s.get_message(&env(1, 1).id).unwrap().is_some());
+    }
+
+    #[test]
+    fn messages_after_returns_ascending() {
+        let s = store();
+        for i in 1..=3 {
+            let e = env(i, i);
+            s.insert_envelope(&e, MsgStateRow::Sent, i.try_into().unwrap())
+                .unwrap();
+        }
+        let after = s.messages_after(&CONV, &AUTHOR, 1, 10).unwrap();
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0].conv_seq, 2);
+        assert_eq!(after[1].conv_seq, 3);
+    }
+}
