@@ -283,7 +283,12 @@ mod tests {
         tx_b.send_replace(Some(ann_b));
         let (_evt_a_tx, _evt_a_rx) = mpsc::channel(32);
         let (evt_b_tx, mut evt_b_rx) = mpsc::channel(32);
-        let _a = Discovery::spawn(DiscoveryMode::Memory(bus.clone()), a_device, rx_a, _evt_a_tx);
+        let _a = Discovery::spawn(
+            DiscoveryMode::Memory(bus.clone()),
+            a_device,
+            rx_a,
+            _evt_a_tx,
+        );
         let _b = Discovery::spawn(DiscoveryMode::Memory(bus), b_device, rx_b, evt_b_tx);
         let evt = tokio::time::timeout(Duration::from_secs(5), evt_b_rx.recv())
             .await
