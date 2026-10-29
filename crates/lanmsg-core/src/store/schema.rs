@@ -25,6 +25,3 @@ CREATE TABLE version_vectors(conv_id BLOB NOT NULL, author BLOB NOT NULL,
   contiguous INTEGER NOT NULL, PRIMARY KEY(conv_id, author));
 ",
 ];
-
-#[cfg(test)]
-mod tests {}

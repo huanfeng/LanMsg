@@ -43,7 +43,7 @@ impl Store {
                is_self = excluded.is_self,
                updated_at = excluded.updated_at",
             rusqlite::params![
-                row.user.to_hex(),
+                &row.user.0[..],
                 row.display_name,
                 row.is_self as i64,
                 row.updated_at,
@@ -61,7 +61,7 @@ impl Store {
         let row: Option<(String, i64, i64)> = conn
             .query_row(
                 "SELECT display_name, is_self, updated_at FROM users WHERE user_id = ?1",
-                [user.to_hex()],
+                [&user.0[..]],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
@@ -96,8 +96,8 @@ impl Store {
                last_seen = excluded.last_seen,
                revoked = excluded.revoked",
             rusqlite::params![
-                row.device.to_hex(),
-                row.user.to_hex(),
+                &row.device.0[..],
+                &row.user.0[..],
                 cert_bytes,
                 row.name,
                 format!("{:?}", row.device_type),
@@ -120,7 +120,7 @@ impl Store {
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
         let row: Option<(
-            String,
+            Vec<u8>,
             Vec<u8>,
             String,
             String,
@@ -132,10 +132,10 @@ impl Store {
             .query_row(
                 "SELECT user_id, cert, name, device_type, last_addr, last_path, last_seen, revoked
                  FROM devices WHERE device_id = ?1",
-                [device.to_hex()],
+                [&device.0[..]],
                 |row| {
                     Ok((
-                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(0)?,
                         row.get::<_, Vec<u8>>(1)?,
                         row.get(2)?,
                         row.get(3)?,
@@ -148,7 +148,7 @@ impl Store {
             )
             .optional()?;
         let Some((
-            user_hex,
+            user_bytes,
             cert_bytes,
             name,
             device_type,
@@ -160,8 +160,9 @@ impl Store {
         else {
             return Ok(None);
         };
-        let user = UserId::from_hex(&user_hex)
-            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let user = UserId(user_bytes.try_into().map_err(|bytes: Vec<u8>| {
+            crate::store::StoreError::Codec(format!("user_id 长度非法: {}", bytes.len()))
+        })?);
         let cert: DeviceCert = lanmsg_proto::from_cbor(&cert_bytes)
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
         let device_type = match device_type.as_str() {
@@ -214,15 +215,15 @@ impl Store {
             "SELECT device_id, cert, name, device_type, last_addr, last_path, last_seen, revoked
              FROM devices WHERE user_id = ?1",
         )?;
-        let rows = stmt.query_map([user.to_hex()], |row| {
-            let device_hex: String = row.get(0)?;
-            let device = DeviceId::from_hex(&device_hex).map_err(|e| {
+        let rows = stmt.query_map([&user.0[..]], |row| {
+            let device_bytes: Vec<u8> = row.get(0)?;
+            let device = DeviceId(device_bytes.try_into().map_err(|bytes: Vec<u8>| {
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
+                    rusqlite::types::Type::Blob,
+                    format!("device_id 长度非法: {}", bytes.len()).into(),
                 )
-            })?;
+            })?);
             let cert_bytes: Vec<u8> = row.get(1)?;
             let cert: DeviceCert = lanmsg_proto::from_cbor(&cert_bytes).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(

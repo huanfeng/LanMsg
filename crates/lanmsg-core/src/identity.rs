@@ -9,17 +9,17 @@ use lanmsg_proto::ids::{ConvId, DeviceId, UserId};
 use lanmsg_proto::sign::{DeviceKey, UserKey};
 use lanmsg_proto::types::{DeviceCert, DeviceType};
 
-const KEY_DEVICE: &str = "device_key";
-const KEY_USER: &str = "user_key";
+pub const KEY_DEVICE: &str = "device.key";
+pub const KEY_USER: &str = "user.key";
 const SETTING_SELF_CERT: &str = "self_cert";
 const SETTING_DISPLAY_NAME: &str = "display_name";
 const SETTING_DEVICE_NAME: &str = "device_name";
 
 /// 身份：设备密钥、可选用户密钥、可选设备证书。
 pub struct Identity {
-    device: DeviceKey,
-    user: Option<UserKey>,
-    cert: Option<DeviceCert>,
+    pub device: DeviceKey,
+    pub user: Option<UserKey>,
+    pub cert: Option<DeviceCert>,
 }
 
 impl Identity {
@@ -67,6 +67,8 @@ impl Identity {
     }
 
     /// 初始化首台设备。已有用户密钥则返回 AlreadyInitialized。
+    ///
+    /// 已知限制：初始化跨 KeyStore 与 Store 两次写入，非原子；中途失败会留下不可恢复的半初始化状态（P2 配对流程重审）。
     pub fn init_first_device(
         &mut self,
         ks: &dyn KeyStore,
@@ -224,6 +226,10 @@ mod tests {
             .unwrap();
         assert!(identity.is_initialized());
         assert!(identity.user_id().is_some());
+
+        // 重新 load：cert 应仍在（不验签，只断言存在）。
+        let identity3 = Identity::load_or_create(&ks, &store).unwrap();
+        assert!(identity3.cert.is_some());
 
         // 重复初始化应失败。
         let err = identity.init_first_device(

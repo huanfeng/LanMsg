@@ -50,6 +50,9 @@ pub struct ConvRow {
     pub created_at: i64,
 }
 
+/// get_conversation 的查询行元组：(kind, peer_user, title, created_at)。
+type ConversationRow = (String, Option<Vec<u8>>, Option<String>, i64);
+
 impl Store {
     /// 插入会话，已存在不覆盖。
     pub fn ensure_conversation(&self, row: &ConvRow) -> Result<(), crate::store::StoreError> {
@@ -61,9 +64,9 @@ impl Store {
              VALUES(?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(conv_id) DO NOTHING",
             rusqlite::params![
-                row.conv.to_hex(),
+                &row.conv.0[..],
                 row.kind.as_str(),
-                row.peer_user.as_ref().map(|u| u.to_hex()),
+                row.peer_user.as_ref().map(|u| &u.0[..]),
                 row.title,
                 row.created_at,
             ],
@@ -80,10 +83,10 @@ impl Store {
         let conn = self
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-        let row: Option<(String, Option<String>, Option<String>, i64)> = conn
+        let row: Option<ConversationRow> = conn
             .query_row(
                 "SELECT kind, peer_user, title, created_at FROM conversations WHERE conv_id = ?1",
-                [conv.to_hex()],
+                [&conv.0[..]],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -98,11 +101,12 @@ impl Store {
             return Ok(None);
         };
         let kind = ConvKindRow::from_str(&kind)?;
-        let peer_user = peer_user
-            .map(|s| {
-                UserId::from_hex(&s).map_err(|e| crate::store::StoreError::Codec(e.to_string()))
-            })
-            .transpose()?;
+        let peer_user = match peer_user {
+            Some(bytes) => Some(UserId(bytes.try_into().map_err(|bytes: Vec<u8>| {
+                crate::store::StoreError::Codec(format!("peer_user 长度非法: {}", bytes.len()))
+            })?)),
+            None => None,
+        };
         Ok(Some(ConvRow {
             conv: *conv,
             kind,
@@ -120,14 +124,14 @@ impl Store {
         let mut stmt =
             conn.prepare("SELECT conv_id, kind, peer_user, title, created_at FROM conversations")?;
         let rows = stmt.query_map([], |row| {
-            let conv_hex: String = row.get(0)?;
-            let conv = ConvId::from_hex(&conv_hex).map_err(|e| {
+            let conv_bytes: Vec<u8> = row.get(0)?;
+            let conv = ConvId(conv_bytes.try_into().map_err(|bytes: Vec<u8>| {
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
+                    rusqlite::types::Type::Blob,
+                    format!("conv_id 长度非法: {}", bytes.len()).into(),
                 )
-            })?;
+            })?);
             let kind: String = row.get(1)?;
             let kind = ConvKindRow::from_str(&kind).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
@@ -136,18 +140,17 @@ impl Store {
                     Box::new(e),
                 )
             })?;
-            let peer_user: Option<String> = row.get(2)?;
-            let peer_user = peer_user
-                .map(|s| {
-                    UserId::from_hex(&s).map_err(|e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            2,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    })
-                })
-                .transpose()?;
+            let peer_user: Option<Vec<u8>> = row.get(2)?;
+            let peer_user = match peer_user {
+                Some(bytes) => Some(UserId(bytes.try_into().map_err(|bytes: Vec<u8>| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Blob,
+                        format!("peer_user 长度非法: {}", bytes.len()).into(),
+                    )
+                })?)),
+                None => None,
+            };
             let title: Option<String> = row.get(3)?;
             let created_at: i64 = row.get(4)?;
             Ok(ConvRow {

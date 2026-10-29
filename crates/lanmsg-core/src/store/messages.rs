@@ -65,12 +65,12 @@ impl Store {
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
         let seq: Option<i64> = conn.query_row(
             "SELECT MAX(seq) FROM messages WHERE author = ?1",
-            rusqlite::params![author.to_hex()],
+            rusqlite::params![&author.0[..]],
             |r| r.get::<_, Option<i64>>(0),
         )?;
         let conv_seq: Option<i64> = conn.query_row(
             "SELECT MAX(conv_seq) FROM messages WHERE conv_id = ?1 AND author = ?2",
-            rusqlite::params![conv.to_hex(), author.to_hex()],
+            rusqlite::params![&conv.0[..], &author.0[..]],
             |r| r.get::<_, Option<i64>>(0),
         )?;
         Ok((
@@ -92,11 +92,11 @@ impl Store {
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
         let tx = conn.transaction()?;
 
-        let author_hex = env.id.author.to_hex();
-        let conv_hex = env.conv.to_hex();
+        let author_bytes: &[u8] = &env.id.author.0;
+        let conv_bytes: &[u8] = &env.conv.0;
         let contiguous: i64 = tx.query_row(
             "SELECT COALESCE(MAX(contiguous), 0) FROM version_vectors WHERE conv_id = ?1 AND author = ?2",
-            rusqlite::params![conv_hex, author_hex],
+            rusqlite::params![conv_bytes, author_bytes],
             |r| r.get(0),
         ).optional()?.unwrap_or(0);
 
@@ -109,9 +109,9 @@ impl Store {
             "INSERT OR IGNORE INTO messages(author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text)
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
-                author_hex,
+                author_bytes,
                 env.id.seq as i64,
-                conv_hex,
+                conv_bytes,
                 env.conv_seq as i64,
                 env.hlc.millis,
                 env.hlc.counter as i64,
@@ -127,7 +127,7 @@ impl Store {
             loop {
                 let exists: Option<i64> = tx.query_row(
                     "SELECT 1 FROM messages WHERE conv_id = ?1 AND author = ?2 AND conv_seq = ?3",
-                    rusqlite::params![conv_hex, author_hex, (cont + 1) as i64],
+                    rusqlite::params![conv_bytes, author_bytes, (cont + 1) as i64],
                     |r| r.get(0),
                 ).optional()?;
                 match exists {
@@ -138,7 +138,7 @@ impl Store {
             tx.execute(
                 "INSERT INTO version_vectors(conv_id, author, contiguous) VALUES(?1, ?2, ?3)
                  ON CONFLICT(conv_id, author) DO UPDATE SET contiguous = excluded.contiguous",
-                rusqlite::params![conv_hex, author_hex, cont as i64],
+                rusqlite::params![conv_bytes, author_bytes, cont as i64],
             )?;
         }
 
@@ -157,7 +157,7 @@ impl Store {
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
         conn.execute(
             "UPDATE messages SET state = ?1 WHERE author = ?2 AND seq = ?3",
-            rusqlite::params![state.as_str(), id.author.to_hex(), id.seq as i64],
+            rusqlite::params![state.as_str(), &id.author.0[..], id.seq as i64],
         )?;
         Ok(())
     }
@@ -171,11 +171,11 @@ impl Store {
         let conn = self
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-        let row: Option<(String, i64, String, i64, i64, i64, Vec<u8>, String, i64, Option<String>)> = conn
+        let row: Option<(Vec<u8>, i64, Vec<u8>, i64, i64, i64, Vec<u8>, String, i64, Option<String>)> = conn
             .query_row(
                 "SELECT author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text
                  FROM messages WHERE author = ?1 AND seq = ?2",
-                rusqlite::params![id.author.to_hex(), id.seq as i64],
+                rusqlite::params![&id.author.0[..], id.seq as i64],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -195,7 +195,7 @@ impl Store {
         let Some((
             _author,
             _seq,
-            _conv_hex,
+            _conv_id,
             _conv_seq,
             _hlc_millis,
             _hlc_counter,
@@ -227,16 +227,16 @@ impl Store {
         let conn = self
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-        let conv_hex = conv.to_hex();
+        let conv_key: &[u8] = &conv.0;
         let mut out: Vec<StoredMessage> = Vec::new();
 
         match before {
             Some(before_id) => {
                 use rusqlite::OptionalExtension;
-                let brow: Option<(i64, i64, String, i64)> = conn
+                let brow: Option<(i64, i64, Vec<u8>, i64)> = conn
                     .query_row(
                         "SELECT hlc_millis, hlc_counter, author, seq FROM messages WHERE author = ?1 AND seq = ?2",
-                        rusqlite::params![before_id.author.to_hex(), before_id.seq as i64],
+                        rusqlite::params![&before_id.author.0[..], before_id.seq as i64],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                     )
                     .optional()?;
@@ -251,7 +251,7 @@ impl Store {
                      LIMIT ?6",
                 )?;
                 let rows = stmt.query_map(
-                    rusqlite::params![conv_hex, bmillis, bcounter, bauthor, bseq, limit as i64],
+                    rusqlite::params![conv_key, bmillis, bcounter, bauthor, bseq, limit as i64],
                     stored_message_from_row,
                 )?;
                 for r in rows {
@@ -266,7 +266,7 @@ impl Store {
                      LIMIT ?2",
                 )?;
                 let rows = stmt.query_map(
-                    rusqlite::params![conv_hex, limit as i64],
+                    rusqlite::params![conv_key, limit as i64],
                     stored_message_from_row,
                 )?;
                 for r in rows {
@@ -290,14 +290,14 @@ impl Store {
         let conn = self
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-        let conv_hex = conv.to_hex();
-        let author_hex = author.to_hex();
+        let conv_key: &[u8] = &conv.0;
+        let author_key: &[u8] = &author.0;
         let mut stmt = conn.prepare(
             "SELECT envelope FROM messages WHERE conv_id = ?1 AND author = ?2 AND conv_seq > ?3
              ORDER BY conv_seq ASC LIMIT ?4",
         )?;
         let rows = stmt.query_map(
-            rusqlite::params![conv_hex, author_hex, after_conv_seq as i64, limit as i64],
+            rusqlite::params![conv_key, author_key, after_conv_seq as i64, limit as i64],
             |row| {
                 let bytes: Vec<u8> = row.get(0)?;
                 lanmsg_proto::from_cbor::<Envelope>(&bytes).map_err(|e| {
@@ -321,18 +321,18 @@ impl Store {
         let conn = self
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-        let conv_hex = conv.to_hex();
+        let conv_key: &[u8] = &conv.0;
         let mut stmt =
             conn.prepare("SELECT author, contiguous FROM version_vectors WHERE conv_id = ?1")?;
-        let rows = stmt.query_map(rusqlite::params![conv_hex], |row| {
-            let author_hex: String = row.get(0)?;
-            let author = DeviceId::from_hex(&author_hex).map_err(|e| {
+        let rows = stmt.query_map(rusqlite::params![conv_key], |row| {
+            let author_bytes: Vec<u8> = row.get(0)?;
+            let author = DeviceId(author_bytes.try_into().map_err(|bytes: Vec<u8>| {
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
+                    rusqlite::types::Type::Blob,
+                    format!("author 长度非法: {}", bytes.len()).into(),
                 )
-            })?;
+            })?);
             let contiguous: i64 = row.get(1)?;
             Ok((author, contiguous as u64))
         })?;
