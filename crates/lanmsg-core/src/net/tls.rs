@@ -24,9 +24,6 @@ use lanmsg_proto::sign::DeviceKey;
 /// SNI 固定值。
 pub const TLS_SNI: &str = "lanmsg";
 
-/// Ed25519 算法 OID：1.3.101.112。
-const ED25519_OID: &[u64] = &[1, 3, 101, 112];
-
 /// 生成设备自签证书：CN = 设备 hex 前 16 位，有效期 100 年。
 fn build_self_signed_cert(device: &DeviceKey) -> Result<(Vec<u8>, Vec<u8>), CoreError> {
     let device_hex = device.device_id().to_hex();
