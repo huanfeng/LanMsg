@@ -360,6 +360,14 @@ dependencies = [
 [[package]]
 name = "lanmsg-api"
 version = "0.1.0"
+dependencies = [
+ "bytes",
+ "ciborium",
+ "lanmsg-proto",
+ "serde",
+ "thiserror",
+ "tokio-util",
+]
 
 [[package]]
 name = "lanmsg-cli"

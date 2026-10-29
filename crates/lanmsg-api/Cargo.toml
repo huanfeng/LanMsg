@@ -5,3 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+lanmsg-proto = { path = "../lanmsg-proto" }
+serde = { version = "1", features = ["derive"] }
+ciborium = "0.2"
+thiserror = "2"
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1"
