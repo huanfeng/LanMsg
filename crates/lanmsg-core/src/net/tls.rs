@@ -78,7 +78,7 @@ impl ServerClientCertVerifier for AnyClientCertVerifier {
         _intermediates: &[CertificateDer<'_>],
         _now: UnixTime,
     ) -> Result<ServerClientCertVerified, TlsError> {
-        if end_entity.is_empty() {
+        if end_entity.len() == 0 {
             return Err(TlsError::General("客户端未提供证书".into()));
         }
         Ok(ServerClientCertVerified::assertion())

@@ -3,6 +3,7 @@ pub mod error;
 pub mod hlc;
 pub mod identity;
 pub mod keystore;
+pub mod net;
 pub mod paths;
 pub mod store;
 
