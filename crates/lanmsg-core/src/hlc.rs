@@ -47,10 +47,13 @@ impl HlcClock {
         if remote.millis == millis {
             counter = counter.max(remote.counter);
         }
-        self.last = Hlc {
-            millis,
-            counter: counter + 1,
-        };
+
+        // wall 独占最大时（壁钟时间独占新的物理时刻），与 now() 保持一致：counter 从 0 开始。
+        let wall_exclusive =
+            wall_millis == millis && wall_millis > self.last.millis && wall_millis > remote.millis;
+        let counter = if wall_exclusive { 0 } else { counter + 1 };
+
+        self.last = Hlc { millis, counter };
     }
 }
 
@@ -69,8 +72,19 @@ mod tests {
     #[test]
     fn hlc_observe_remote_ahead() {
         let mut c = HlcClock::new();
-        c.observe(Hlc { millis: 5000, counter: 3 }, 1000);
+        c.observe(
+            Hlc {
+                millis: 5000,
+                counter: 3,
+            },
+            1000,
+        );
         let n = c.now(1000);
-        assert!(n > Hlc { millis: 5000, counter: 3 });
+        assert!(
+            n > Hlc {
+                millis: 5000,
+                counter: 3
+            }
+        );
     }
 }

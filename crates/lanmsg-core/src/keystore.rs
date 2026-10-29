@@ -8,18 +8,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-use thiserror::Error;
-
-/// 密钥库错误。
-#[derive(Debug, Error)]
-pub enum KeyStoreError {
-    /// IO 错误。
-    #[error("IO 错误: {0}")]
-    Io(#[from] io::Error),
-    /// 数据损坏。
-    #[error("数据损坏: {0}")]
-    Corrupt(String),
-}
+use crate::error::KeyStoreError;
 
 /// 密钥库抽象：按名称加载/保存/删除密钥文件。
 pub trait KeyStore {
@@ -41,6 +30,8 @@ pub struct FileKeyStore {
 
 impl FileKeyStore {
     /// 创建指向 `dir` 的文件密钥库，不存在则创建目录（0700）。
+    ///
+    /// 目录创建失败的错误由后续 load/save/delete 暴露，此处保持构造函数不返回 Result。
     pub fn new(dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(&dir);
         #[cfg(unix)]
