@@ -26,6 +26,9 @@ pub const WEB_PORT: u16 = 53321;
 /// LocalSend 适配端口。
 pub const LOCALSEND_PORT: u16 = 53317;
 
+/// LocalSend 组播地址。
+pub const LOCALSEND_MCAST: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 167);
+
 /// 设备通告发送间隔。
 pub const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(30);
 

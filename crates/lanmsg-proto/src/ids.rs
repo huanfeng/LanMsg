@@ -130,21 +130,24 @@ id32!(DeviceId);
 id32!(ConvId);
 id32!(BlobHash);
 
+/// base32_nopad_lower(blake3(bytes)[..16])，26 字符，用于界面显示指纹。
+fn short_fingerprint(bytes: &[u8; 32]) -> String {
+    let hash = blake3::hash(bytes);
+    let encoded = BASE32_NOPAD.encode(&hash.as_bytes()[..16]);
+    encoded.to_lowercase()
+}
+
 impl UserId {
     /// base32_nopad_lower(blake3(self)[..16])，26 字符，用于界面显示指纹。
     pub fn short(&self) -> String {
-        let hash = blake3::hash(&self.0);
-        let encoded = BASE32_NOPAD.encode(&hash.as_bytes()[..16]);
-        encoded.to_lowercase()
+        short_fingerprint(&self.0)
     }
 }
 
 impl DeviceId {
     /// base32_nopad_lower(blake3(self)[..16])，26 字符，用于界面显示指纹。
     pub fn short(&self) -> String {
-        let hash = blake3::hash(&self.0);
-        let encoded = BASE32_NOPAD.encode(&hash.as_bytes()[..16]);
-        encoded.to_lowercase()
+        short_fingerprint(&self.0)
     }
 }
 
@@ -197,13 +200,6 @@ impl ConvId {
 pub struct MsgId {
     pub author: DeviceId,
     pub seq: u64,
-}
-
-impl MsgId {
-    /// 字符串形式 "{author_hex}:{seq}"。
-    pub fn to_string(&self) -> String {
-        format!("{}:{}", self.author, self.seq)
-    }
 }
 
 impl fmt::Display for MsgId {
