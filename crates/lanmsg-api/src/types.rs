@@ -75,8 +75,12 @@ pub enum Request {
         device_name: String,
         mode: InitMode,
     },
-    SetStatus { status: StatusDto },
-    SetProfile { display_name: String },
+    SetStatus {
+        status: StatusDto,
+    },
+    SetProfile {
+        display_name: String,
+    },
     ListPeers,
     ListConversations,
     ListMessages {
@@ -84,43 +88,95 @@ pub enum Request {
         before: Option<String>,
         limit: u32,
     },
-    OpenDm { user: String },
-    SendText { conv: String, text: String },
-    SendFiles { conv: String, paths: Vec<String> },
-    SendFolder { conv: String, path: String },
-    Recall { msg: String },
-    MarkRead { conv: String, upto: String },
-    DeleteLocal { msgs: Vec<String>, also_my_devices: bool },
-    DownloadBlob { hash: String },
-    CancelTransfer { transfer: String },
+    OpenDm {
+        user: String,
+    },
+    SendText {
+        conv: String,
+        text: String,
+    },
+    SendFiles {
+        conv: String,
+        paths: Vec<String>,
+    },
+    SendFolder {
+        conv: String,
+        path: String,
+    },
+    Recall {
+        msg: String,
+    },
+    MarkRead {
+        conv: String,
+        upto: String,
+    },
+    DeleteLocal {
+        msgs: Vec<String>,
+        also_my_devices: bool,
+    },
+    DownloadBlob {
+        hash: String,
+    },
+    CancelTransfer {
+        transfer: String,
+    },
     ListContacts,
-    RequestContact { user: String },
+    RequestContact {
+        user: String,
+    },
     ListRequests,
-    RespondRequest { request: String, action: RequestAction },
+    RespondRequest {
+        request: String,
+        action: RequestAction,
+    },
     SetContactPolicy {
         user: String,
         auto_accept: bool,
         ask_above_bytes: Option<u64>,
     },
     ListMyDevices,
-    RemoveDevice { device: String },
-    PairStart { method: PairMethod },
-    PairJoin { target: PairTarget },
-    PairConfirm { session: String, matches: bool },
-    PairCancel { session: String },
-    QueryFiles { filter: FileFilter },
+    RemoveDevice {
+        device: String,
+    },
+    PairStart {
+        method: PairMethod,
+    },
+    PairJoin {
+        target: PairTarget,
+    },
+    PairConfirm {
+        session: String,
+        matches: bool,
+    },
+    PairCancel {
+        session: String,
+    },
+    QueryFiles {
+        filter: FileFilter,
+    },
     SearchMessages {
         query: String,
         conv: Option<String>,
         limit: u32,
     },
-    ForwardFiles { conv: String, hashes: Vec<String> },
+    ForwardFiles {
+        conv: String,
+        hashes: Vec<String>,
+    },
     GetSettings,
-    SetSettings { settings: SettingsDto },
-    AddManualPeer { addr: String },
-    ScanSubnet { cidr: String },
+    SetSettings {
+        settings: SettingsDto,
+    },
+    AddManualPeer {
+        addr: String,
+    },
+    ScanSubnet {
+        cidr: String,
+    },
     ListInterfaces,
-    StationCreate { name: String },
+    StationCreate {
+        name: String,
+    },
     StationList,
     StationPut {
         station: String,
@@ -133,12 +189,22 @@ pub enum Request {
         item: String,
         pinned: bool,
     },
-    StationItems { station: String },
-    StationRemove { station: String, item: String },
+    StationItems {
+        station: String,
+    },
+    StationRemove {
+        station: String,
+        item: String,
+    },
     WebStart,
     WebStop,
-    WebRespond { request: String, allow: bool },
-    SetUiFocus { conv: Option<String> },
+    WebRespond {
+        request: String,
+        allow: bool,
+    },
+    SetUiFocus {
+        conv: Option<String>,
+    },
     Shutdown,
 }
 
@@ -174,11 +240,21 @@ pub enum Response {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum Event {
-    PeerOnline { peer: PeerView },
-    PeerOffline { device: String },
-    MessageAdded { msg: MessageView },
-    MessageUpdated { msg: MessageView },
-    ConversationUpdated { summary: ConversationSummary },
+    PeerOnline {
+        peer: PeerView,
+    },
+    PeerOffline {
+        device: String,
+    },
+    MessageAdded {
+        msg: MessageView,
+    },
+    MessageUpdated {
+        msg: MessageView,
+    },
+    ConversationUpdated {
+        summary: ConversationSummary,
+    },
     TransferProgress {
         transfer: String,
         hash: String,
@@ -192,8 +268,13 @@ pub enum Event {
         ok: bool,
         error: Option<String>,
     },
-    IncomingRequest { request: RequestView },
-    PairStatus { session: String, state: PairStateDto },
+    IncomingRequest {
+        request: RequestView,
+    },
+    PairStatus {
+        session: String,
+        state: PairStateDto,
+    },
     DevicesChanged,
     ContactsChanged,
     WebRequest {
@@ -201,14 +282,18 @@ pub enum Event {
         user_agent: String,
         ip: String,
     },
-    StationUpdated { station: String },
+    StationUpdated {
+        station: String,
+    },
     FirewallMissing,
     ScanFinished {
         cidr: String,
         probed: u32,
         found: u32,
     },
-    WebSessionChanged { info: Option<WebSessionInfo> },
+    WebSessionChanged {
+        info: Option<WebSessionInfo>,
+    },
 }
 
 // ===== DTO =====
@@ -311,10 +396,19 @@ pub enum MessageState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum MessageBodyView {
-    Text { text: String },
-    Files { items: Vec<FileItemView> },
-    Folder { name: String, items: Vec<FileItemView> },
-    System { text: String },
+    Text {
+        text: String,
+    },
+    Files {
+        items: Vec<FileItemView>,
+    },
+    Folder {
+        name: String,
+        items: Vec<FileItemView>,
+    },
+    System {
+        text: String,
+    },
     Unsupported,
 }
 

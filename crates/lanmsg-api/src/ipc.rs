@@ -57,8 +57,8 @@ impl Decoder for IpcCodec {
         }
         src.advance(4);
         let frame_bytes = src.split_to(len);
-        let frame: IpcFrame = ciborium::from_reader(&frame_bytes[..])
-            .map_err(|e| IpcError::Cbor(e.to_string()))?;
+        let frame: IpcFrame =
+            ciborium::from_reader(&frame_bytes[..]).map_err(|e| IpcError::Cbor(e.to_string()))?;
         Ok(Some(frame))
     }
 }
@@ -66,9 +66,7 @@ impl Decoder for IpcCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        ApiRequest, Event, IpcFrame, Request, Response,
-    };
+    use crate::types::{ApiRequest, Event, IpcFrame, Request, Response};
     use lanmsg_proto::consts::MAX_FRAME_LEN;
     use tokio_util::codec::Decoder;
 
@@ -99,8 +97,15 @@ mod tests {
 
     #[test]
     fn response_uses_named_value_field() {
-        let r = Response::MsgId { value: "x:1".into() };
-        assert_eq!(r, Response::MsgId { value: "x:1".into() });
+        let r = Response::MsgId {
+            value: "x:1".into(),
+        };
+        assert_eq!(
+            r,
+            Response::MsgId {
+                value: "x:1".into()
+            }
+        );
     }
 
     #[test]

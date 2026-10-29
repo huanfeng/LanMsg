@@ -1,4 +1,4 @@
-pub mod types;
 pub mod ipc;
+pub mod types;
 
 pub use types::*;
