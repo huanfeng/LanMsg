@@ -7,8 +7,8 @@ pub mod multicast;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::interval_at;
@@ -44,6 +44,57 @@ pub struct DiscoveryEvent {
     pub announce: Announce,
     pub from: SocketAddr,
     pub via_multicast: bool,
+}
+
+/// 发现表条目的保留时长（配对 Device 目标与后续任务使用）。
+const DISCOVERED_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// 近期发现的设备表（P2 Task 7）：值为 (通告, 连接地址, 记录时间)。
+/// 连接地址 = 发现源 IP + 通告监听端口。
+pub struct DiscoveredTable(Mutex<HashMap<DeviceId, (Announce, SocketAddr, Instant)>>);
+
+impl Default for DiscoveredTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DiscoveredTable {
+    /// 建空表。
+    pub fn new() -> DiscoveredTable {
+        DiscoveredTable(Mutex::new(HashMap::new()))
+    }
+
+    /// 记录一条发现事件（本机未初始化时也记录）；顺带清理过期条目。
+    pub fn record(&self, ev: &DiscoveryEvent) {
+        let port = ev.announce.ports.first().copied().unwrap_or(0);
+        let addr = if port == 0 {
+            ev.from
+        } else {
+            SocketAddr::new(ev.from.ip(), port)
+        };
+        let mut g = self.0.lock().unwrap();
+        let now = Instant::now();
+        g.retain(|_, (_, _, t)| now.duration_since(*t) < DISCOVERED_TTL);
+        g.insert(ev.announce.cert.device, (ev.announce.clone(), addr, now));
+    }
+
+    /// 取某设备的最近通告与连接地址。
+    pub fn get(&self, d: &DeviceId) -> Option<(Announce, SocketAddr)> {
+        let g = self.0.lock().unwrap();
+        g.get(d).map(|(a, s, _)| (a.clone(), *s))
+    }
+
+    /// 列出 `within` 内记录的设备（后续任务使用）。
+    #[allow(dead_code)] // P2 后续任务（Task 10 扫描/同步）使用
+    pub fn recent(&self, within: Duration) -> Vec<(Announce, SocketAddr)> {
+        let g = self.0.lock().unwrap();
+        let now = Instant::now();
+        g.values()
+            .filter(|(_, _, t)| now.duration_since(*t) <= within)
+            .map(|(a, s, _)| (a.clone(), *s))
+            .collect()
+    }
 }
 
 /// 发现任务的句柄。

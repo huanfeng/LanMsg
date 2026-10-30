@@ -5,6 +5,7 @@ pub mod identity;
 pub mod keystore;
 pub mod msg;
 pub mod net;
+pub mod pairing;
 pub mod paths;
 pub mod platform;
 pub mod service;

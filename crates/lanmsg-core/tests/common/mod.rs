@@ -12,7 +12,10 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 
-use lanmsg_api::types::{ApiError, Event, InitMode, Request, RequestAction, RequestKind, Response};
+use lanmsg_api::types::{
+    ApiError, Event, InitMode, PairMethod, PairStateDto, PairTarget, Request, RequestAction,
+    RequestKind, Response,
+};
 use lanmsg_core::discovery::{DiscoveryMode, MemoryBus};
 use lanmsg_core::keystore::FileKeyStore;
 use lanmsg_core::platform::PlatformHooks;
@@ -252,4 +255,51 @@ where
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// 「我的设备」配对（Qr 方式）：a 已初始化、b 已 Init{JoinExisting}；
+/// 等双方 PairStatus{Done} 并等 b 收到 PeerOnline(a)。
+pub async fn pair(a: &mut TestNode, b: &mut TestNode) {
+    let started = match a
+        .try_call(Request::PairStart {
+            method: PairMethod::Qr,
+        })
+        .await
+    {
+        Ok(Response::PairSession { value }) => value,
+        other => panic!("期望 PairSession，实际 {other:?}"),
+    };
+    let uri = started.qr_uri.expect("Qr 配对应返回 URI");
+    let session = started.session;
+    b.try_call(Request::PairJoin {
+        target: PairTarget::QrUri { uri },
+    })
+    .await
+    .expect("PairJoin 失败");
+    a.wait_event(
+        |e| {
+            matches!(
+                e,
+                Event::PairStatus { session: s, state: PairStateDto::Done } if s.as_str() == session
+            )
+        },
+        5,
+    )
+    .await;
+    b.wait_event(
+        |e| {
+            matches!(
+                e,
+                Event::PairStatus { session: s, state: PairStateDto::Done } if s.as_str() == session
+            )
+        },
+        5,
+    )
+    .await;
+    let a_dev = a.device_id().await;
+    b.wait_event(
+        |e| matches!(e, Event::PeerOnline { peer } if peer.device_id == a_dev),
+        5,
+    )
+    .await;
 }

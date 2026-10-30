@@ -137,6 +137,31 @@ impl Identity {
         Ok(())
     }
 
+    /// 加入方采纳配对包中的用户身份（P2 Task 7）。
+    ///
+    /// 写 KeyStore user.key、Store self_cert，并更新内存中的 user/cert。
+    /// 已初始化 → AlreadyInitialized。注意：只写身份本身，users/devices/
+    /// 会话/联系人等数据行由调用方（Pairing）负责。
+    pub fn adopt_user(
+        &mut self,
+        ks: &dyn KeyStore,
+        store: &Store,
+        user_secret: [u8; 32],
+        cert: DeviceCert,
+    ) -> Result<(), CoreError> {
+        if self.user.is_some() {
+            return Err(CoreError::AlreadyInitialized);
+        }
+        ks.save(KEY_USER, &user_secret)?;
+        store.set_setting(
+            SETTING_SELF_CERT,
+            &hex_encode(&lanmsg_proto::to_cbor(&cert)),
+        )?;
+        self.user = Some(UserKey::from_bytes(&user_secret));
+        self.cert = Some(cert);
+        Ok(())
+    }
+
     pub fn user_id(&self) -> Option<UserId> {
         self.user.as_ref().map(|u| u.user_id())
     }

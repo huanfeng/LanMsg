@@ -8,11 +8,13 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 
 use lanmsg_api::types::{
-    ApiError, ErrorCode, InitMode, Request, Response, SelfInfo, SettingsDto, StatusDto,
+    ApiError, ErrorCode, InitMode, PairMethod, PairTarget, Request, Response, SelfInfo,
+    SettingsDto, StatusDto,
 };
+use lanmsg_proto::consts::PAIR_TOKEN_TTL;
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{ConvId, MsgId, UserId};
-use lanmsg_proto::types::{DeviceType, MsgBody, Status};
+use lanmsg_proto::types::{DeviceType, MsgBody, PairMethodWire, Status};
 
 use crate::service::views::{conv_summary, message_view, peer_view};
 use crate::service::{build_announce, now_millis, Inner};
@@ -52,6 +54,10 @@ pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiE
             auto_accept,
             ask_above_bytes,
         } => set_contact_policy(inner, user, auto_accept, ask_above_bytes).await,
+        Request::PairStart { method } => pair_start(inner, method).await,
+        Request::PairJoin { target } => pair_join(inner, target).await,
+        Request::PairConfirm { session, matches } => pair_confirm(inner, session, matches).await,
+        Request::PairCancel { session } => pair_cancel(inner, session).await,
         Request::Shutdown => {
             inner.discovery.shutdown();
             inner.conns.shutdown().await;
@@ -400,6 +406,36 @@ async fn set_contact_policy(
     Ok(Response::Ok)
 }
 
+// ---- P2 Task 7：我的设备配对 ----
+
+/// 开配对窗口（窗口存活 PAIR_TOKEN_TTL）。
+async fn pair_start(inner: &Inner, method: PairMethod) -> Result<Response, ApiError> {
+    let m = match method {
+        PairMethod::Qr => PairMethodWire::Qr,
+        PairMethod::Sas => PairMethodWire::Sas,
+    };
+    let value = inner.pairing.start(m, PAIR_TOKEN_TTL).await?;
+    Ok(Response::PairSession { value })
+}
+
+/// 加入配对：QrUri 解析直连；Device 目标从发现表取地址。
+async fn pair_join(inner: &Inner, target: PairTarget) -> Result<Response, ApiError> {
+    let value = inner.pairing.join(target, &inner.discovered).await?;
+    Ok(Response::PairSession { value })
+}
+
+/// Sas 数字确认。
+async fn pair_confirm(inner: &Inner, session: String, matches: bool) -> Result<Response, ApiError> {
+    inner.pairing.confirm(&session, matches).await?;
+    Ok(Response::Ok)
+}
+
+/// 取消配对。
+async fn pair_cancel(inner: &Inner, session: String) -> Result<Response, ApiError> {
+    inner.pairing.cancel(&session).await?;
+    Ok(Response::Ok)
+}
+
 // ---- P2 Task 4：设置与资料 ----
 
 /// GetSettings：从存储加载（无记录返回默认值）。
@@ -574,8 +610,8 @@ fn from_status_dto(s: StatusDto) -> Status {
     }
 }
 
-/// 编译目标为 android/ios → Phone，否则 Desktop。
-fn default_device_type() -> DeviceType {
+/// 编译目标为 android/ios → Phone，否则 Desktop（配对模块共用）。
+pub(crate) fn default_device_type() -> DeviceType {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         DeviceType::Phone

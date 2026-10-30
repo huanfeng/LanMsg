@@ -20,13 +20,14 @@ use lanmsg_proto::ids::UserId;
 use lanmsg_proto::sign::{sign_with_zeroed_sig, DeviceKey};
 use lanmsg_proto::types::{Announce, Signature64, Status};
 
-use crate::discovery::{Discovery, DiscoveryEvent, DiscoveryMode};
+use crate::discovery::{DiscoveredTable, Discovery, DiscoveryEvent, DiscoveryMode};
 use crate::error::CoreError;
 use crate::hlc::HlcClock;
 use crate::identity::Identity;
 use crate::keystore::KeyStore;
 use crate::msg::Messaging;
 use crate::net::{ConnEvent, ConnManager, HelloInfo, PeerInfo};
+use crate::pairing::{Pairing, PairingDeps, WindowSlot};
 use crate::platform::PlatformHooks;
 use crate::store::{DeviceRow, Store, UserRow};
 
@@ -49,12 +50,10 @@ pub struct ServiceConfig {
     pub localsend_port: u16,
 }
 
-/// 节点可变状态：在线状态、自身用户与配对窗口（accept_filter 与路由同步读取）。
+/// 节点可变状态：在线状态与自身用户（accept_filter 与路由同步读取）。
 pub(crate) struct NodeState {
     pub(crate) status: Status,
     pub(crate) self_user: Option<UserId>,
-    /// 配对窗口是否开放（P2 Task 7 配对流程接线；本任务恒 false 占位）。
-    pub(crate) pair_window_open: bool,
 }
 
 /// Service 内部共享状态（C6）。
@@ -71,6 +70,10 @@ pub(crate) struct Inner {
     pub(crate) local_addr: SocketAddr,
     pub(crate) state: Arc<StdRwLock<NodeState>>,
     pub(crate) discovery: Discovery,
+    /// 近期发现的设备表（配对 Device 目标使用）。
+    pub(crate) discovered: Arc<DiscoveredTable>,
+    /// 「我的设备」配对。
+    pub(crate) pairing: Pairing,
 }
 
 /// 核心服务（C6）。内部状态由 Arc 持有，Clone 廉价。
@@ -122,21 +125,27 @@ impl Service {
         let state = Arc::new(StdRwLock::new(NodeState {
             status: Status::Online,
             self_user,
-            pair_window_open: false,
         }));
 
-        // accept_filter：Trust 的七条准入规则（status 与配对窗口取当时值）。
+        // 配对窗口槽：accept_filter 与 Pairing 共享（闭包先于 Pairing 构造）。
+        let window = WindowSlot::default();
+
+        // accept_filter：Trust 的七条准入规则（status 取当时值；配对窗口经槽查询）。
         // 闭包直接捕获依赖而非 Trust 本身——ConnManager::bind 需要过滤闭包
         // 先于 Trust（依赖 bind 产出的 ConnManager）构造。
         let filter_store = store.clone();
         let filter_identity = identity.clone();
         let filter_state = state.clone();
+        let filter_window = window.clone();
         let accept_filter = Arc::new(move |p: &PeerInfo| -> bool {
-            let (status, pair_open) = {
-                let st = filter_state.read().unwrap();
-                (st.status.clone(), st.pair_window_open)
-            };
-            crate::trust::accept_rules(&filter_store, &filter_identity, p, status, pair_open)
+            let status = filter_state.read().unwrap().status.clone();
+            crate::trust::accept_rules(
+                &filter_store,
+                &filter_identity,
+                p,
+                status,
+                filter_window.open(),
+            )
         });
 
         let (conn_tx, conn_rx) = mpsc::channel::<ConnEvent>(256);
@@ -187,6 +196,23 @@ impl Service {
         let self_device = identity.read().await.device_id();
         let discovery = Discovery::spawn(discovery, self_device, announce_rx, disc_tx);
 
+        // 「我的设备」配对（P2 Task 7）。
+        let discovered = Arc::new(DiscoveredTable::new());
+        let pairing = Pairing::new(PairingDeps {
+            store: store.clone(),
+            identity: identity.clone(),
+            keystore: keystore.clone(),
+            conns: conns.clone(),
+            msg: msg.clone(),
+            trust: trust.clone(),
+            events: events_tx.clone(),
+            hello_tx: hello_tx.clone(),
+            announce_tx: announce_tx.clone(),
+            state: state.clone(),
+            local_addr,
+            window,
+        });
+
         let inner = Arc::new(Inner {
             store,
             identity,
@@ -200,6 +226,8 @@ impl Service {
             local_addr,
             state,
             discovery,
+            discovered,
+            pairing,
         });
         let svc = Service {
             inner: inner.clone(),
@@ -321,6 +349,14 @@ async fn routing_task(
                             }
                         }
                     }
+                    // 配对帧分派给 Pairing（P2 Task 7）。
+                    Frame::Pair(p) => {
+                        if let Some(pi) = inner.conns.peer(&d) {
+                            if let Err(e) = inner.pairing.on_pair_frame(&pi, p).await {
+                                tracing::warn!(peer = %d, error = %e, "Pair 帧处理失败");
+                            }
+                        }
+                    }
                     _ => {
                         let _ = inner.msg.on_frame(d, f).await;
                     }
@@ -328,35 +364,42 @@ async fn routing_task(
                 None => break,
             },
             evt = disc_rx.recv(), if disc_open => match evt {
-                Some(de) => on_discovery(&inner, de).await,
+                // 发现事件先入设备表（配对 Device 目标使用；未初始化时也记录）。
+                Some(de) => {
+                    inner.discovered.record(&de);
+                    on_discovery(&inner, de).await;
+                }
                 None => disc_open = false,
             },
         }
     }
 }
 
-/// 连接上线：设备与用户入库，发 PeerOnline。
+/// 连接上线：设备与用户入库，发 PeerOnline；未初始化对端（cert == None，
+/// 配对流程专用）只记日志，不写库、不发 PeerOnline。
 async fn on_up(inner: &Inner, peer: PeerInfo) {
+    let Some(cert) = &peer.cert else {
+        tracing::debug!(peer = %peer.device, "未初始化对端连接（配对流程专用）");
+        return;
+    };
     let now = now_millis();
-    if let Some(cert) = &peer.cert {
-        let _ = inner.store.upsert_device(&DeviceRow {
-            device: peer.device,
-            user: cert.user,
-            cert: cert.clone(),
-            name: cert.device_name.clone(),
-            device_type: cert.device_type,
-            last_addr: Some(peer.dial_addr.to_string()),
-            last_path: Some(peer.path.clone()),
-            last_seen: Some(now),
-            revoked: false,
-        });
-        let _ = inner.store.upsert_user(&UserRow {
-            user: cert.user,
-            display_name: peer.display_name.clone(),
-            is_self: false,
-            updated_at: now,
-        });
-    }
+    let _ = inner.store.upsert_device(&DeviceRow {
+        device: peer.device,
+        user: cert.user,
+        cert: cert.clone(),
+        name: cert.device_name.clone(),
+        device_type: cert.device_type,
+        last_addr: Some(peer.dial_addr.to_string()),
+        last_path: Some(peer.path.clone()),
+        last_seen: Some(now),
+        revoked: false,
+    });
+    let _ = inner.store.upsert_user(&UserRow {
+        user: cert.user,
+        display_name: peer.display_name.clone(),
+        is_self: false,
+        updated_at: now,
+    });
     let self_user = inner.state.read().unwrap().self_user;
     let _ = inner.events.send(Event::PeerOnline {
         peer: views::peer_view(&inner.store, &peer, self_user.as_ref()),
