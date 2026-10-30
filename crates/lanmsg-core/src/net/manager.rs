@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch, RwLock};
 
 use crate::net::conn::{
-    Accepted, ConnEvent, Connection, DataHandler, DataStream, HelloInfo, PeerInfo,
+    Accepted, ConnEvent, Connection, DataHandler, DataStream, ExitCleanup, HelloInfo, PeerInfo,
 };
 use crate::net::tls::{make_tls_configs, TLS_SNI};
 use lanmsg_proto::consts::CHANNEL_DATA;
@@ -34,6 +34,8 @@ struct ConnectionEntry {
     /// 发起此连接的设备 ID（出站为 self，入站为 peer），用于重复连接裁决。
     dialer_device: DeviceId,
     up_sent: bool,
+    /// 连接实例 ID（与 Connection::conn_id 一致，读循环退出自清理时比对）。
+    conn_id: u64,
 }
 
 /// 控制连接管理器（Clone，内部 Arc）。
@@ -134,12 +136,14 @@ impl ConnManager {
         }
 
         let hello = self.build_hello().await;
+        let cleanup = make_exit_cleanup(&self.inner);
         let (peer_info, connection) = Connection::connect_outbound(
             addr,
             &*self.device_key().await,
             self.self_device().await,
             &hello,
             self.events_clone().await,
+            cleanup,
         )
         .await?;
 
@@ -152,17 +156,20 @@ impl ConnManager {
         if let Some(existing) = inner.connections.get(&device) {
             let existing_dialer = existing.dialer_device;
             if existing_dialer <= self_dev {
-                // 保留旧连接，关闭新连接（不产生 Up/Down）。
-                let _ = connection.shutdown().await;
+                // 保留旧连接，关闭新连接（未登记、未发 Up；其读循环退出时
+                // up_sent 为假，不产生 Up/Down）。
+                connection.shutdown();
                 return Ok(device);
             } else {
-                // 新连接拨号方较小，替换旧连接（旧连接已发 Up，此处不再发 Up 避免重复）。
-                let _ = existing.connection.shutdown().await;
+                // 新连接拨号方较小，替换旧连接（旧连接已发 Up，此处不再发 Up 避免
+                // 重复）。旧连接读循环退出时自清理：实例 ID 不匹配，不会发 Down。
+                existing.connection.shutdown();
                 inner.connections.remove(&device);
                 connection.set_up_sent();
                 inner.connections.insert(
                     device,
                     ConnectionEntry {
+                        conn_id: connection.conn_id(),
                         connection,
                         peer_addr,
                         dialer_device: self_dev,
@@ -179,6 +186,7 @@ impl ConnManager {
         inner.connections.insert(
             device,
             ConnectionEntry {
+                conn_id: connection.conn_id(),
                 connection,
                 peer_addr,
                 dialer_device: self_dev,
@@ -242,10 +250,14 @@ impl ConnManager {
     }
 
     /// 断开与指定设备的连接。
+    ///
+    /// 显式断开时由本函数补发 Down 通知外层（读循环退出自清理时条目已移除，
+    /// 不会再发，保证 Down 恰好一次）。
     pub async fn disconnect(&self, device: &DeviceId) {
         let mut inner = self.inner.write().await;
         if let Some(entry) = inner.connections.remove(device) {
-            let _ = entry.connection.shutdown().await;
+            entry.connection.shutdown();
+            let _ = inner.events.send(ConnEvent::Down(*device)).await;
         }
         let _ = inner.cert_overrides.lock().unwrap().remove(device);
     }
@@ -254,7 +266,7 @@ impl ConnManager {
     pub async fn shutdown(&self) {
         let mut inner = self.inner.write().await;
         for (_device, entry) in inner.connections.drain() {
-            let _ = entry.connection.shutdown().await;
+            entry.connection.shutdown();
         }
         inner.cert_overrides.lock().unwrap().clear();
     }
@@ -350,6 +362,32 @@ impl ConnManager {
     }
 }
 
+/// 构造连接读循环退出清理回调：持写锁后仅当表中条目仍是该连接实例时移除。
+///
+/// 返回是否确有移除——被替换或已显式断开的连接返回 false，读循环据此跳过
+/// Down 通知，避免对存活的替换连接误报离线。
+fn make_exit_cleanup(inner: &Arc<RwLock<Inner>>) -> ExitCleanup {
+    let inner = Arc::clone(inner);
+    Arc::new(move |conn_id| {
+        let inner = Arc::clone(&inner);
+        Box::pin(async move {
+            let mut guard = inner.write().await;
+            let mine = guard
+                .connections
+                .iter()
+                .find(|(_, e)| e.conn_id == conn_id)
+                .map(|(d, _)| *d);
+            match mine {
+                Some(device) => {
+                    guard.connections.remove(&device);
+                    true
+                }
+                None => false,
+            }
+        })
+    })
+}
+
 /// 接受循环：持续接受入站 TCP 连接并进行 TLS + Hello 校验。
 async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<Inner>>) {
     loop {
@@ -360,7 +398,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
 
         let inner_clone = inner.clone();
         tokio::spawn(async move {
-            let (self_device, device_key, accept_filter, data_handler, events) = {
+            let (self_device, device_key, accept_filter, data_handler, events, cleanup) = {
                 let guard = inner_clone.read().await;
                 (
                     guard.self_device,
@@ -368,6 +406,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                     guard.accept_filter.clone(),
                     guard.data_handler.clone(),
                     guard.events.clone(),
+                    make_exit_cleanup(&inner_clone),
                 )
             };
 
@@ -389,6 +428,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                 accept_filter.as_ref(),
                 events,
                 data_handler,
+                cleanup,
             )
             .await
             {
@@ -396,22 +436,30 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                     let device = peer_info.device;
                     let mut guard = inner_clone.write().await;
                     // 重复连接裁决：入站连接的拨号方为 peer。
-                    if let Some(existing) = guard.connections.get(&device) {
+                    let replaced = if let Some(existing) = guard.connections.get(&device) {
                         let existing_dialer = existing.dialer_device;
                         let new_dialer = peer_info.device;
                         if existing_dialer <= new_dialer {
-                            let _ = connection.shutdown().await;
+                            connection.shutdown();
                             return;
                         } else {
-                            let _ = existing.connection.shutdown().await;
+                            existing.connection.shutdown();
                             guard.connections.remove(&device);
+                            true
                         }
-                    }
+                    } else {
+                        false
+                    };
                     connection.set_up_sent();
-                    let _ = guard.events.send(ConnEvent::Up(peer_info.clone())).await;
+                    // 仅新登记才发 Up：替换路径上旧连接已发过 Up 且从未离线，
+                    // 重复 Up 会破坏外层在线计数（被替换连接退出也不再发 Down）。
+                    if !replaced {
+                        let _ = guard.events.send(ConnEvent::Up(peer_info.clone())).await;
+                    }
                     guard.connections.insert(
                         device,
                         ConnectionEntry {
+                            conn_id: connection.conn_id(),
                             connection,
                             peer_addr: peer_info.addr,
                             dialer_device: peer_info.device,
@@ -677,6 +725,79 @@ mod tests {
             other => panic!("A 应收到 Down(B)，却收到 {:?}", other),
         }
         let _ = dev_a;
+    }
+
+    /// 对端关闭后：本端表条目被读循环自清理，peers()/peer() 不再返回死连接，
+    /// 向死连接 send 返回 PeerOffline。
+    #[tokio::test]
+    async fn dead_connection_removed_and_send_reports_peer_offline() {
+        let (mgr_a, mut events_a, dev_a) = make_manager().await;
+        let (mgr_b, _events_b, dev_b) = make_manager().await;
+
+        mgr_a.connect(mgr_b.local_addr(), false).await.unwrap();
+        expect_up(&mut events_a, dev_b).await;
+
+        // B 关闭：A 的读循环退出 → 自清理表条目 → Down 恰一次。
+        mgr_b.shutdown().await;
+        match tokio::time::timeout(Duration::from_secs(5), events_a.recv()).await {
+            Ok(Some(ConnEvent::Down(d))) => assert_eq!(d, dev_b),
+            other => panic!("A 应收到 Down(B)，却收到 {:?}", other),
+        }
+        let _ = dev_a;
+
+        // 断开后立即：无死条目、未连接、send 报 PeerOffline。
+        assert!(mgr_a.peer(&dev_b).is_none(), "peer() 不应返回死连接");
+        assert!(!mgr_a.is_connected(&dev_b));
+        assert_eq!(mgr_a.peers().len(), 0, "peers() 不应含死条目");
+        let err = mgr_a
+            .send(&dev_b, Frame::Presence(lanmsg_proto::types::Status::Online))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::PeerOffline),
+            "应报 PeerOffline，实际 {err:?}"
+        );
+    }
+
+    /// 双向同时拨号的裁决竞态：被淘汰连接不发虚假 Down，存活连接条目不被
+    /// 误删且帧可送达（若被误删，send 返回 PeerOffline）。
+    #[tokio::test]
+    async fn arbitration_keeps_alive_connection_usable() {
+        let (mgr_a, mut events_a, dev_a, _ca) = make_manager_with_cert().await;
+        let (mgr_b, mut events_b, dev_b, _cb) = make_manager_with_cert().await;
+
+        let _ = tokio::join!(
+            mgr_a.connect(mgr_b.local_addr(), false),
+            mgr_b.connect(mgr_a.local_addr(), false),
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert_eq!(mgr_a.peers().len(), 1);
+        assert_eq!(mgr_b.peers().len(), 1);
+
+        // 存活连接可用：A 发 Presence，B 排空先导事件后收到。
+        mgr_a
+            .send(&dev_b, Frame::Presence(lanmsg_proto::types::Status::Online))
+            .await
+            .expect("存活连接应可发送");
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), events_b.recv()).await {
+                Ok(Some(ConnEvent::Frame(d, f))) => {
+                    assert_eq!(d, dev_a);
+                    assert!(matches!(f, Frame::Presence(_)));
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                other => panic!("B 应收到帧，却收到 {:?}", other),
+            }
+        }
+
+        // 无虚假 Down：被淘汰连接不通知外层（500ms 内 A 侧不出现 Down）。
+        if let Ok(Some(ConnEvent::Down(d))) =
+            tokio::time::timeout(Duration::from_millis(500), events_a.recv()).await
+        {
+            panic!("不应有虚假 Down({d:?})");
+        }
     }
 
     #[test]

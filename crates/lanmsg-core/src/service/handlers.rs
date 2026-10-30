@@ -41,6 +41,17 @@ pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiE
         Request::SetSettings { settings } => set_settings(inner, settings).await,
         Request::SetProfile { display_name } => set_profile(inner, display_name).await,
         Request::AddManualPeer { addr } => add_manual_peer(inner, addr).await,
+        Request::ListContacts => list_contacts(inner).await,
+        Request::RequestContact { user } => request_contact(inner, user).await,
+        Request::ListRequests => list_requests(inner).await,
+        Request::RespondRequest { request, action } => {
+            respond_request(inner, request, action).await
+        }
+        Request::SetContactPolicy {
+            user,
+            auto_accept,
+            ask_above_bytes,
+        } => set_contact_policy(inner, user, auto_accept, ask_above_bytes).await,
         Request::Shutdown => {
             inner.discovery.shutdown();
             inner.conns.shutdown().await;
@@ -223,7 +234,7 @@ async fn list_peers(inner: &Inner) -> Result<Response, ApiError> {
         .conns
         .peers()
         .iter()
-        .map(|p| peer_view(p, self_user.as_ref()))
+        .map(|p| peer_view(&inner.store, p, self_user.as_ref()))
         .collect();
     Ok(Response::Peers { value })
 }
@@ -300,6 +311,91 @@ async fn add_manual_peer(inner: &Inner, addr: String) -> Result<Response, ApiErr
             .ok_or_else(|| invalid_arg(format!("无法解析地址: {addr}")))?,
     };
     inner.conns.connect(addr, false).await?;
+    Ok(Response::Ok)
+}
+
+// ---- P2 Task 5：联系人双向确认与准入过滤 ----
+
+/// 发起联系人请求。
+async fn request_contact(inner: &Inner, user: String) -> Result<Response, ApiError> {
+    let user = parse_user(&user)?;
+    inner.trust.request_contact(&inner.msg, &user).await?;
+    Ok(Response::Ok)
+}
+
+/// 列出已接受联系人。
+async fn list_contacts(inner: &Inner) -> Result<Response, ApiError> {
+    let rows = inner
+        .store
+        .list_contacts(Some(crate::store::ContactState::Accepted))
+        .map_err(crate::error::CoreError::from)?;
+    let peers = inner.conns.peers();
+    let self_user = inner.state.read().unwrap().self_user;
+    let value = rows
+        .iter()
+        .map(|row| {
+            crate::service::views::contact_view(&inner.store, &peers, row, self_user.as_ref())
+        })
+        .collect();
+    Ok(Response::Contacts { value })
+}
+
+/// 列出全部 open 请求。
+async fn list_requests(inner: &Inner) -> Result<Response, ApiError> {
+    let rows = inner
+        .store
+        .list_open_requests()
+        .map_err(crate::error::CoreError::from)?;
+    let value = rows
+        .iter()
+        .map(|r| crate::service::views::request_view(&inner.store, r))
+        .collect();
+    Ok(Response::Requests { value })
+}
+
+/// 处理请求：按 kind 分派；Contact 走本任务，Message/File 归 Task 6。
+async fn respond_request(
+    inner: &Inner,
+    request: String,
+    action: lanmsg_api::types::RequestAction,
+) -> Result<Response, ApiError> {
+    let row = inner
+        .store
+        .get_request(&request)
+        .map_err(crate::error::CoreError::from)?
+        .ok_or_else(|| ApiError {
+            code: ErrorCode::NotFound,
+            message: format!("请求不存在: {request}"),
+        })?;
+    match row.kind {
+        crate::store::RequestKindRow::Contact => {
+            inner
+                .trust
+                .respond_contact(&inner.msg, &row, action)
+                .await?;
+        }
+        kind => {
+            return Err(ApiError {
+                code: ErrorCode::Internal,
+                message: format!("未实现：RespondRequest({kind:?})"),
+            });
+        }
+    }
+    Ok(Response::Ok)
+}
+
+/// 设置联系人策略（自动同意与大文件询问阈值）。
+async fn set_contact_policy(
+    inner: &Inner,
+    user: String,
+    auto_accept: bool,
+    ask_above_bytes: Option<u64>,
+) -> Result<Response, ApiError> {
+    let user = parse_user(&user)?;
+    inner
+        .trust
+        .set_policy(&inner.msg, &user, auto_accept, ask_above_bytes)
+        .await?;
     Ok(Response::Ok)
 }
 

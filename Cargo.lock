@@ -770,6 +770,7 @@ dependencies = [
  "ipnet",
  "lanmsg-api",
  "lanmsg-proto",
+ "rand",
  "rcgen",
  "rusqlite",
  "rustls",

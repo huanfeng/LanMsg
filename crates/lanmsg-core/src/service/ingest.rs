@@ -4,7 +4,7 @@
 // 注释中文，标识符英文。
 
 use lanmsg_proto::ids::DeviceId;
-use lanmsg_proto::types::{MsgBody, SystemEvent};
+use lanmsg_proto::types::{ContactRecord, MsgBody, SystemEvent};
 
 use crate::identity::{hex_decode, hex_encode};
 use crate::service::{build_announce, now_millis, Inner};
@@ -13,11 +13,38 @@ use lanmsg_proto::types::Hlc;
 
 /// 消息入库后的分派入口：按消息体类型触发本地状态更新。
 pub(crate) async fn after_ingest(svc: &Inner, _from: DeviceId, m: &StoredMessage) {
-    if let MsgBody::System {
-        event: SystemEvent::ProfileUpdated { display_name },
-    } = &m.env.body
-    {
-        on_profile_updated(svc, m, display_name).await;
+    match &m.env.body {
+        MsgBody::System {
+            event: SystemEvent::ProfileUpdated { display_name },
+        } => on_profile_updated(svc, m, display_name).await,
+        MsgBody::System {
+            event: SystemEvent::ContactUpdated(rec),
+        } => on_contact_updated(svc, m, rec).await,
+        _ => {}
+    }
+}
+
+/// ContactUpdated：仅当作者用户 == 自己时按 HLC 严格更新应用；变化则发
+/// ContactsChanged。
+async fn on_contact_updated(svc: &Inner, m: &StoredMessage, rec: &ContactRecord) {
+    let Some(self_user) = svc.state.read().unwrap().self_user else {
+        return;
+    };
+    let author_user = svc
+        .store
+        .get_device(&m.env.id.author)
+        .ok()
+        .flatten()
+        .map(|r| r.user);
+    if author_user.as_ref() != Some(&self_user) {
+        return;
+    }
+    match svc.trust.apply_contact_record(rec) {
+        Ok(true) => {
+            let _ = svc.events.send(lanmsg_api::types::Event::ContactsChanged);
+        }
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error = %e, "ContactUpdated 应用失败"),
     }
 }
 

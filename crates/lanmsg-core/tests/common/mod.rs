@@ -12,7 +12,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 
-use lanmsg_api::types::{ApiError, Event, InitMode, Request, Response};
+use lanmsg_api::types::{ApiError, Event, InitMode, Request, RequestAction, RequestKind, Response};
 use lanmsg_core::discovery::{DiscoveryMode, MemoryBus};
 use lanmsg_core::keystore::FileKeyStore;
 use lanmsg_core::platform::PlatformHooks;
@@ -139,6 +139,14 @@ impl TestNode {
             .expect("user_id 未缓存：先调用 init_first")
     }
 
+    /// 查询本机设备 ID（GetSelf，异步）。
+    pub async fn device_id(&self) -> String {
+        match self.call(Request::GetSelf).await {
+            Response::SelfInfo { value } => value.device_id,
+            other => panic!("期望 SelfInfo，实际 {other:?}"),
+        }
+    }
+
     /// 取下一条匹配事件，超时 panic。
     pub async fn wait_event(&mut self, f: impl Fn(&Event) -> bool, secs: u64) -> Event {
         let deadline = Duration::from_secs(secs);
@@ -172,6 +180,60 @@ impl TestNode {
             }
         }
     }
+}
+
+/// 手动互连两个节点（A 拨 B），等待双方 ListPeers 各含对方设备。
+pub async fn link(a: &TestNode, b: &TestNode) {
+    let addr = b.svc.local_addr().to_string();
+    a.call(Request::AddManualPeer { addr }).await;
+    let a_dev = a.device_id().await;
+    let b_dev = b.device_id().await;
+    let start = std::time::Instant::now();
+    loop {
+        let a_sees_b = matches!(
+            a.try_call(Request::ListPeers).await,
+            Ok(Response::Peers { value }) if value.iter().any(|p| p.device_id == b_dev)
+        );
+        let b_sees_a = matches!(
+            b.try_call(Request::ListPeers).await,
+            Ok(Response::Peers { value }) if value.iter().any(|p| p.device_id == a_dev)
+        );
+        if a_sees_b && b_sees_a {
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            panic!("5 秒内双方未互见");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// 结为联系人：A 向 B 发联系人请求 → B 收到 IncomingRequest{kind: Contact} →
+/// B RespondRequest(AddContact) → 双方等 ContactsChanged。返回 B 侧看到的请求 ID
+/// （供 Reject/Block 等后续动作用）。
+pub async fn befriend(a: &mut TestNode, b: &mut TestNode) -> String {
+    link(a, b).await;
+    a.call(Request::RequestContact { user: b.user_id() }).await;
+    let ev = b
+        .wait_event(
+            |e| matches!(e, Event::IncomingRequest { request } if matches!(request.kind, RequestKind::Contact)),
+            5,
+        )
+        .await;
+    let request_id = match ev {
+        Event::IncomingRequest { request } => request.request,
+        other => panic!("期望 IncomingRequest，实际 {other:?}"),
+    };
+    b.call(Request::RespondRequest {
+        request: request_id.clone(),
+        action: RequestAction::AddContact,
+    })
+    .await;
+    a.wait_event(|e| matches!(e, Event::ContactsChanged), 5)
+        .await;
+    b.wait_event(|e| matches!(e, Event::ContactsChanged), 5)
+        .await;
+    request_id
 }
 
 /// 轮询直到异步条件成立，50ms 间隔，超时 panic。

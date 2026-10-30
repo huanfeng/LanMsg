@@ -16,9 +16,9 @@ use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use lanmsg_api::types::Event;
 use lanmsg_proto::consts::{PROTO_VERSION, RETRY_MAX, RETRY_MIN};
 use lanmsg_proto::frame::Frame;
-use lanmsg_proto::ids::{DeviceId, UserId};
+use lanmsg_proto::ids::UserId;
 use lanmsg_proto::sign::{sign_with_zeroed_sig, DeviceKey};
-use lanmsg_proto::types::{Announce, DeviceCert, Signature64, Status};
+use lanmsg_proto::types::{Announce, Signature64, Status};
 
 use crate::discovery::{Discovery, DiscoveryEvent, DiscoveryMode};
 use crate::error::CoreError;
@@ -49,10 +49,12 @@ pub struct ServiceConfig {
     pub localsend_port: u16,
 }
 
-/// 节点可变状态：在线状态与自身用户（accept_filter 与路由同步读取）。
+/// 节点可变状态：在线状态、自身用户与配对窗口（accept_filter 与路由同步读取）。
 pub(crate) struct NodeState {
     pub(crate) status: Status,
     pub(crate) self_user: Option<UserId>,
+    /// 配对窗口是否开放（P2 Task 7 配对流程接线；本任务恒 false 占位）。
+    pub(crate) pair_window_open: bool,
 }
 
 /// Service 内部共享状态（C6）。
@@ -62,6 +64,7 @@ pub(crate) struct Inner {
     pub(crate) keystore: Arc<dyn KeyStore>,
     pub(crate) conns: ConnManager,
     pub(crate) msg: Messaging,
+    pub(crate) trust: crate::trust::Trust,
     pub(crate) events: broadcast::Sender<Event>,
     pub(crate) announce_tx: watch::Sender<Option<Announce>>,
     pub(crate) hello_tx: watch::Sender<HelloInfo>,
@@ -119,19 +122,21 @@ impl Service {
         let state = Arc::new(StdRwLock::new(NodeState {
             status: Status::Online,
             self_user,
+            pair_window_open: false,
         }));
 
-        // accept_filter：cert 为 None 一律拒绝；Invisible 时只接受本人设备。
+        // accept_filter：Trust 的七条准入规则（status 与配对窗口取当时值）。
+        // 闭包直接捕获依赖而非 Trust 本身——ConnManager::bind 需要过滤闭包
+        // 先于 Trust（依赖 bind 产出的 ConnManager）构造。
+        let filter_store = store.clone();
+        let filter_identity = identity.clone();
         let filter_state = state.clone();
         let accept_filter = Arc::new(move |p: &PeerInfo| -> bool {
-            let Some(cert) = &p.cert else {
-                return false;
+            let (status, pair_open) = {
+                let st = filter_state.read().unwrap();
+                (st.status.clone(), st.pair_window_open)
             };
-            let st = filter_state.read().unwrap();
-            match st.status {
-                Status::Invisible => st.self_user.is_some_and(|u| cert.user == u),
-                _ => true,
-            }
+            crate::trust::accept_rules(&filter_store, &filter_identity, p, status, pair_open)
         });
 
         let (conn_tx, conn_rx) = mpsc::channel::<ConnEvent>(256);
@@ -146,6 +151,15 @@ impl Service {
         let local_addr = conns.local_addr();
 
         let msg = Messaging::new(
+            store.clone(),
+            identity.clone(),
+            clock.clone(),
+            conns.clone(),
+            events_tx.clone(),
+        );
+
+        // Trust：联系人确认、准入过滤、证书更新接收。
+        let trust = crate::trust::Trust::new(
             store.clone(),
             identity.clone(),
             clock.clone(),
@@ -179,6 +193,7 @@ impl Service {
             keystore,
             conns,
             msg,
+            trust,
             events: events_tx,
             announce_tx,
             hello_tx,
@@ -274,9 +289,32 @@ async fn routing_task(
                         .send(Event::PeerOffline { device: device.to_hex() });
                 }
                 Some(ConnEvent::Frame(d, f)) => match f {
-                    // CertUpdate（本任务的最小接收侧）：验签入库并刷新对端证书视图；
-                    // 完整信任校验与转发在 Task 5 的 Trust::on_cert_update 中实现。
-                    Frame::CertUpdate(certs) => on_cert_update_frame(&inner, d, certs).await,
+                    // 信任帧分派给 Trust；其余交给消息模块。
+                    Frame::CertUpdate(certs) => {
+                        if let Some(pi) = inner.conns.peer(&d) {
+                            if let Err(e) = inner.trust.on_cert_update(&pi, certs).await {
+                                tracing::warn!(peer = %d, error = %e, "CertUpdate 处理失败");
+                            }
+                        }
+                    }
+                    Frame::ContactRequest(req) => {
+                        if let Some(pi) = inner.conns.peer(&d) {
+                            if let Err(e) =
+                                inner.trust.on_contact_request(&inner.msg, &pi, req).await
+                            {
+                                tracing::warn!(peer = %d, error = %e, "ContactRequest 处理失败");
+                            }
+                        }
+                    }
+                    Frame::ContactResponse(resp) => {
+                        if let Some(pi) = inner.conns.peer(&d) {
+                            if let Err(e) =
+                                inner.trust.on_contact_response(&inner.msg, &pi, resp).await
+                            {
+                                tracing::warn!(peer = %d, error = %e, "ContactResponse 处理失败");
+                            }
+                        }
+                    }
                     _ => {
                         let _ = inner.msg.on_frame(d, f).await;
                     }
@@ -315,32 +353,8 @@ async fn on_up(inner: &Inner, peer: PeerInfo) {
     }
     let self_user = inner.state.read().unwrap().self_user;
     let _ = inner.events.send(Event::PeerOnline {
-        peer: views::peer_view(&peer, self_user.as_ref()),
+        peer: views::peer_view(&inner.store, &peer, self_user.as_ref()),
     });
-}
-
-/// CertUpdate 接收侧（最小实现）：逐证书验签、必须来自证书声称的设备本身，
-/// 入库并刷新连接层证书视图（ListPeers 据此反映新设备名）。
-/// 完整信任校验（联系人检查、自身设备转发）在 Task 5 的 Trust::on_cert_update 中实现。
-async fn on_cert_update_frame(inner: &Inner, from: DeviceId, certs: Vec<DeviceCert>) {
-    for cert in certs {
-        if cert.verify().is_err() || cert.device != from {
-            tracing::warn!(peer = %from, "CertUpdate 证书验签失败或来源不符，忽略");
-            continue;
-        }
-        let _ = inner.store.upsert_device(&DeviceRow {
-            device: cert.device,
-            user: cert.user,
-            cert: cert.clone(),
-            name: cert.device_name.clone(),
-            device_type: cert.device_type,
-            last_addr: None,
-            last_path: None,
-            last_seen: None,
-            revoked: false,
-        });
-        inner.conns.update_peer_cert(&from, cert).await;
-    }
 }
 
 /// 发现事件：未连接且自身设备 ID 较小时出站拨号；Invisible 不主动外联其他用户。

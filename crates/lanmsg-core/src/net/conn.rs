@@ -3,10 +3,11 @@
 // 注释中文，标识符英文。
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use futures_util::{SinkExt, StreamExt, TryFutureExt};
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -58,12 +59,22 @@ pub struct HelloInfo {
     pub listen_port: u16,
 }
 
+/// 连接实例 ID 分配器：读循环退出时按实例原子移除管理器表中"自己那条"，
+/// 避免同设备重连裁决替换后误删存活的新连接（或残留死连接条目）。
+static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 读循环退出清理回调：移除管理器表中仍是该连接实例的条目，
+/// 返回是否确有移除（即退出时该连接仍是当前登记连接）。
+pub(crate) type ExitCleanup = Arc<dyn Fn(u64) -> BoxFuture<'static, bool> + Send + Sync>;
+
 /// 已建立并完成 Hello 校验的单条连接。
 pub(crate) struct Connection {
     peer_info: PeerInfo,
     write_tx: mpsc::Sender<Frame>,
     up_sent: Arc<AtomicBool>,
     shutdown_tx: mpsc::Sender<()>,
+    /// 连接实例 ID（同设备重连裁决后区分新旧连接）。
+    conn_id: u64,
 }
 
 impl Connection {
@@ -74,6 +85,7 @@ impl Connection {
         self_device: DeviceId,
         hello: &HelloInfo,
         event_tx: mpsc::Sender<ConnEvent>,
+        cleanup: ExitCleanup,
     ) -> Result<(PeerInfo, Arc<Connection>), CoreError> {
         let stream = TcpStream::connect(addr).await.map_err(CoreError::Io)?;
         let peer_addr = stream.peer_addr().map_err(CoreError::Io)?;
@@ -188,18 +200,23 @@ impl Connection {
 
         let (write_tx, write_rx) = mpsc::channel(256);
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
         let connection = Arc::new(Connection {
             peer_info: peer_info.clone(),
             write_tx,
             up_sent: Arc::new(AtomicBool::new(false)),
             shutdown_tx,
+            conn_id,
         });
 
         let event_tx_for_read = event_tx.clone();
         let write_tx_for_pong = connection.write_tx.clone();
         let device_for_events = peer_info.device;
+        let up_sent_flag = connection.up_sent.clone();
 
-        // 读循环：解码帧，Ping 自动回 Pong，其余上报；连接断开或 shutdown 发 Down。
+        // 读循环：解码帧，Ping 自动回 Pong，其余上报；退出时先自清理管理器表
+        // 条目，再仅当自己仍是登记连接时通知外层 Down（被替换的旧连接不发，
+        // 避免对存活的新连接误报离线）。
         tokio::spawn(async move {
             let mut reader = framed_read;
             let mut shutdown_rx = shutdown_rx;
@@ -219,7 +236,9 @@ impl Connection {
                     _ = shutdown_rx.recv() => break,
                 }
             }
-            let _ = event_tx.send(ConnEvent::Down(device_for_events)).await;
+            if up_sent_flag.load(Ordering::SeqCst) && cleanup(conn_id).await {
+                let _ = event_tx.send(ConnEvent::Down(device_for_events)).await;
+            }
         });
 
         // 写循环：发送队列中的帧。
@@ -239,6 +258,7 @@ impl Connection {
 
     /// 入站连接分流：先读拨号方的通道字节，控制通道走 P1 Hello 流程，数据通道
     /// 校验 DataHello 后交给注册的处理器。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn accept_channel(
         stream: TcpStream,
         device_key: &DeviceKey,
@@ -247,6 +267,7 @@ impl Connection {
         accept_filter: &(dyn Fn(&PeerInfo) -> bool + Send + Sync),
         event_tx: mpsc::Sender<ConnEvent>,
         data_handler: Option<DataHandler>,
+        cleanup: ExitCleanup,
     ) -> Result<Accepted, CoreError> {
         let peer_addr = stream.peer_addr().map_err(CoreError::Io)?;
         let (server_config, _client_config) = make_tls_configs(device_key)?;
@@ -282,6 +303,7 @@ impl Connection {
                     hello,
                     accept_filter,
                     event_tx,
+                    cleanup,
                 )
                 .await
             }
@@ -320,6 +342,7 @@ async fn accept_control(
     hello: &HelloInfo,
     accept_filter: &(dyn Fn(&PeerInfo) -> bool + Send + Sync),
     event_tx: mpsc::Sender<ConnEvent>,
+    cleanup: ExitCleanup,
 ) -> Result<Accepted, CoreError> {
     let (read_half, write_half) = split(tls_stream);
     let mut framed_read = FramedRead::new(read_half, FrameCodec);
@@ -409,16 +432,19 @@ async fn accept_control(
 
     let (write_tx, write_rx) = mpsc::channel(256);
     let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+    let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
     let connection = Arc::new(Connection {
         peer_info: peer_info.clone(),
         write_tx,
         up_sent: Arc::new(AtomicBool::new(false)),
         shutdown_tx,
+        conn_id,
     });
 
     let write_tx_for_pong = connection.write_tx.clone();
     let device_for_events = peer_info.device;
     let event_tx_for_read = event_tx.clone();
+    let up_sent_flag = connection.up_sent.clone();
     // cert=None 的连接只放行 Pair/Ping/Pong/Error；其他帧回 Error 403 并丢弃。
     let uninit_peer = peer_info.cert.is_none();
     tokio::spawn(async move {
@@ -454,7 +480,10 @@ async fn accept_control(
                 _ = shutdown_rx.recv() => break,
             }
         }
-        let _ = event_tx.send(ConnEvent::Down(device_for_events)).await;
+        // 退出时先自清理管理器表条目，再仅当自己仍是登记连接时通知外层 Down。
+        if up_sent_flag.load(Ordering::SeqCst) && cleanup(conn_id).await {
+            let _ = event_tx.send(ConnEvent::Down(device_for_events)).await;
+        }
     });
     tokio::spawn(async move {
         let mut writer = framed_write;
@@ -487,9 +516,18 @@ impl Connection {
         self.up_sent.store(true, Ordering::SeqCst);
     }
 
-    /// 关闭连接：通知读循环退出并发送 Down 事件。
-    pub(crate) async fn shutdown(&self) {
-        let _ = self.shutdown_tx.send(()).await;
+    /// 连接实例 ID（管理器表登记与读循环退出自清理比对用）。
+    pub(crate) fn conn_id(&self) -> u64 {
+        self.conn_id
+    }
+
+    /// 关闭连接：通知读循环退出。
+    ///
+    /// 用 try_send 非阻塞投递：调用方（connect/disconnect/shutdown）持管理器
+    /// 写锁，若 await 发送而读循环恰好卡在退出自清理等写锁，会互相等死。
+    /// 令牌已在通道时说明读循环即将退出，重复投递可忽略。
+    pub(crate) fn shutdown(&self) {
+        let _ = self.shutdown_tx.try_send(());
     }
 }
 

@@ -119,13 +119,27 @@ pub fn conv_summary(
 }
 
 // Task 11：peer_view 将连接层 PeerInfo 转换为对端设备视图（addr 用 dial_addr）。
-use lanmsg_api::types::{PathClassDto, PeerView};
+// P2 Task 5：is_contact 按联系人表真实状态填写；新增 contact_view / device_view /
+// request_view 供 ListContacts / ListRequests 使用。
+use lanmsg_api::types::{
+    ContactView, DeviceView, PathClassDto, PeerView, RequestKind, RequestView,
+};
 
 use crate::net::PeerInfo;
+use crate::store::{ContactRow, DeviceRow, RequestRow};
 
-/// 将对端连接信息转换为对端设备视图。
-pub fn peer_view(p: &PeerInfo, self_user: Option<&UserId>) -> PeerView {
+/// 将对端连接信息转换为对端设备视图（is_contact 查联系人表）。
+pub fn peer_view(store: &Store, p: &PeerInfo, self_user: Option<&UserId>) -> PeerView {
     let cert = p.cert.as_ref();
+    let is_contact = cert
+        .map(|c| {
+            store
+                .get_contact(&c.user)
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.state == crate::store::ContactState::Accepted)
+        })
+        .unwrap_or(false);
     PeerView {
         device_id: p.device.to_hex(),
         device_short: p.device.short(),
@@ -142,7 +156,75 @@ pub fn peer_view(p: &PeerInfo, self_user: Option<&UserId>) -> PeerView {
             lanmsg_proto::types::PathClass::Internet => PathClassDto::Internet,
             lanmsg_proto::types::PathClass::Relay => PathClassDto::Relay,
         },
-        is_contact: false, // P1 无联系人概念，P2 实现
+        is_contact,
         is_mine: self_user.is_some_and(|u| cert.is_some_and(|c| c.user == *u)),
+    }
+}
+
+/// 将设备行转换为设备视图（online 按当前已连接设备集合判定）。
+pub fn device_view(d: &DeviceRow, peers: &[PeerInfo], self_user: Option<&UserId>) -> DeviceView {
+    DeviceView {
+        device_id: d.device.to_hex(),
+        device_short: d.device.short(),
+        name: d.name.clone(),
+        device_type: format!("{:?}", d.device_type),
+        online: peers.iter().any(|p| p.device == d.device),
+        path: d.last_path.clone().map(|p| match p {
+            lanmsg_proto::types::PathClass::Lan => PathClassDto::Lan,
+            lanmsg_proto::types::PathClass::Vpn => PathClassDto::Vpn,
+            lanmsg_proto::types::PathClass::Internet => PathClassDto::Internet,
+            lanmsg_proto::types::PathClass::Relay => PathClassDto::Relay,
+        }),
+        is_self: self_user.is_some_and(|u| d.user == *u),
+    }
+}
+
+/// 将联系人行转换为联系人视图（devices 取设备表，online 为任一设备已连接）。
+pub fn contact_view(
+    store: &Store,
+    peers: &[PeerInfo],
+    row: &ContactRow,
+    self_user: Option<&UserId>,
+) -> ContactView {
+    let devices = store.devices_of_user(&row.user).unwrap_or_default();
+    ContactView {
+        user_id: row.user.to_hex(),
+        user_short: row.user.short(),
+        display_name: store
+            .get_user(&row.user)
+            .ok()
+            .flatten()
+            .map(|u| u.display_name)
+            .unwrap_or_else(|| row.user.short()),
+        online: devices
+            .iter()
+            .any(|d| peers.iter().any(|p| p.device == d.device)),
+        devices: devices
+            .iter()
+            .map(|d| device_view(d, peers, self_user))
+            .collect(),
+        auto_accept: row.auto_accept,
+        ask_above_bytes: row.ask_above_bytes,
+    }
+}
+
+/// 将请求行转换为请求视图（from_name 取 users 表，无则 user short）。
+pub fn request_view(store: &Store, r: &RequestRow) -> RequestView {
+    let (from_name, from_short) = match store.get_user(&r.from_user).ok().flatten() {
+        Some(u) => (u.display_name, r.from_user.short()),
+        None => (r.from_user.short(), r.from_user.short()),
+    };
+    RequestView {
+        request: r.request_id.clone(),
+        kind: match r.kind {
+            crate::store::RequestKindRow::Contact => RequestKind::Contact,
+            crate::store::RequestKindRow::Message => RequestKind::Message,
+            crate::store::RequestKindRow::File => RequestKind::File,
+        },
+        from_user: r.from_user.to_hex(),
+        from_name,
+        from_short,
+        preview: r.preview.clone(),
+        created_at: r.created_at,
     }
 }
