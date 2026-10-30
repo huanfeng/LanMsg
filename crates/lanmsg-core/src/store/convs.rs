@@ -116,13 +116,14 @@ impl Store {
         }))
     }
 
-    /// 列出全部会话。
+    /// 列出全部 `gate = 'open'` 的会话（Pending/Rejected 不进列表）。
     pub fn list_conversations(&self) -> Result<Vec<ConvRow>, crate::store::StoreError> {
         let conn = self
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-        let mut stmt =
-            conn.prepare("SELECT conv_id, kind, peer_user, title, created_at FROM conversations")?;
+        let mut stmt = conn.prepare(
+            "SELECT conv_id, kind, peer_user, title, created_at FROM conversations WHERE gate = 'open'",
+        )?;
         let rows = stmt.query_map([], |row| {
             let conv_bytes: Vec<u8> = row.get(0)?;
             let conv = ConvId(conv_bytes.try_into().map_err(|bytes: Vec<u8>| {
@@ -166,6 +167,112 @@ impl Store {
             out.push(r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?);
         }
         Ok(out)
+    }
+
+    /// 设置会话准入门状态与失效时间。
+    pub fn set_gate(
+        &self,
+        conv: &ConvId,
+        gate: Gate,
+        gate_until: Option<i64>,
+    ) -> Result<(), crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        conn.execute(
+            "UPDATE conversations SET gate = ?1, gate_until = ?2 WHERE conv_id = ?3",
+            rusqlite::params![gate.as_str(), gate_until, &conv.0[..]],
+        )?;
+        Ok(())
+    }
+
+    /// 查询准入门状态，会话不存在返回默认 Open。
+    pub fn get_gate(&self, conv: &ConvId) -> Result<(Gate, Option<i64>), crate::store::StoreError> {
+        use rusqlite::OptionalExtension;
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let row: Option<(String, Option<i64>)> = conn
+            .query_row(
+                "SELECT gate, gate_until FROM conversations WHERE conv_id = ?1",
+                [&conv.0[..]],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((gate, until)) => Ok((Gate::parse(&gate)?, until)),
+            None => Ok((Gate::Open, None)),
+        }
+    }
+
+    /// 更新会话已读水位：仅当 HLC 严格更新才写，返回是否变化。
+    pub fn set_last_read(
+        &self,
+        conv: &ConvId,
+        hlc: lanmsg_proto::types::Hlc,
+    ) -> Result<bool, crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let n = conn.execute(
+            "UPDATE conversations SET last_read_millis = ?1, last_read_counter = ?2
+             WHERE conv_id = ?3
+               AND (last_read_millis < ?1 OR (last_read_millis = ?1 AND last_read_counter < ?2))",
+            rusqlite::params![hlc.millis, hlc.counter as i64, &conv.0[..]],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 读取会话已读水位；会话不存在返回零值。
+    pub fn last_read(
+        &self,
+        conv: &ConvId,
+    ) -> Result<lanmsg_proto::types::Hlc, crate::store::StoreError> {
+        use rusqlite::OptionalExtension;
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let row: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT last_read_millis, last_read_counter FROM conversations WHERE conv_id = ?1",
+                [&conv.0[..]],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (millis, counter) = row.unwrap_or((0, 0));
+        Ok(lanmsg_proto::types::Hlc {
+            millis,
+            counter: counter as u32,
+        })
+    }
+}
+
+/// 会话准入门，DB 中存为小写字符串。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    Open,
+    Pending,
+    Rejected,
+}
+
+impl Gate {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Gate::Open => "open",
+            Gate::Pending => "pending",
+            Gate::Rejected => "rejected",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, crate::store::StoreError> {
+        match s {
+            "open" => Ok(Gate::Open),
+            "pending" => Ok(Gate::Pending),
+            "rejected" => Ok(Gate::Rejected),
+            _ => Err(crate::store::StoreError::Codec(format!(
+                "未知准入状态: {s}"
+            ))),
+        }
     }
 }
 
@@ -239,5 +346,38 @@ mod tests {
         s.ensure_conversation(&row).unwrap();
         let list = s.list_conversations().unwrap();
         assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn list_conversations_hides_pending_gate() {
+        let s = store();
+        let row = ConvRow {
+            conv: conv(),
+            kind: ConvKindRow::Dm,
+            peer_user: Some(user()),
+            title: None,
+            created_at: 1,
+        };
+        s.ensure_conversation(&row).unwrap();
+        assert_eq!(s.list_conversations().unwrap().len(), 1);
+        s.set_gate(&conv(), Gate::Pending, Some(1000)).unwrap();
+        assert_eq!(s.list_conversations().unwrap().len(), 0);
+        assert_eq!(s.get_gate(&conv()).unwrap(), (Gate::Pending, Some(1000)));
+        s.set_gate(&conv(), Gate::Open, None).unwrap();
+        assert_eq!(s.list_conversations().unwrap().len(), 1);
+        // last_read 仅严格更新。
+        let h1 = lanmsg_proto::types::Hlc {
+            millis: 5,
+            counter: 0,
+        };
+        assert!(s.set_last_read(&conv(), h1.clone()).unwrap());
+        assert!(!s.set_last_read(&conv(), h1).unwrap());
+        assert_eq!(
+            s.last_read(&conv()).unwrap(),
+            lanmsg_proto::types::Hlc {
+                millis: 5,
+                counter: 0
+            }
+        );
     }
 }

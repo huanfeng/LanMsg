@@ -2,7 +2,7 @@
 // MsgStateRow 存为小写字符串；envelope 存完整 CBOR；text 冗余存放 MsgBody::Text。
 // 注释中文，标识符英文。
 
-use lanmsg_proto::ids::{ConvId, DeviceId, MsgId};
+use lanmsg_proto::ids::{ConvId, DeviceId, MsgId, UserId};
 use lanmsg_proto::types::{Envelope, MsgBody, VersionVector};
 
 use crate::store::Store;
@@ -20,6 +20,51 @@ type MessageTuple = (
     i64,
     Option<String>,
 );
+
+/// 查作者所属用户（devices 表），查不到返回 None。
+fn author_user_bytes(
+    tx: &rusqlite::Transaction<'_>,
+    author: &[u8],
+) -> Result<Option<Vec<u8>>, rusqlite::Error> {
+    use rusqlite::OptionalExtension;
+    Ok(tx
+        .query_row(
+            "SELECT user_id FROM devices WHERE device_id = ?1",
+            [author],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// 把 Blob 元数据列表写入 message_blobs（idx 从 0）。
+fn write_message_blobs<'a>(
+    tx: &rusqlite::Transaction<'_>,
+    env: &Envelope,
+    items: impl Iterator<Item = (&'a lanmsg_proto::types::BlobMeta, Option<&'a str>)>,
+) -> Result<(), rusqlite::Error> {
+    for (idx, (meta, rel_path)) in items.enumerate() {
+        tx.execute(
+            "INSERT OR IGNORE INTO message_blobs(author, seq, idx, conv_id, hash, name, size, mime, rel_path, hlc_millis, hlc_counter, meta)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                &env.id.author.0[..],
+                env.id.seq as i64,
+                idx as i64,
+                &env.conv.0,
+                &meta.hash.0[..],
+                meta.name,
+                meta.size as i64,
+                meta.mime,
+                rel_path,
+                env.hlc.millis,
+                env.hlc.counter as i64,
+                lanmsg_proto::to_cbor(meta),
+            ],
+        )?;
+    }
+    Ok(())
+}
 
 /// 消息状态行，DB 中存为小写字符串。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -69,6 +114,7 @@ pub struct StoredMessage {
 
 impl Store {
     /// 返回 (seq, conv_seq)：作者全局最大 seq+1、会话内最大 conv_seq+1（无记录为 1）。
+    /// 同时考虑 preparing 表中占位的 seq/conv_seq。
     pub fn next_seqs(
         &self,
         author: &DeviceId,
@@ -78,12 +124,18 @@ impl Store {
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
         let seq: Option<i64> = conn.query_row(
-            "SELECT MAX(seq) FROM messages WHERE author = ?1",
+            "SELECT MAX(m) FROM (
+               SELECT MAX(seq) AS m FROM messages WHERE author = ?1
+               UNION ALL SELECT MAX(seq) AS m FROM preparing WHERE author = ?1
+             )",
             rusqlite::params![&author.0[..]],
             |r| r.get::<_, Option<i64>>(0),
         )?;
         let conv_seq: Option<i64> = conn.query_row(
-            "SELECT MAX(conv_seq) FROM messages WHERE conv_id = ?1 AND author = ?2",
+            "SELECT MAX(m) FROM (
+               SELECT MAX(conv_seq) AS m FROM messages WHERE conv_id = ?1 AND author = ?2
+               UNION ALL SELECT MAX(conv_seq) AS m FROM preparing WHERE conv_id = ?1 AND author = ?2
+             )",
             rusqlite::params![&conv.0[..], &author.0[..]],
             |r| r.get::<_, Option<i64>>(0),
         )?;
@@ -93,12 +145,34 @@ impl Store {
         ))
     }
 
-    /// INSERT OR IGNORE 插入信封，返回是否新插入；新插入时在同一事务内推进 version_vectors。
+    /// INSERT OR IGNORE 插入信封，返回是否新插入；新插入时在同一事务内推进
+    /// version_vectors，并处理 author_user、hidden、message_blobs、recalls 关联。
     pub fn insert_envelope(
         &self,
         env: &Envelope,
         state: MsgStateRow,
         received_at: i64,
+    ) -> Result<bool, crate::store::StoreError> {
+        self.insert_envelope_inner(env, state, received_at, None)
+    }
+
+    /// 同 `insert_envelope`，但强制 hidden 值（陌生人待处理消息用 `hidden = true`）。
+    pub fn insert_envelope_hidden(
+        &self,
+        env: &Envelope,
+        state: MsgStateRow,
+        received_at: i64,
+        hidden: bool,
+    ) -> Result<bool, crate::store::StoreError> {
+        self.insert_envelope_inner(env, state, received_at, Some(hidden))
+    }
+
+    fn insert_envelope_inner(
+        &self,
+        env: &Envelope,
+        state: MsgStateRow,
+        received_at: i64,
+        hidden_override: Option<bool>,
     ) -> Result<bool, crate::store::StoreError> {
         use rusqlite::OptionalExtension;
         let mut conn = self
@@ -119,9 +193,10 @@ impl Store {
             _ => None,
         };
         let envelope_bytes = lanmsg_proto::to_cbor(env);
+        let hidden = hidden_override.unwrap_or_else(|| lanmsg_proto::body_is_hidden(&env.body));
         let inserted = tx.execute(
-            "INSERT OR IGNORE INTO messages(author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR IGNORE INTO messages(author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text, author_user, hidden, deleted)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0)",
             rusqlite::params![
                 author_bytes,
                 env.id.seq as i64,
@@ -133,8 +208,59 @@ impl Store {
                 state.as_str(),
                 received_at,
                 text,
+                author_user_bytes(&tx, author_bytes)?.as_deref(),
+                hidden as i64,
             ],
         )? > 0;
+
+        if inserted {
+            // Files/Folder：写 message_blobs。
+            match &env.body {
+                MsgBody::Files { items } => {
+                    write_message_blobs(&tx, env, items.iter().map(|b| (b, None)))?;
+                }
+                MsgBody::Folder { name: _, entries } => {
+                    write_message_blobs(
+                        &tx,
+                        env,
+                        entries.iter().map(|e| (&e.blob, Some(e.rel_path.as_str()))),
+                    )?;
+                }
+                _ => {}
+            }
+            // Recall：写 recalls 并召回已存在的目标。
+            if let MsgBody::Recall { target } = &env.body {
+                tx.execute(
+                    "INSERT OR IGNORE INTO recalls(target_author, target_seq, recall_author, recall_seq)
+                     VALUES(?1, ?2, ?3, ?4)",
+                    rusqlite::params![
+                        &target.author.0[..],
+                        target.seq as i64,
+                        author_bytes,
+                        env.id.seq as i64,
+                    ],
+                )?;
+                tx.execute(
+                    "UPDATE messages SET state = 'recalled'
+                     WHERE author = ?1 AND seq = ?2 AND state != 'recalled'",
+                    rusqlite::params![&target.author.0[..], target.seq as i64],
+                )?;
+            }
+            // 目标此前被召回：新插入的消息直接置 recalled。
+            let recalled: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM recalls WHERE target_author = ?1 AND target_seq = ?2",
+                    rusqlite::params![author_bytes, env.id.seq as i64],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if recalled.is_some() {
+                tx.execute(
+                    "UPDATE messages SET state = 'recalled' WHERE author = ?1 AND seq = ?2",
+                    rusqlite::params![author_bytes, env.id.seq as i64],
+                )?;
+            }
+        }
 
         if inserted && (env.conv_seq as i64) == contiguous + 1 {
             let mut cont = env.conv_seq;
@@ -158,6 +284,144 @@ impl Store {
 
         tx.commit()?;
         Ok(inserted)
+    }
+
+    /// 批量设置隐藏标记。
+    pub fn set_hidden(&self, ids: &[MsgId], hidden: bool) -> Result<(), crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        for id in ids {
+            conn.execute(
+                "UPDATE messages SET hidden = ?1 WHERE author = ?2 AND seq = ?3",
+                rusqlite::params![hidden as i64, &id.author.0[..], id.seq as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 批量标记本地删除（同步保留，UI 不再显示）。
+    pub fn mark_deleted(&self, ids: &[MsgId]) -> Result<(), crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        for id in ids {
+            conn.execute(
+                "UPDATE messages SET deleted = 1 WHERE author = ?2 AND seq = ?3",
+                rusqlite::params![&id.author.0[..], id.seq as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 把该会话中 `author_user` 发出的、`hlc <= upto`、状态为 sent/delivered 的消息
+    /// 置 read，返回被改的 id。
+    pub fn mark_read_upto(
+        &self,
+        conv: &ConvId,
+        author_user: &UserId,
+        upto: lanmsg_proto::types::Hlc,
+    ) -> Result<Vec<MsgId>, crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT author, seq FROM messages
+             WHERE conv_id = ?1 AND author_user = ?2 AND state IN ('sent', 'delivered')
+               AND (hlc_millis < ?3 OR (hlc_millis = ?3 AND hlc_counter <= ?4))",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                &conv.0[..],
+                &author_user.0[..],
+                upto.millis,
+                upto.counter as i64
+            ],
+            |row| {
+                let author: Vec<u8> = row.get(0)?;
+                let seq: i64 = row.get(1)?;
+                Ok((author, seq))
+            },
+        )?;
+        let mut ids = Vec::new();
+        for r in rows {
+            let (author, seq) = r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+            ids.push(MsgId {
+                author: DeviceId(author.try_into().map_err(|bytes: Vec<u8>| {
+                    crate::store::StoreError::Codec(format!("author 长度非法: {}", bytes.len()))
+                })?),
+                seq: seq as u64,
+            });
+        }
+        drop(stmt);
+        self.set_message_state_multi(&ids, MsgStateRow::Read)?;
+        Ok(ids)
+    }
+
+    /// 未读数：会话内他人发出、hlc 晚于 after、未隐藏未删除未召回的消息条数。
+    pub fn unread_count(
+        &self,
+        conv: &ConvId,
+        self_user: &UserId,
+        after: lanmsg_proto::types::Hlc,
+    ) -> Result<u32, crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages
+             WHERE conv_id = ?1 AND author_user IS NOT NULL AND author_user != ?2
+               AND hidden = 0 AND deleted = 0 AND state != 'recalled'
+               AND (hlc_millis > ?3 OR (hlc_millis = ?3 AND hlc_counter > ?4))",
+            rusqlite::params![
+                &conv.0[..],
+                &self_user.0[..],
+                after.millis,
+                after.counter as i64
+            ],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
+    /// 会话内某用户发出的全部消息 ID（撤回传播用）。
+    pub fn messages_of_user_in_conv(
+        &self,
+        conv: &ConvId,
+        user: &UserId,
+    ) -> Result<Vec<MsgId>, crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT author, seq FROM messages WHERE conv_id = ?1 AND author_user = ?2")?;
+        let rows = stmt.query_map(rusqlite::params![&conv.0[..], &user.0[..]], |row| {
+            let author: Vec<u8> = row.get(0)?;
+            let seq: i64 = row.get(1)?;
+            Ok((author, seq))
+        })?;
+        let mut ids = Vec::new();
+        for r in rows {
+            let (author, seq) = r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+            ids.push(MsgId {
+                author: DeviceId(author.try_into().map_err(|bytes: Vec<u8>| {
+                    crate::store::StoreError::Codec(format!("author 长度非法: {}", bytes.len()))
+                })?),
+                seq: seq as u64,
+            });
+        }
+        Ok(ids)
+    }
+
+    fn set_message_state_multi(
+        &self,
+        ids: &[MsgId],
+        state: MsgStateRow,
+    ) -> Result<(), crate::store::StoreError> {
+        for id in ids {
+            self.set_message_state(id, state)?;
+        }
+        Ok(())
     }
 
     /// 设置消息状态。
@@ -259,7 +523,7 @@ impl Store {
                 };
                 let mut stmt = conn.prepare(
                     "SELECT author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text
-                     FROM messages WHERE conv_id = ?1
+                     FROM messages WHERE conv_id = ?1 AND hidden = 0 AND deleted = 0
                        AND (hlc_millis < ?2 OR (hlc_millis = ?2 AND hlc_counter < ?3) OR (hlc_millis = ?2 AND hlc_counter = ?3 AND author < ?4) OR (hlc_millis = ?2 AND hlc_counter = ?3 AND author = ?4 AND seq < ?5))
                      ORDER BY hlc_millis DESC, hlc_counter DESC, author DESC, seq DESC
                      LIMIT ?6",
@@ -275,7 +539,7 @@ impl Store {
             None => {
                 let mut stmt = conn.prepare(
                     "SELECT author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text
-                     FROM messages WHERE conv_id = ?1
+                     FROM messages WHERE conv_id = ?1 AND hidden = 0 AND deleted = 0
                      ORDER BY hlc_millis DESC, hlc_counter DESC, author DESC, seq DESC
                      LIMIT ?2",
                 )?;
@@ -407,7 +671,7 @@ mod tests {
     #[test]
     fn migrations_set_user_version() {
         let s = store();
-        assert_eq!(s.schema_version().unwrap(), 1);
+        assert!(s.schema_version().unwrap() >= 2);
     }
 
     #[test]
@@ -484,5 +748,108 @@ mod tests {
         assert_eq!(after.len(), 2);
         assert_eq!(after[0].conv_seq, 2);
         assert_eq!(after[1].conv_seq, 3);
+    }
+
+    #[test]
+    fn hidden_messages_excluded_from_list_but_included_in_sync() {
+        let s = store();
+        let mut text = env(1, 1);
+        text.body = MsgBody::Text {
+            text: "可见".into(),
+        };
+        let mut read = env(2, 2);
+        read.body = MsgBody::Read {
+            upto: lanmsg_proto::types::Hlc {
+                millis: 1,
+                counter: 0,
+            },
+        };
+        s.insert_envelope(&text, MsgStateRow::Delivered, 1).unwrap();
+        s.insert_envelope(&read, MsgStateRow::Delivered, 2).unwrap();
+        assert_eq!(s.list_messages(&CONV, None, 10).unwrap().len(), 1);
+        assert_eq!(s.messages_after(&CONV, &AUTHOR, 0, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn recall_before_target_marks_target_recalled_on_arrival() {
+        let s = store();
+        let target = env(2, 2);
+        let mut recall = env(1, 1);
+        recall.body = MsgBody::Recall {
+            target: target.id.clone(),
+        };
+        // 先撤回后到目标。
+        s.insert_envelope(&recall, MsgStateRow::Delivered, 1)
+            .unwrap();
+        s.insert_envelope(&target, MsgStateRow::Delivered, 2)
+            .unwrap();
+        assert_eq!(
+            s.get_message(&target.id).unwrap().unwrap().state,
+            MsgStateRow::Recalled
+        );
+    }
+
+    #[test]
+    fn next_seqs_accounts_for_preparing() {
+        let s = store();
+        s.insert_preparing(&crate::store::blobs::PreparingRow {
+            author: AUTHOR,
+            seq: 1,
+            conv: CONV,
+            conv_seq: 1,
+            hlc: lanmsg_proto::types::Hlc {
+                millis: 1,
+                counter: 0,
+            },
+            kind: crate::store::blobs::PreparingKind::Files,
+            paths: vec![std::path::PathBuf::from("/tmp/a")],
+            created_at: 1,
+        })
+        .unwrap();
+        assert_eq!(s.next_seqs(&AUTHOR, &CONV).unwrap(), (2, 2));
+    }
+
+    #[test]
+    fn unread_count_counts_only_others_after_last_read() {
+        let s = store();
+        let other = DeviceId([7u8; 32]);
+        // 先插设备行，使后续消息的 author_user 关联生效。
+        s.upsert_device(&crate::store::DeviceRow {
+            device: other,
+            user: UserId([8u8; 32]),
+            cert: lanmsg_proto::types::DeviceCert::issue(
+                &lanmsg_proto::sign::UserKey::generate(),
+                other,
+                "对方设备".into(),
+                lanmsg_proto::types::DeviceType::Desktop,
+                1,
+            ),
+            name: "对方设备".into(),
+            device_type: lanmsg_proto::types::DeviceType::Desktop,
+            last_addr: None,
+            last_path: None,
+            last_seen: None,
+            revoked: false,
+        })
+        .unwrap();
+        let mut mine = env(1, 1);
+        mine.body = MsgBody::Text {
+            text: "我的".into(),
+        };
+        s.insert_envelope(&mine, MsgStateRow::Delivered, 1).unwrap();
+        let mut theirs = env(2, 1);
+        theirs.id.author = other;
+        theirs.body = MsgBody::Text {
+            text: "对方的".into(),
+        };
+        s.insert_envelope(&theirs, MsgStateRow::Delivered, 2)
+            .unwrap();
+        let self_user = UserId([9u8; 32]);
+        let after = lanmsg_proto::types::Hlc {
+            millis: 0,
+            counter: 0,
+        };
+        let n = s.unread_count(&CONV, &self_user, after).unwrap();
+        assert!(n >= 1, "他人消息应计数");
     }
 }

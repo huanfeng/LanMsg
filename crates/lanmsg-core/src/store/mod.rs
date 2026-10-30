@@ -2,12 +2,15 @@
 // Store 基于 rusqlite，所有方法 &self、同步执行，不跨 .await 持锁。
 // 注释中文，标识符英文。
 
+pub mod blobs;
+pub mod contacts;
 pub mod convs;
 pub mod messages;
 pub mod schema;
 pub mod users;
 
-pub use convs::{ConvKindRow, ConvRow};
+pub use contacts::{ContactRow, ContactState, RequestKindRow, RequestRow};
+pub use convs::{ConvKindRow, ConvRow, Gate};
 pub use messages::{MsgStateRow, StoredMessage};
 pub use users::{DeviceRow, UserRow};
 
@@ -124,5 +127,29 @@ mod tests {
     #[test]
     fn migrations_set_user_version() {
         assert_eq!(store().schema_version().unwrap(), MIGRATIONS.len() as u32);
+    }
+
+    #[test]
+    fn schema_at_least_v2_with_new_tables() {
+        let s = store();
+        assert!(s.schema_version().unwrap() >= 2);
+        let conn = s.conn().unwrap();
+        for table in [
+            "contacts",
+            "requests",
+            "revocations",
+            "recalls",
+            "preparing",
+            "blobs",
+            "blob_local",
+            "blob_holders",
+            "message_blobs",
+            "transfers",
+        ] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap_or_else(|e| panic!("表 {table} 查询失败: {e}"));
+            assert_eq!(n, 0, "表 {table} 应为空");
+        }
     }
 }

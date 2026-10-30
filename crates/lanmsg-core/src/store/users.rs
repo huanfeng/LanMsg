@@ -294,6 +294,18 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// 吊销设备：置 revoked = 1。
+    pub fn revoke_device(&self, device: &DeviceId) -> Result<(), crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        conn.execute(
+            "UPDATE devices SET revoked = 1 WHERE device_id = ?1",
+            [&device.0[..]],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
