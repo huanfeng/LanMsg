@@ -34,7 +34,6 @@ pub struct ConnManager {
 }
 
 struct Inner {
-    local_addr: SocketAddr,
     connections: HashMap<DeviceId, ConnectionEntry>,
     events: mpsc::Sender<ConnEvent>,
     hello_rx: watch::Receiver<HelloInfo>,
@@ -60,7 +59,7 @@ impl ConnManager {
         let listener = if port == 0 {
             TcpListener::bind("0.0.0.0:0")
                 .await
-                .map_err(|e| CoreError::Io(e))?
+                .map_err(CoreError::Io)?
         } else {
             match TcpListener::bind(format!("0.0.0.0:{port}")).await {
                 Ok(l) => l,
@@ -68,14 +67,13 @@ impl ConnManager {
                     tracing::warn!(port, "端口被占用，回退到随机端口");
                     TcpListener::bind("0.0.0.0:0")
                         .await
-                        .map_err(|e| CoreError::Io(e))?
+                        .map_err(CoreError::Io)?
                 }
             }
         };
-        let local_addr = listener.local_addr().map_err(|e| CoreError::Io(e))?;
+        let local_addr = listener.local_addr().map_err(CoreError::Io)?;
 
         let inner = Inner {
-            local_addr,
             connections: HashMap::new(),
             events,
             hello_rx: hello,
@@ -408,7 +406,7 @@ mod tests {
         assert_eq!(mgr_b.peers().len(), 1);
 
         // A 向 B 发 Presence(Online)。
-        let _ = mgr_a
+        mgr_a
             .send(&dev_b, Frame::Presence(lanmsg_proto::types::Status::Online))
             .await
             .expect("A 发送帧失败");
@@ -423,8 +421,8 @@ mod tests {
 
     #[tokio::test]
     async fn simultaneous_dial_keeps_one_connection() {
-        let (mgr_a, mut events_a, dev_a) = make_manager().await;
-        let (mgr_b, mut events_b, dev_b) = make_manager().await;
+        let (mgr_a, mut events_a, _dev_a) = make_manager().await;
+        let (mgr_b, mut events_b, _dev_b) = make_manager().await;
 
         let _ = tokio::join!(
             mgr_a.connect(mgr_b.local_addr(), false),
@@ -462,18 +460,18 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_hello_cert_mismatching_tls_key() {
-        let (_mgr_a, _events_a, dev_a) = make_manager().await;
+        let (_mgr_a, _events_a, _dev_a) = make_manager().await;
         let (mgr_b, mut _events_b, _dev_b) = make_manager().await;
 
         // A 的 HelloInfo.cert 使用另一台设备 C 的合法证书（device C ≠ A 的 TLS 设备 ID）。
         let device_c = DeviceKey::generate().device_id();
         let cert_c = make_cert_for(device_c);
-        let (hello_tx, hello_rx) = watch::channel(HelloInfo {
+        let (_hello_tx, hello_rx) = watch::channel(HelloInfo {
             display_name: "A".into(),
             cert: Some(cert_c),
         });
         // 改为新建一个 A'（带错误的 cert）。
-        let (_device_a2, identity_a2) = make_identity();
+        let (_device_a2, _identity_raw) = make_identity();
         let identity_a2 = Arc::new(RwLock::new(Identity {
             device: DeviceKey::from_bytes(&_device_a2.to_bytes()),
             user: None,
@@ -490,14 +488,12 @@ mod tests {
         expect_no_up(&mut _events_b).await;
         // A' 也不应产生 Up（连接被拒）。
         expect_no_up(&mut events_a2).await;
-        let _ = dev_a;
-        let _ = _device_a2;
     }
 
     #[tokio::test]
     async fn accept_filter_false_rejects_peer() {
         let (_mgr_a, mut events_a, _dev_a) = make_manager().await;
-        let (_device_b, identity_b) = make_identity();
+        let (_device_b, _identity_raw) = make_identity();
         let identity_b = Arc::new(RwLock::new(Identity {
             device: DeviceKey::from_bytes(&_device_b.to_bytes()),
             user: None,
@@ -513,12 +509,11 @@ mod tests {
         let mgr_b = ConnManager::bind(identity_b, 0, hello_rx, filter, events_tx_b)
             .await
             .expect("B bind 失败");
-        let _ = hello_tx;
+        drop(hello_tx);
 
         let _ = _mgr_a.connect(mgr_b.local_addr(), false).await;
         // A 不应收到 Up。
         expect_no_up(&mut events_a).await;
-        let _ = _dev_a;
     }
 
     #[tokio::test]

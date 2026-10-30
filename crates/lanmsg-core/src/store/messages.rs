@@ -7,6 +7,20 @@ use lanmsg_proto::types::{Envelope, MsgBody, VersionVector};
 
 use crate::store::Store;
 
+/// 查询消息行的原始元组（字段顺序与 SELECT 列一致）。
+type MessageTuple = (
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+    i64,
+    i64,
+    i64,
+    Vec<u8>,
+    String,
+    i64,
+    Option<String>,
+);
+
 /// 消息状态行，DB 中存为小写字符串。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MsgStateRow {
@@ -30,7 +44,7 @@ impl MsgStateRow {
         }
     }
 
-    pub fn from_str(s: &str) -> Result<Self, crate::store::StoreError> {
+    pub fn parse(s: &str) -> Result<Self, crate::store::StoreError> {
         match s {
             "sending" => Ok(MsgStateRow::Sending),
             "sent" => Ok(MsgStateRow::Sent),
@@ -171,7 +185,7 @@ impl Store {
         let conn = self
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-        let row: Option<(Vec<u8>, i64, Vec<u8>, i64, i64, i64, Vec<u8>, String, i64, Option<String>)> = conn
+        let row: Option<MessageTuple> = conn
             .query_row(
                 "SELECT author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text
                  FROM messages WHERE author = ?1 AND seq = ?2",
@@ -209,7 +223,7 @@ impl Store {
         };
         let env: Envelope = lanmsg_proto::from_cbor(&envelope)
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-        let state = MsgStateRow::from_str(&state)?;
+        let state = MsgStateRow::parse(&state)?;
         Ok(Some(StoredMessage {
             env,
             state,
@@ -351,7 +365,7 @@ fn stored_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMe
         rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Blob, Box::new(e))
     })?;
     let state: String = row.get(7)?;
-    let state = MsgStateRow::from_str(&state)
+    let state = MsgStateRow::parse(&state)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     Ok(StoredMessage {
         env,

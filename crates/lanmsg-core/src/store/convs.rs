@@ -26,7 +26,7 @@ impl ConvKindRow {
         }
     }
 
-    pub fn from_str(s: &str) -> Result<Self, crate::store::StoreError> {
+    pub fn parse(s: &str) -> Result<Self, crate::store::StoreError> {
         match s {
             "self_devices" => Ok(ConvKindRow::SelfDevices),
             "dm" => Ok(ConvKindRow::Dm),
@@ -100,7 +100,7 @@ impl Store {
         let Some((kind, peer_user, title, created_at)) = row else {
             return Ok(None);
         };
-        let kind = ConvKindRow::from_str(&kind)?;
+        let kind = ConvKindRow::parse(&kind)?;
         let peer_user = match peer_user {
             Some(bytes) => Some(UserId(bytes.try_into().map_err(|bytes: Vec<u8>| {
                 crate::store::StoreError::Codec(format!("peer_user 长度非法: {}", bytes.len()))
@@ -133,7 +133,7 @@ impl Store {
                 )
             })?);
             let kind: String = row.get(1)?;
-            let kind = ConvKindRow::from_str(&kind).map_err(|e| {
+            let kind = ConvKindRow::parse(&kind).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
                     1,
                     rusqlite::types::Type::Text,

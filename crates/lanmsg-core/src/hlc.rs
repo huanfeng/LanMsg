@@ -9,6 +9,12 @@ pub struct HlcClock {
     last: Hlc,
 }
 
+impl Default for HlcClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HlcClock {
     /// 创建一个以零时间戳启动的 HLC 时钟。
     pub fn new() -> Self {

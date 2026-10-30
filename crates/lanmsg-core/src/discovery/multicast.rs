@@ -147,33 +147,33 @@ impl McSockets {
     }
 
     /// 组播泛洪：对每个网卡 set_multicast_if_* 后向组播地址发送一份。
-    pub(crate) fn send_all(&self, bytes: &[u8]) -> std::io::Result<()> {
+    pub(crate) async fn send_all(&self, bytes: &[u8]) -> std::io::Result<()> {
         let v4_ref = SockRef::from(self.v4.as_ref());
         let v4_target = SocketAddr::new(IpAddr::V4(DISCOVERY_V4), DISCOVERY_PORT);
         for ip in &self.v4_ifaces {
             v4_ref.set_multicast_if_v4(ip)?;
-            let _ = self.v4.send_to(bytes, v4_target);
+            let _ = self.v4.send_to(bytes, v4_target).await;
         }
         if let Some(v6) = &self.v6 {
             let v6_ref = SockRef::from(v6.as_ref());
             let v6_target = SocketAddr::new(IpAddr::V6(DISCOVERY_V6), DISCOVERY_PORT);
             for idx in &self.v6_ifaces {
                 v6_ref.set_multicast_if_v6(*idx)?;
-                let _ = v6.send_to(bytes, v6_target);
+                let _ = v6.send_to(bytes, v6_target).await;
             }
         }
         Ok(())
     }
 
     /// 单播到指定地址：IPv4 目标用 IPv4 套接字，IPv6 目标用 IPv6 套接字（存在时）。
-    pub(crate) fn send_unicast(&self, bytes: &[u8], addr: SocketAddr) -> std::io::Result<()> {
+    pub(crate) async fn send_unicast(&self, bytes: &[u8], addr: SocketAddr) -> std::io::Result<()> {
         match addr {
             SocketAddr::V4(_) => {
-                let _ = self.v4.send_to(bytes, addr);
+                let _ = self.v4.send_to(bytes, addr).await;
             }
             SocketAddr::V6(_) => {
                 if let Some(v6) = &self.v6 {
-                    let _ = v6.send_to(bytes, addr);
+                    let _ = v6.send_to(bytes, addr).await;
                 }
             }
         }
@@ -201,10 +201,10 @@ async fn send_loop(sockets: Arc<McSockets>, mut outbox: mpsc::Receiver<OutPkt>) 
     while let Some(pkt) = outbox.recv().await {
         match pkt.to {
             None => {
-                let _ = sockets.send_all(&pkt.bytes);
+                let _ = sockets.send_all(&pkt.bytes).await;
             }
             Some(addr) => {
-                let _ = sockets.send_unicast(&pkt.bytes, addr);
+                let _ = sockets.send_unicast(&pkt.bytes, addr).await;
             }
         }
     }
@@ -242,8 +242,9 @@ pub(crate) async fn run(
             _ = shutdown.notified() => break,
             changed = announce_rx.changed() => {
                 if changed.is_err() { break; }
-                if let Some(ann) = announce_rx.borrow().as_ref() {
-                    let _ = sockets.send_all(&to_cbor(ann));
+                let ann = announce_rx.borrow().as_ref().cloned();
+                if let Some(ann) = ann {
+                    let _ = sockets.send_all(&to_cbor(&ann)).await;
                 }
             }
             _ = ticker.tick() => {
@@ -252,8 +253,9 @@ pub(crate) async fn run(
                     sockets.rejoin(&new_ifaces.0, &new_ifaces.1);
                     last_ifaces = new_ifaces;
                 }
-                if let Some(ann) = announce_rx.borrow().as_ref() {
-                    let _ = sockets.send_all(&to_cbor(ann));
+                let ann = announce_rx.borrow().as_ref().cloned();
+                if let Some(ann) = ann {
+                    let _ = sockets.send_all(&to_cbor(&ann)).await;
                 }
             }
         }

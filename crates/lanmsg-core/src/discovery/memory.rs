@@ -17,6 +17,12 @@ pub struct MemoryBus {
     tx: broadcast::Sender<(Vec<u8>, SocketAddr)>,
 }
 
+impl Default for MemoryBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryBus {
     /// 创建总线。容量 64；滞后超过容量的接收端按协议丢弃并记日志。
     pub fn new() -> Self {

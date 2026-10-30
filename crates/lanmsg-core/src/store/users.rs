@@ -6,6 +6,18 @@ use lanmsg_proto::types::{DeviceCert, DeviceType, PathClass};
 
 use crate::store::Store;
 
+/// 查询设备行的原始元组（字段顺序与 SELECT 列一致）。
+type DeviceTuple = (
+    Vec<u8>,
+    Vec<u8>,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    i64,
+);
+
 /// 用户表行。
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserRow {
@@ -119,16 +131,7 @@ impl Store {
         let conn = self
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-        let row: Option<(
-            Vec<u8>,
-            Vec<u8>,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<i64>,
-            i64,
-        )> = conn
+        let row: Option<DeviceTuple> = conn
             .query_row(
                 "SELECT user_id, cert, name, device_type, last_addr, last_path, last_seen, revoked
                  FROM devices WHERE device_id = ?1",

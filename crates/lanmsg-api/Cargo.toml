@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# P2/P5 FFI 绑定启用；未启用时 cfg_attr 不展开，无需 uniffi 依赖。
+uniffi = []
+
 [dependencies]
 lanmsg-proto = { path = "../lanmsg-proto" }
 serde = { version = "1", features = ["derive"] }

@@ -166,6 +166,7 @@ async fn send_announce(
 }
 
 /// 处理一包：解析 → 验签 → 过滤 → 发事件 → 按冷却期单播回应。
+#[allow(clippy::too_many_arguments)] // P1 结构性：包处理集中入口。
 async fn on_packet(
     bytes: &[u8],
     from: SocketAddr,

@@ -159,7 +159,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, CoreError> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(CoreError::InvalidArgument("hex 长度必须为偶数".into()));
     }
     let mut out = Vec::with_capacity(s.len() / 2);

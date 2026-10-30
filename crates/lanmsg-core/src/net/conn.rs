@@ -55,7 +55,6 @@ pub struct HelloInfo {
 
 /// 已建立并完成 Hello 校验的单条连接。
 pub(crate) struct Connection {
-    device: DeviceId,
     peer_info: PeerInfo,
     write_tx: mpsc::Sender<Frame>,
     up_sent: Arc<AtomicBool>,
@@ -71,10 +70,8 @@ impl Connection {
         hello: &HelloInfo,
         event_tx: mpsc::Sender<ConnEvent>,
     ) -> Result<(PeerInfo, Arc<Connection>), CoreError> {
-        let stream = TcpStream::connect(addr)
-            .await
-            .map_err(|e| CoreError::Io(e))?;
-        let peer_addr = stream.peer_addr().map_err(|e| CoreError::Io(e))?;
+        let stream = TcpStream::connect(addr).await.map_err(CoreError::Io)?;
+        let peer_addr = stream.peer_addr().map_err(CoreError::Io)?;
         let (_server_config, client_config) = make_tls_configs(device_key)?;
         let domain = ServerName::try_from(TLS_SNI.as_bytes())
             .map_err(|e| CoreError::Tls(format!("非法 SNI: {e}")))?;
@@ -84,7 +81,7 @@ impl Connection {
             .await
             .map_err(|e| CoreError::Tls(e.to_string()))?;
         let (_io, tls_conn) = tls_stream.get_ref();
-        let peer_device = peer_device_id(&*tls_conn).map_err(|e| CoreError::Tls(e.to_string()))?;
+        let peer_device = peer_device_id(tls_conn).map_err(|e| CoreError::Tls(e.to_string()))?;
 
         let (read_half, write_half) = split(tls_stream);
         let mut framed_read = FramedRead::new(read_half, FrameCodec);
@@ -100,19 +97,12 @@ impl Connection {
         };
         framed_write
             .send(Frame::Hello(own_hello.clone()))
-            .map_err(|e| {
-                CoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
-            })
+            .map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))
             .await?;
-        framed_write.flush().await.map_err(|e| {
-            CoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        framed_write
+            .flush()
+            .await
+            .map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))?;
 
         // 读取对端 Hello。
         let their_hello = match framed_read.next().await {
@@ -128,12 +118,7 @@ impl Connection {
                     other.type_id()
                 )));
             }
-            Some(Err(e)) => {
-                return Err(CoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                )))
-            }
+            Some(Err(e)) => return Err(CoreError::Io(std::io::Error::other(e.to_string()))),
             None => return Err(CoreError::Proto("对端在发送 Hello 前关闭连接".into())),
         };
 
@@ -168,12 +153,7 @@ impl Connection {
                     "对端拒绝连接: code={code} message={message}"
                 )));
             }
-            Some(Err(e)) => {
-                return Err(CoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                )))
-            }
+            Some(Err(e)) => return Err(CoreError::Io(std::io::Error::other(e.to_string()))),
             None => return Err(CoreError::Proto("对端在确认前关闭连接".into())),
             Some(Ok(_)) => {} // 对端接受，继续
         }
@@ -192,7 +172,6 @@ impl Connection {
         let (write_tx, write_rx) = mpsc::channel(256);
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
         let connection = Arc::new(Connection {
-            device: peer_device,
             peer_info: peer_info.clone(),
             write_tx,
             up_sent: Arc::new(AtomicBool::new(false)),
@@ -250,7 +229,7 @@ impl Connection {
         accept_filter: &(dyn Fn(&PeerInfo) -> bool + Send + Sync),
         event_tx: mpsc::Sender<ConnEvent>,
     ) -> Result<(PeerInfo, Arc<Connection>), CoreError> {
-        let peer_addr = stream.peer_addr().map_err(|e| CoreError::Io(e))?;
+        let peer_addr = stream.peer_addr().map_err(CoreError::Io)?;
         let (server_config, _client_config) = make_tls_configs(device_key)?;
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
         let tls_stream = acceptor
@@ -258,7 +237,7 @@ impl Connection {
             .await
             .map_err(|e| CoreError::Tls(e.to_string()))?;
         let (_tcp_stream, tls_conn) = tls_stream.get_ref();
-        let peer_device = peer_device_id(&*tls_conn).map_err(|e| CoreError::Tls(e.to_string()))?;
+        let peer_device = peer_device_id(tls_conn).map_err(|e| CoreError::Tls(e.to_string()))?;
 
         let (read_half, write_half) = split(tls_stream);
         let mut framed_read = FramedRead::new(read_half, FrameCodec);
@@ -274,19 +253,12 @@ impl Connection {
         };
         framed_write
             .send(Frame::Hello(own_hello.clone()))
-            .map_err(|e| {
-                CoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
-            })
+            .map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))
             .await?;
-        framed_write.flush().await.map_err(|e| {
-            CoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        framed_write
+            .flush()
+            .await
+            .map_err(|e| CoreError::Io(std::io::Error::other(e.to_string())))?;
 
         // 读取对端 Hello。
         let their_hello = match framed_read.next().await {
@@ -302,12 +274,7 @@ impl Connection {
                     other.type_id()
                 )));
             }
-            Some(Err(e)) => {
-                return Err(CoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                )))
-            }
+            Some(Err(e)) => return Err(CoreError::Io(std::io::Error::other(e.to_string()))),
             None => return Err(CoreError::Proto("对端在发送 Hello 前关闭连接".into())),
         };
 
@@ -360,7 +327,6 @@ impl Connection {
         let (write_tx, write_rx) = mpsc::channel(256);
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
         let connection = Arc::new(Connection {
-            device: peer_device,
             peer_info: peer_info.clone(),
             write_tx,
             up_sent: Arc::new(AtomicBool::new(false)),
@@ -415,10 +381,6 @@ impl Connection {
 
     pub(crate) fn peer_info(&self) -> &PeerInfo {
         &self.peer_info
-    }
-
-    pub(crate) fn device(&self) -> DeviceId {
-        self.device
     }
 
     pub(crate) fn set_up_sent(&self) {
