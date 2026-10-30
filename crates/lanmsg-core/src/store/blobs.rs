@@ -398,16 +398,39 @@ impl Store {
         // 复用 insert_envelope 的事务内逻辑：直接在 tx 上插入核心行。
         insert_envelope_on_tx(&tx, env, MsgStateRow::Sending, now)?;
         // 信封携带的 Blob 元数据，按 hash 索引（Files/Folder 两种形态）。
-        let mut metas: Vec<&BlobMeta> = Vec::new();
-        match &env.body {
+        let items_with_rel: Vec<(&BlobMeta, Option<String>)> = match &env.body {
             lanmsg_proto::types::MsgBody::Files { items } => {
-                metas.extend(items.iter());
+                items.iter().map(|m| (m, None)).collect()
             }
-            lanmsg_proto::types::MsgBody::Folder { entries, .. } => {
-                metas.extend(entries.iter().map(|e| &e.blob));
-            }
-            _ => {}
+            lanmsg_proto::types::MsgBody::Folder { entries, .. } => entries
+                .iter()
+                .map(|e| (&e.blob, Some(e.rel_path.clone())))
+                .collect(),
+            _ => Vec::new(),
+        };
+        // message_blobs 行：blob_visible_to 的可见性判定与文件项视图都依赖它
+        //（缺失会让发送端无法服务自己的 Blob）。
+        for (idx, (meta, rel_path)) in items_with_rel.iter().enumerate() {
+            tx.execute(
+                "INSERT OR IGNORE INTO message_blobs(author, seq, idx, conv_id, hash, name, size, mime, rel_path, hlc_millis, hlc_counter, meta)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                rusqlite::params![
+                    &env.id.author.0[..],
+                    env.id.seq as i64,
+                    idx as i64,
+                    &env.conv.0,
+                    &meta.hash.0[..],
+                    meta.name,
+                    meta.size as i64,
+                    meta.mime,
+                    rel_path,
+                    env.hlc.millis,
+                    env.hlc.counter as i64,
+                    lanmsg_proto::to_cbor(meta),
+                ],
+            )?;
         }
+        let metas: Vec<&BlobMeta> = items_with_rel.iter().map(|(m, _)| *m).collect();
         for (hash, seg) in segs {
             let meta = metas.iter().find(|m| m.hash == *hash).ok_or_else(|| {
                 crate::store::StoreError::Codec(format!("segs 中的 hash 无对应元数据: {hash:?}"))

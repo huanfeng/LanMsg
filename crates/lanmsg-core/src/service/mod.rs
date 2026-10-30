@@ -78,6 +78,8 @@ pub(crate) struct Inner {
     pub(crate) sync: crate::sync::SyncEngine,
     /// Blob 数据服务端与持有者帧处理（P2 Task 11）。
     pub(crate) blob: Arc<crate::blob::serve::BlobServer>,
+    /// 传输引擎：分段并行、多源、断点续传（P2 Task 12）。
+    pub(crate) transfer: Arc<crate::blob::transfer::TransferEngine>,
 }
 
 /// 核心服务（C6）。内部状态由 Arc 持有，Clone 廉价。
@@ -196,6 +198,15 @@ impl Service {
         let blob = crate::blob::serve::BlobServer::new(store.clone(), identity.clone());
         conns.set_data_handler(blob.clone().handler());
 
+        // 传输引擎（P2 Task 12）：下载、取消与断点续传。
+        let transfer = Arc::new(crate::blob::transfer::TransferEngine::new(
+            store.clone(),
+            conns.clone(),
+            identity.clone(),
+            events_tx.clone(),
+            data_dir.clone(),
+        ));
+
         // Trust：联系人确认、准入过滤、证书更新接收。
         let trust = crate::trust::Trust::new(
             store.clone(),
@@ -262,6 +273,7 @@ impl Service {
             pairing,
             sync,
             blob,
+            transfer,
         });
         let svc = Service {
             inner: inner.clone(),
@@ -291,6 +303,9 @@ impl Service {
 
         // 恢复遗留的 preparing 行（重启前的文件发送重新走后台任务）。
         inner.msg.resume_preparing().await?;
+
+        // 恢复遗留的活动传输（续传 .part 与已完成分段）。
+        inner.transfer.clone().resume_all().await?;
 
         Ok(svc)
     }
@@ -340,6 +355,7 @@ impl Service {
     /// 关闭发现与所有连接；同时中止后台文件准备任务（preparing 行保留，
     /// 重启后续做）。
     pub async fn shutdown(&self) {
+        self.inner.transfer.shutdown_all();
         self.inner.msg.abort_prepares();
         self.inner.discovery.shutdown();
         self.inner.conns.shutdown().await;

@@ -6,6 +6,7 @@
 pub mod hash;
 pub mod mime;
 pub mod serve;
+pub mod transfer;
 
 use std::path::{Path, PathBuf};
 

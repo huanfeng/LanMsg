@@ -13,7 +13,7 @@ use lanmsg_api::types::{
 };
 use lanmsg_proto::consts::PAIR_TOKEN_TTL;
 use lanmsg_proto::frame::Frame;
-use lanmsg_proto::ids::{ConvId, DeviceId, MsgId, UserId};
+use lanmsg_proto::ids::{BlobHash, ConvId, DeviceId, MsgId, UserId};
 use lanmsg_proto::types::{DeviceType, MsgBody, PairMethodWire, Status, SystemEvent};
 
 use crate::error::CoreError;
@@ -48,6 +48,8 @@ pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiE
             msgs,
             also_my_devices,
         } => delete_local(inner, msgs, also_my_devices).await,
+        Request::DownloadBlob { hash } => download_blob(inner, hash).await,
+        Request::CancelTransfer { transfer } => cancel_transfer(inner, &transfer).await,
         Request::GetSettings => get_settings(inner).await,
         Request::SetSettings { settings } => set_settings(inner, settings).await,
         Request::SetProfile { display_name } => set_profile(inner, display_name).await,
@@ -730,6 +732,20 @@ async fn mark_read(inner: &Inner, conv: String, upto: String) -> Result<Response
             .await?;
         crate::service::notify_conversation(inner, &conv);
     }
+    Ok(Response::Ok)
+}
+
+/// DownloadBlob：发起 Blob 下载，返回 transfer_id（P2 Task 12）。
+async fn download_blob(inner: &Inner, hash: String) -> Result<Response, ApiError> {
+    let h =
+        BlobHash::from_hex(&hash).map_err(|_| invalid_arg(format!("非法 Blob 哈希: {hash}")))?;
+    let id = inner.transfer.clone().download(h).await?;
+    Ok(Response::TransferId { value: id })
+}
+
+/// CancelTransfer：取消进行中的传输（幂等）。
+async fn cancel_transfer(inner: &Inner, transfer: &str) -> Result<Response, ApiError> {
+    inner.transfer.cancel(transfer).await?;
     Ok(Response::Ok)
 }
 
