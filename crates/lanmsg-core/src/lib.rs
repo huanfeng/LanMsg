@@ -6,6 +6,7 @@ pub mod keystore;
 pub mod msg;
 pub mod net;
 pub mod paths;
+pub mod platform;
 pub mod service;
 pub mod store;
 
@@ -13,4 +14,6 @@ pub mod store;
 pub mod testutil;
 
 pub use identity::*;
+pub use platform::PlatformHooks;
+pub use service::{Service, ServiceConfig};
 pub use store::*;

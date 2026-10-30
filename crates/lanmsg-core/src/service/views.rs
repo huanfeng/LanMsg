@@ -118,4 +118,31 @@ pub fn conv_summary(
     }
 }
 
-// Task 11 将追加 `peer_view(p: &PeerInfo, self_user: Option<&UserId>) -> PeerView`（addr 用 dial_addr）。
+// Task 11：peer_view 将连接层 PeerInfo 转换为对端设备视图（addr 用 dial_addr）。
+use lanmsg_api::types::{PathClassDto, PeerView};
+
+use crate::net::PeerInfo;
+
+/// 将对端连接信息转换为对端设备视图。
+pub fn peer_view(p: &PeerInfo, self_user: Option<&UserId>) -> PeerView {
+    let cert = p.cert.as_ref();
+    PeerView {
+        device_id: p.device.to_hex(),
+        device_short: p.device.short(),
+        user_id: cert.map(|c| c.user.to_hex()).unwrap_or_default(),
+        display_name: p.display_name.clone(),
+        device_name: cert.map(|c| c.device_name.clone()).unwrap_or_default(),
+        device_type: cert
+            .map(|c| format!("{:?}", c.device_type))
+            .unwrap_or_default(),
+        addr: p.dial_addr.to_string(),
+        path: match p.path {
+            lanmsg_proto::types::PathClass::Lan => PathClassDto::Lan,
+            lanmsg_proto::types::PathClass::Vpn => PathClassDto::Vpn,
+            lanmsg_proto::types::PathClass::Internet => PathClassDto::Internet,
+            lanmsg_proto::types::PathClass::Relay => PathClassDto::Relay,
+        },
+        is_contact: false, // P1 无联系人概念，P2 实现
+        is_mine: self_user.is_some_and(|u| cert.is_some_and(|c| c.user == *u)),
+    }
+}

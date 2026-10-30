@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use crate::error::KeyStoreError;
 
-/// 密钥库抽象：按名称加载/保存/删除密钥文件。
-pub trait KeyStore {
+/// 密钥库抽象：按名称加载/保存/删除密钥文件（C6：要求 Send + Sync）。
+pub trait KeyStore: Send + Sync {
     /// 加载名为 `name` 的密钥文件，不存在返回 Ok(None)。
     fn load(&self, name: &str) -> Result<Option<Vec<u8>>, KeyStoreError>;
     /// 保存密钥到名为 `name` 的文件。
