@@ -4,6 +4,7 @@
 // 注释中文，标识符英文。
 
 pub mod handlers;
+pub mod ingest;
 pub mod views;
 
 use std::net::SocketAddr;
@@ -14,9 +15,10 @@ use tokio::sync::{broadcast, mpsc, watch, RwLock};
 
 use lanmsg_api::types::Event;
 use lanmsg_proto::consts::{PROTO_VERSION, RETRY_MAX, RETRY_MIN};
-use lanmsg_proto::ids::UserId;
+use lanmsg_proto::frame::Frame;
+use lanmsg_proto::ids::{DeviceId, UserId};
 use lanmsg_proto::sign::{sign_with_zeroed_sig, DeviceKey};
-use lanmsg_proto::types::{Announce, Signature64, Status};
+use lanmsg_proto::types::{Announce, DeviceCert, Signature64, Status};
 
 use crate::discovery::{Discovery, DiscoveryEvent, DiscoveryMode};
 use crate::error::CoreError;
@@ -97,6 +99,8 @@ impl Service {
 
         std::fs::create_dir_all(&data_dir)?;
         let store = Arc::new(Store::open(&data_dir.join("lanmsg.db"))?);
+        // 每次启动记录数据目录（load_settings 的默认下载目录依赖它）。
+        store.set_setting("data_dir", &data_dir.to_string_lossy())?;
         let identity = Arc::new(RwLock::new(Identity::load_or_create(
             keystore.as_ref(),
             &store,
@@ -186,6 +190,17 @@ impl Service {
             inner: inner.clone(),
         };
 
+        // 注入消息入库回调：Weak 引用避免 Messaging → Inner 强引用环（Inner 的释放
+        // 依赖用户侧 Service；升级失败说明服务已关闭，静默跳过即可）。
+        let inner_weak = Arc::downgrade(&inner);
+        inner.msg.set_ingest_callback(Arc::new(move |from, m| {
+            if let Some(i) = inner_weak.upgrade() {
+                tokio::spawn(async move {
+                    ingest::after_ingest(&i, from, &m).await;
+                });
+            }
+        }));
+
         tokio::spawn(routing_task(inner.clone(), conn_rx, disc_rx));
         for addr in static_peers {
             tokio::spawn(static_peer_task(inner.clone(), addr));
@@ -258,9 +273,14 @@ async fn routing_task(
                         .events
                         .send(Event::PeerOffline { device: device.to_hex() });
                 }
-                Some(ConnEvent::Frame(d, f)) => {
-                    let _ = inner.msg.on_frame(d, f).await;
-                }
+                Some(ConnEvent::Frame(d, f)) => match f {
+                    // CertUpdate（本任务的最小接收侧）：验签入库并刷新对端证书视图；
+                    // 完整信任校验与转发在 Task 5 的 Trust::on_cert_update 中实现。
+                    Frame::CertUpdate(certs) => on_cert_update_frame(&inner, d, certs).await,
+                    _ => {
+                        let _ = inner.msg.on_frame(d, f).await;
+                    }
+                },
                 None => break,
             },
             evt = disc_rx.recv(), if disc_open => match evt {
@@ -297,6 +317,30 @@ async fn on_up(inner: &Inner, peer: PeerInfo) {
     let _ = inner.events.send(Event::PeerOnline {
         peer: views::peer_view(&peer, self_user.as_ref()),
     });
+}
+
+/// CertUpdate 接收侧（最小实现）：逐证书验签、必须来自证书声称的设备本身，
+/// 入库并刷新连接层证书视图（ListPeers 据此反映新设备名）。
+/// 完整信任校验（联系人检查、自身设备转发）在 Task 5 的 Trust::on_cert_update 中实现。
+async fn on_cert_update_frame(inner: &Inner, from: DeviceId, certs: Vec<DeviceCert>) {
+    for cert in certs {
+        if cert.verify().is_err() || cert.device != from {
+            tracing::warn!(peer = %from, "CertUpdate 证书验签失败或来源不符，忽略");
+            continue;
+        }
+        let _ = inner.store.upsert_device(&DeviceRow {
+            device: cert.device,
+            user: cert.user,
+            cert: cert.clone(),
+            name: cert.device_name.clone(),
+            device_type: cert.device_type,
+            last_addr: None,
+            last_path: None,
+            last_seen: None,
+            revoked: false,
+        });
+        inner.conns.update_peer_cert(&from, cert).await;
+    }
 }
 
 /// 发现事件：未连接且自身设备 ID 较小时出站拨号；Invisible 不主动外联其他用户。

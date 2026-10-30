@@ -8,6 +8,7 @@ pub mod net;
 pub mod paths;
 pub mod platform;
 pub mod service;
+pub mod settings;
 pub mod store;
 
 #[cfg(test)]

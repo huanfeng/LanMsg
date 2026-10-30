@@ -18,6 +18,7 @@ use lanmsg_proto::data::{write_data_frame, DataFrame};
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::DeviceId;
 use lanmsg_proto::sign::DeviceKey;
+use lanmsg_proto::types::DeviceCert;
 use rustls::pki_types::ServerName;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -50,6 +51,8 @@ struct Inner {
     data_handler: Option<DataHandler>,
     self_device: DeviceId,
     device_key: Arc<DeviceKey>,
+    /// 对端证书覆盖（收到 CertUpdate 后刷新；连接重建或断开时清除，以新握手为准）。
+    cert_overrides: std::sync::Mutex<HashMap<DeviceId, DeviceCert>>,
 }
 
 impl ConnManager {
@@ -91,6 +94,7 @@ impl ConnManager {
             data_handler: None,
             self_device,
             device_key: Arc::new(device_key),
+            cert_overrides: std::sync::Mutex::new(HashMap::new()),
         };
 
         let manager = ConnManager {
@@ -165,6 +169,7 @@ impl ConnManager {
                         up_sent: true,
                     },
                 );
+                let _ = inner.cert_overrides.lock().unwrap().remove(&device);
                 return Ok(device);
             }
         }
@@ -180,6 +185,8 @@ impl ConnManager {
                 up_sent: true,
             },
         );
+        // 新握手证书是权威值，清除旧覆盖。
+        let _ = inner.cert_overrides.lock().unwrap().remove(&device);
 
         Ok(device)
     }
@@ -193,7 +200,7 @@ impl ConnManager {
         }
     }
 
-    /// 所有已连接对端的 PeerInfo。
+    /// 所有已连接对端的 PeerInfo（应用证书覆盖）。
     pub fn peers(&self) -> Vec<PeerInfo> {
         let inner = self.inner.try_read().ok();
         match inner {
@@ -201,9 +208,23 @@ impl ConnManager {
                 .connections
                 .values()
                 .filter(|e| e.up_sent)
-                .map(|e| e.connection.peer_info().clone())
+                .map(|e| {
+                    let mut pi = e.connection.peer_info().clone();
+                    Self::apply_cert_override(&inner, &mut pi);
+                    pi
+                })
                 .collect(),
             None => Vec::new(),
+        }
+    }
+
+    /// 更新对端证书视图（收到对端 CertUpdate 时调用）。
+    ///
+    /// 仅当该设备连接存在时记录；连接重建或断开时覆盖被清除，以新握手为准。
+    pub(crate) async fn update_peer_cert(&self, device: &DeviceId, cert: DeviceCert) {
+        let inner = self.inner.write().await;
+        if inner.connections.contains_key(device) {
+            let _ = inner.cert_overrides.lock().unwrap().insert(*device, cert);
         }
     }
 
@@ -226,6 +247,7 @@ impl ConnManager {
         if let Some(entry) = inner.connections.remove(device) {
             let _ = entry.connection.shutdown().await;
         }
+        let _ = inner.cert_overrides.lock().unwrap().remove(device);
     }
 
     /// 关闭所有连接与监听器。
@@ -234,9 +256,19 @@ impl ConnManager {
         for (_device, entry) in inner.connections.drain() {
             let _ = entry.connection.shutdown().await;
         }
+        inner.cert_overrides.lock().unwrap().clear();
     }
 
     // ---- 私有辅助 ----
+
+    /// 把存储的证书覆盖应用到对端信息上（覆盖不存在时保持握手值）。
+    fn apply_cert_override(inner: &Inner, pi: &mut PeerInfo) {
+        if let Ok(map) = inner.cert_overrides.try_lock() {
+            if let Some(cert) = map.get(&pi.device) {
+                pi.cert = Some(cert.clone());
+            }
+        }
+    }
 
     /// 注册数据连接处理器（SyncEngine 等模块在启动时调用）。
     ///
@@ -284,14 +316,16 @@ impl ConnManager {
         Ok(tls_stream)
     }
 
-    /// 查询已上线对端的信息（含 tls_exporter 与 dial_addr）。
+    /// 查询已上线对端的信息（含 tls_exporter 与 dial_addr；应用证书覆盖）。
     pub fn peer(&self, device: &DeviceId) -> Option<PeerInfo> {
         let inner = self.inner.try_read().ok()?;
-        inner
+        let mut pi = inner
             .connections
             .get(device)
             .filter(|e| e.up_sent)
-            .map(|e| e.connection.peer_info().clone())
+            .map(|e| e.connection.peer_info().clone())?;
+        Self::apply_cert_override(&inner, &mut pi);
+        Some(pi)
     }
 
     async fn build_hello(&self) -> HelloInfo {
@@ -384,6 +418,8 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                             up_sent: true,
                         },
                     );
+                    // 新握手证书是权威值，清除旧覆盖。
+                    let _ = guard.cert_overrides.lock().unwrap().remove(&device);
                 }
                 Ok(Accepted::Data(peer_info)) => {
                     // 数据连接已交给注册的处理器，无需登记；仅记录审计日志。

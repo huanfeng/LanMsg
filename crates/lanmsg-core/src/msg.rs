@@ -29,6 +29,9 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
+/// 新消息入库回调类型（Service 注入，指向 service::ingest::after_ingest）。
+type IngestCallback = Arc<Mutex<Option<Arc<dyn Fn(DeviceId, StoredMessage) + Send + Sync>>>>;
+
 /// 文字消息收发模块。
 #[derive(Clone)]
 pub struct Messaging {
@@ -37,6 +40,8 @@ pub struct Messaging {
     clock: Arc<Mutex<HlcClock>>,
     conns: ConnManager,
     events: broadcast::Sender<Event>,
+    /// 新消息入库回调；Arc+Mutex 使注入可在组装完成后进行且保持 Messaging 可 Clone。
+    ingest_cb: IngestCallback,
 }
 
 impl Messaging {
@@ -54,7 +59,13 @@ impl Messaging {
             clock,
             conns,
             events,
+            ingest_cb: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// 注入新消息入库回调（Service 启动时调用一次）。
+    pub fn set_ingest_callback(&self, cb: Arc<dyn Fn(DeviceId, StoredMessage) + Send + Sync>) {
+        *self.ingest_cb.lock().unwrap() = Some(cb);
     }
 
     /// 发送消息到指定会话。
@@ -67,6 +78,22 @@ impl Messaging {
     /// 5. 对每个目标 `conns.send(SyncPush { envelopes })`。无目标在线时保持 `Sending`；
     ///    至少一个 send 成功则置 `Sent`。
     pub async fn send(&self, conv: &ConvId, body: MsgBody) -> Result<MsgId, CoreError> {
+        self.send_impl(conv, body, true).await
+    }
+
+    /// 与 `send` 相同流程，但不发 `MessageAdded`/`ConversationUpdated` 事件
+    /// （隐藏性由 `body_is_hidden` 决定；调用方保证 body 为隐藏类型）。
+    pub async fn send_hidden(&self, conv: &ConvId, body: MsgBody) -> Result<MsgId, CoreError> {
+        self.send_impl(conv, body, false).await
+    }
+
+    /// 发送公共流程；`controls_events` 为 false 时跳过 MessageAdded/ConversationUpdated。
+    async fn send_impl(
+        &self,
+        conv: &ConvId,
+        body: MsgBody,
+        controls_events: bool,
+    ) -> Result<MsgId, CoreError> {
         // 1. 未初始化 → NotInitialized。
         let identity = self.identity.read().await;
         if !identity.is_initialized() {
@@ -116,33 +143,35 @@ impl Messaging {
         self.store
             .insert_envelope(&env, MsgStateRow::Sending, received_at)?;
 
-        // 6. 发 Event::MessageAdded + Event::ConversationUpdated。
-        let stored = StoredMessage {
-            env: env.clone(),
-            state: MsgStateRow::Sending,
-            received_at,
-        };
-        let msg_view = message_view(self.store.as_ref(), &self_device, &stored);
-        let _ = self.events.send(Event::MessageAdded {
-            msg: msg_view.clone(),
-        });
+        // 6. 发 Event::MessageAdded + Event::ConversationUpdated（send_hidden 跳过）。
+        if controls_events {
+            let stored = StoredMessage {
+                env: env.clone(),
+                state: MsgStateRow::Sending,
+                received_at,
+            };
+            let msg_view = message_view(self.store.as_ref(), &self_device, &stored);
+            let _ = self.events.send(Event::MessageAdded {
+                msg: msg_view.clone(),
+            });
 
-        let peer_online = match conv_row.kind {
-            ConvKindRow::Dm => conv_row.peer_user.is_some_and(|pu| {
-                self.conns
-                    .peers()
-                    .iter()
-                    .any(|p| p.cert.as_ref().is_some_and(|c| c.user == pu))
-            }),
-            _ => false,
-        };
-        let summary = conv_summary(
-            self.store.as_ref(),
-            Some(&self_user),
-            &conv_row,
-            peer_online,
-        );
-        let _ = self.events.send(Event::ConversationUpdated { summary });
+            let peer_online = match conv_row.kind {
+                ConvKindRow::Dm => conv_row.peer_user.is_some_and(|pu| {
+                    self.conns
+                        .peers()
+                        .iter()
+                        .any(|p| p.cert.as_ref().is_some_and(|c| c.user == pu))
+                }),
+                _ => false,
+            };
+            let summary = conv_summary(
+                self.store.as_ref(),
+                Some(&self_user),
+                &conv_row,
+                peer_online,
+            );
+            let _ = self.events.send(Event::ConversationUpdated { summary });
+        }
 
         // 7. 计算投递目标 targets(conv)。
         let targets: Vec<DeviceId> = match conv_row.kind {
@@ -255,7 +284,7 @@ impl Messaging {
                     let msg_id = env.id.clone();
                     ids.push(msg_id);
 
-                    // 6. 仅当新插入时发 MessageAdded / ConversationUpdated。
+                    // 6. 仅当新插入时发事件并触发入库回调。
                     if inserted {
                         let stored = StoredMessage {
                             env: env.clone(),
@@ -282,6 +311,11 @@ impl Messaging {
                             peer_online,
                         );
                         let _ = self.events.send(Event::ConversationUpdated { summary });
+
+                        // 入库回调：同步取出克隆后立即放锁，回调内部自行 spawn 异步分派。
+                        if let Some(cb) = self.ingest_cb.lock().unwrap().clone() {
+                            cb(from, stored);
+                        }
                     }
                 }
 

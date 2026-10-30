@@ -141,6 +141,59 @@ impl Identity {
         self.user.as_ref().map(|u| u.user_id())
     }
 
+    /// 设备名变更时用用户密钥重签本设备证书。
+    ///
+    /// 写 setting "self_cert"，更新 users/devices 表中自己的行
+    /// （users.display_name 同步为新设备名，与 init_first_device 的初值一致），
+    /// 返回新证书。未初始化 → `NotInitialized`。
+    pub fn reissue_cert(
+        &mut self,
+        store: &Store,
+        device_name: &str,
+        now: i64,
+    ) -> Result<DeviceCert, CoreError> {
+        let user = self.user.as_ref().ok_or(CoreError::NotInitialized)?;
+        let device = self.device.device_id();
+        let device_type = match &self.cert {
+            Some(c) => c.device_type,
+            None => return Err(CoreError::NotInitialized),
+        };
+
+        let cert = DeviceCert::issue(user, device, device_name.to_string(), device_type, now);
+        let cert_bytes = lanmsg_proto::to_cbor(&cert);
+        store.set_setting(SETTING_SELF_CERT, &hex_encode(&cert_bytes))?;
+
+        // users 表：display_name 用新设备名，is_self 保持（自己行恒为 true）。
+        let is_self = store
+            .get_user(&user.user_id())
+            .ok()
+            .flatten()
+            .map(|r| r.is_self)
+            .unwrap_or(true);
+        store.upsert_user(&crate::store::UserRow {
+            user: user.user_id(),
+            display_name: device_name.to_string(),
+            is_self,
+            updated_at: now,
+        })?;
+
+        // devices 表：证书与设备名换新。
+        store.upsert_device(&crate::store::DeviceRow {
+            device,
+            user: user.user_id(),
+            cert: cert.clone(),
+            name: device_name.to_string(),
+            device_type,
+            last_addr: None,
+            last_path: None,
+            last_seen: None,
+            revoked: false,
+        })?;
+
+        self.cert = Some(cert.clone());
+        Ok(cert)
+    }
+
     pub fn device_id(&self) -> DeviceId {
         self.device.device_id()
     }
@@ -150,7 +203,7 @@ impl Identity {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
         s.push_str(&format!("{b:02x}"));
@@ -158,7 +211,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-fn hex_decode(s: &str) -> Result<Vec<u8>, CoreError> {
+pub(crate) fn hex_decode(s: &str) -> Result<Vec<u8>, CoreError> {
     if !s.len().is_multiple_of(2) {
         return Err(CoreError::InvalidArgument("hex 长度必须为偶数".into()));
     }
