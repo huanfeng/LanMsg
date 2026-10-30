@@ -8,17 +8,18 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 
 use lanmsg_api::types::{
-    ApiError, ErrorCode, InitMode, PairMethod, PairTarget, Request, Response, SelfInfo,
+    ApiError, ErrorCode, Event, InitMode, PairMethod, PairTarget, Request, Response, SelfInfo,
     SettingsDto, StatusDto,
 };
 use lanmsg_proto::consts::PAIR_TOKEN_TTL;
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{ConvId, DeviceId, MsgId, UserId};
-use lanmsg_proto::types::{DeviceType, MsgBody, PairMethodWire, Status};
+use lanmsg_proto::types::{DeviceType, MsgBody, PairMethodWire, Status, SystemEvent};
 
+use crate::error::CoreError;
 use crate::service::views::{conv_summary, message_view, peer_view, PeerView};
 use crate::service::{build_announce, now_millis, Inner};
-use crate::store::{ConvKindRow, DeviceRow, UserRow};
+use crate::store::{ConvKindRow, DeviceRow, MsgStateRow, Store, StoredMessage, UserRow};
 
 /// 请求入口。
 pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiError> {
@@ -39,6 +40,12 @@ pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiE
         } => list_messages(inner, conv, before, limit).await,
         Request::OpenDm { user } => open_dm(inner, user).await,
         Request::SendText { conv, text } => send_text(inner, conv, text).await,
+        Request::MarkRead { conv, upto } => mark_read(inner, conv, upto).await,
+        Request::Recall { msg } => recall(inner, msg).await,
+        Request::DeleteLocal {
+            msgs,
+            also_my_devices,
+        } => delete_local(inner, msgs, also_my_devices).await,
         Request::GetSettings => get_settings(inner).await,
         Request::SetSettings { settings } => set_settings(inner, settings).await,
         Request::SetProfile { display_name } => set_profile(inner, display_name).await,
@@ -628,6 +635,167 @@ async fn set_profile(inner: &Inner, display_name: String) -> Result<Response, Ap
     Ok(Response::Ok)
 }
 
+// ---- P2 Task 10：已读、撤回、本地删除 ----
+
+/// MarkRead：upto 必须为该会话中的消息（否则 NotFound）；推进会话已读水位，
+/// 有变化则向会话发隐藏 Read{upto}（同步到对端与我的其他设备）并重算 unread。
+async fn mark_read(inner: &Inner, conv: String, upto: String) -> Result<Response, ApiError> {
+    let conv = parse_conv(&conv)?;
+    let upto = MsgId::from_str(&upto).map_err(|_| invalid_arg(format!("非法消息 ID: {upto}")))?;
+    let m = inner
+        .store
+        .get_message(&upto)
+        .map_err(CoreError::from)?
+        .ok_or_else(|| ApiError {
+            code: ErrorCode::NotFound,
+            message: format!("消息不存在: {upto}"),
+        })?;
+    if m.env.conv != conv {
+        return Err(ApiError {
+            code: ErrorCode::NotFound,
+            message: format!("会话中不存在该消息: {upto}"),
+        });
+    }
+    if inner
+        .store
+        .set_last_read(&conv, m.env.hlc.clone())
+        .map_err(CoreError::from)?
+    {
+        inner
+            .msg
+            .send_hidden(
+                &conv,
+                MsgBody::Read {
+                    upto: m.env.hlc.clone(),
+                },
+            )
+            .await?;
+        crate::service::notify_conversation(inner, &conv);
+    }
+    Ok(Response::Ok)
+}
+
+/// Recall：仅本人消息、时限内可撤回；已撤回幂等返回 Ok。发送隐藏
+/// Recall{target}（各端存储层入库时置 Recalled），本地发 MessageUpdated。
+async fn recall(inner: &Inner, msg: String) -> Result<Response, ApiError> {
+    let id = MsgId::from_str(&msg).map_err(|_| invalid_arg(format!("非法消息 ID: {msg}")))?;
+    let self_user = inner
+        .state
+        .read()
+        .unwrap()
+        .self_user
+        .ok_or_else(|| ApiError {
+            code: ErrorCode::NotInitialized,
+            message: "服务尚未初始化".into(),
+        })?;
+    let m = inner
+        .store
+        .get_message(&id)
+        .map_err(CoreError::from)?
+        .ok_or_else(|| ApiError {
+            code: ErrorCode::NotFound,
+            message: format!("消息不存在: {id}"),
+        })?;
+    check_recall(&inner.store, now_millis(), &m, &self_user)?;
+    if m.state == MsgStateRow::Recalled {
+        return Ok(Response::Ok);
+    }
+    inner
+        .msg
+        .send_hidden(&m.env.conv, MsgBody::Recall { target: id.clone() })
+        .await?;
+    // 存储层已在插入 Recall 信封时把目标置 Recalled；重取并发 MessageUpdated。
+    if let Ok(Some(fresh)) = inner.store.get_message(&id) {
+        let self_device = inner.identity.read().await.device_id();
+        let _ = inner.events.send(Event::MessageUpdated {
+            msg: message_view(inner.store.as_ref(), &self_device, &fresh),
+        });
+    }
+    Ok(Response::Ok)
+}
+
+/// 撤回资格判定：非本人消息 → InvalidArgument("只能撤回自己的消息")；
+/// 超过 RECALL_WINDOW → InvalidArgument("超过撤回时限")。
+/// 注：计划签名为 (now, msg, self_user)，因 StoredMessage 不携带作者用户、
+/// 判定「本人」需查 devices 表，故增加 store 参数。
+pub(crate) fn check_recall(
+    store: &Store,
+    now: i64,
+    msg: &StoredMessage,
+    self_user: &UserId,
+) -> Result<(), CoreError> {
+    let author_user = store
+        .get_device(&msg.env.id.author)
+        .ok()
+        .flatten()
+        .map(|r| r.user);
+    if author_user.as_ref() != Some(self_user) {
+        return Err(CoreError::InvalidArgument("只能撤回自己的消息".into()));
+    }
+    if now.saturating_sub(msg.env.hlc.millis)
+        > lanmsg_proto::consts::RECALL_WINDOW.as_millis() as i64
+    {
+        return Err(CoreError::InvalidArgument("超过撤回时限".into()));
+    }
+    Ok(())
+}
+
+/// DeleteLocal：本地标记删除（同步保留、UI 不再显示）；also_my_devices 时向
+/// SelfDevices 会话发隐藏 System{LocalDeleted} 同步到我的其他设备；受影响
+/// 会话逐个发 ConversationUpdated。
+async fn delete_local(
+    inner: &Inner,
+    msgs: Vec<String>,
+    also_my_devices: bool,
+) -> Result<Response, ApiError> {
+    let mut ids = Vec::with_capacity(msgs.len());
+    for s in &msgs {
+        ids.push(MsgId::from_str(s).map_err(|_| invalid_arg(format!("非法消息 ID: {s}")))?);
+    }
+    // also_my_devices 需要已初始化（SelfDevices 会话依赖 self_user）。
+    let self_user = if also_my_devices {
+        Some(
+            inner
+                .state
+                .read()
+                .unwrap()
+                .self_user
+                .ok_or_else(|| ApiError {
+                    code: ErrorCode::NotInitialized,
+                    message: "服务尚未初始化".into(),
+                })?,
+        )
+    } else {
+        None
+    };
+    inner.store.mark_deleted(&ids).map_err(CoreError::from)?;
+    if let Some(self_user) = self_user {
+        let conv = ConvId::self_devices(&self_user);
+        inner
+            .msg
+            .send_hidden(
+                &conv,
+                MsgBody::System {
+                    event: SystemEvent::LocalDeleted { msgs: ids.clone() },
+                },
+            )
+            .await?;
+    }
+    // 受影响会话（去重）逐个重算 unread。
+    let mut convs: Vec<ConvId> = Vec::new();
+    for id in &ids {
+        if let Ok(Some(m)) = inner.store.get_message(id) {
+            if !convs.contains(&m.env.conv) {
+                convs.push(m.env.conv);
+            }
+        }
+    }
+    for c in &convs {
+        crate::service::notify_conversation(inner, c);
+    }
+    Ok(Response::Ok)
+}
+
 // ---- 辅助 ----
 
 fn parse_conv(s: &str) -> Result<ConvId, ApiError> {
@@ -722,5 +890,62 @@ fn variant_name(req: &Request) -> &'static str {
         Request::WebRespond { .. } => "WebRespond",
         Request::SetUiFocus { .. } => "SetUiFocus",
         Request::Shutdown => "Shutdown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lanmsg_proto::sign::UserKey;
+    use lanmsg_proto::types::{DeviceCert, Envelope, Hlc, Signature64};
+
+    /// 超过撤回时限（RECALL_WINDOW 为 2 分钟，构造 3 分钟前的本人消息）→
+    /// InvalidArgument("超过撤回时限")。
+    #[test]
+    fn recall_after_window_rejected() {
+        let store = Store::open_in_memory().unwrap();
+        let author = DeviceId([2u8; 32]);
+        let self_user = UserId([3u8; 32]);
+        store
+            .upsert_device(&DeviceRow {
+                device: author,
+                user: self_user,
+                cert: DeviceCert::issue(
+                    &UserKey::generate(),
+                    author,
+                    "测试设备".into(),
+                    DeviceType::Desktop,
+                    1,
+                ),
+                name: "测试设备".into(),
+                device_type: DeviceType::Desktop,
+                last_addr: None,
+                last_path: None,
+                last_seen: None,
+                revoked: false,
+            })
+            .unwrap();
+        let msg = StoredMessage {
+            env: Envelope {
+                conv: ConvId([1u8; 32]),
+                id: MsgId { author, seq: 1 },
+                conv_seq: 1,
+                hlc: Hlc {
+                    millis: now_millis() - 3 * 60 * 1000,
+                    counter: 0,
+                },
+                body: MsgBody::Text {
+                    text: "旧消息".into(),
+                },
+                enc: None,
+                sig: Signature64([0u8; 64]),
+            },
+            state: MsgStateRow::Delivered,
+            received_at: 0,
+        };
+        match check_recall(&store, now_millis(), &msg, &self_user) {
+            Err(CoreError::InvalidArgument(m)) => assert_eq!(m, "超过撤回时限"),
+            other => panic!("期望超过撤回时限错误，实际 {other:?}"),
+        }
     }
 }

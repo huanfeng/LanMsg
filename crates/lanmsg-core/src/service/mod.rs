@@ -16,7 +16,7 @@ use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use lanmsg_api::types::Event;
 use lanmsg_proto::consts::{PROTO_VERSION, RETRY_MAX, RETRY_MIN};
 use lanmsg_proto::frame::Frame;
-use lanmsg_proto::ids::UserId;
+use lanmsg_proto::ids::{ConvId, UserId};
 use lanmsg_proto::sign::{sign_with_zeroed_sig, DeviceKey};
 use lanmsg_proto::types::{Announce, Signature64, Status};
 
@@ -90,6 +90,26 @@ pub(crate) fn now_millis() -> i64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// 广播会话更新事件（unread 按已读水位重算）；会话不存在时跳过。
+pub(crate) fn notify_conversation(inner: &Inner, conv: &ConvId) {
+    let Ok(Some(row)) = inner.store.get_conversation(conv) else {
+        return;
+    };
+    let peer_online = match row.kind {
+        crate::store::ConvKindRow::Dm => row.peer_user.is_some_and(|pu| {
+            inner
+                .conns
+                .peers()
+                .iter()
+                .any(|p| p.cert.as_ref().is_some_and(|c| c.user == pu))
+        }),
+        _ => false,
+    };
+    let self_user = inner.state.read().unwrap().self_user;
+    let summary = views::conv_summary(inner.store.as_ref(), self_user.as_ref(), &row, peer_online);
+    let _ = inner.events.send(Event::ConversationUpdated { summary });
 }
 
 impl Service {

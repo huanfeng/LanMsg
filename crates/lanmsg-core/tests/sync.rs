@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 
-use lanmsg_api::types::{Event, MessageBodyView, MessageState, Request, Response};
+use lanmsg_api::types::{ErrorCode, Event, MessageBodyView, MessageState, Request, Response};
 use lanmsg_core::platform::PlatformHooks;
 use lanmsg_core::store::{ConvKindRow, ConvRow};
 use lanmsg_core::sync::conv_member_ok;
@@ -430,4 +430,256 @@ fn conv_member_rules() {
         created_at: 0,
     };
     assert!(!conv_member_ok(&guest, &self_u, &self_u));
+}
+
+// ===== P2 Task 10：已读、撤回、本地删除 =====
+
+/// X 发 2 条给甲（A、B 两台我的设备在线）→ A MarkRead(第 2 条) →
+/// B 的该会话 unread 变 0，X 侧两条消息状态 Read。
+#[tokio::test]
+async fn mark_read_syncs_to_my_devices_and_peer() {
+    let mut a = node_offline().await;
+    let a_user = a.init_first("甲").await;
+    let mut x = node_offline().await;
+    let x_user = x.init_first("小张").await;
+    befriend(&mut a, &mut x).await;
+
+    let conv = ConvId::dm(&user(&x_user), &user(&a_user)).to_hex();
+    x.call(Request::OpenDm {
+        user: a_user.clone(),
+    })
+    .await;
+    for i in 0..2 {
+        x.call(Request::SendText {
+            conv: conv.clone(),
+            text: format!("已读测试{i}"),
+        })
+        .await;
+    }
+    wait_until(|| async { list_texts(&a, &conv).await.len() == 2 }, 5).await;
+
+    // B 在消息之后配对上线：经同步拿到会话与 2 条消息。
+    let mut b = node_offline().await;
+    init_join(&b).await;
+    pair(&mut a, &mut b).await;
+    wait_until(|| async { list_texts(&b, &conv).await.len() == 2 }, 5).await;
+
+    // A 标记已读到第 2 条。
+    let msgs = list_texts(&a, &conv).await;
+    let upto = msgs[1].id.clone();
+    a.call(Request::MarkRead {
+        conv: conv.clone(),
+        upto,
+    })
+    .await;
+
+    // B 的会话 unread 变 0。
+    wait_until(
+        || async {
+            matches!(
+                b.try_call(Request::ListConversations).await,
+                Ok(Response::Conversations { value })
+                    if value.iter().any(|cv| cv.conv == conv && cv.unread == 0)
+            )
+        },
+        5,
+    )
+    .await;
+
+    // X 侧两条消息状态 Read。
+    wait_until(
+        || async {
+            let msgs = list_texts(&x, &conv).await;
+            msgs.len() == 2 && msgs.iter().all(|m| m.state == MessageState::Read)
+        },
+        5,
+    )
+    .await;
+}
+
+/// A 发消息后立即撤回 → X、B 侧均收到 MessageUpdated(state Recalled)，
+/// 各端视图为撤回提示。
+#[tokio::test]
+async fn recall_within_window_hides_on_all_sides() {
+    let mut a = node_offline().await;
+    let a_user = a.init_first("甲").await;
+    let mut x = node_offline().await;
+    let x_user = x.init_first("小张").await;
+    befriend(&mut a, &mut x).await;
+
+    let conv = ConvId::dm(&user(&a_user), &user(&x_user)).to_hex();
+    a.call(Request::OpenDm {
+        user: x_user.clone(),
+    })
+    .await;
+    a.call(Request::SendText {
+        conv: conv.clone(),
+        text: "撤回我".into(),
+    })
+    .await;
+    wait_until(|| async { !list_texts(&x, &conv).await.is_empty() }, 5).await;
+
+    // B 在消息之后配对上线（同步拿到会话与消息）。
+    let mut b = node_offline().await;
+    init_join(&b).await;
+    pair(&mut a, &mut b).await;
+    wait_until(|| async { !list_texts(&b, &conv).await.is_empty() }, 5).await;
+
+    let msg = list_texts(&a, &conv).await.remove(0);
+    let recalled_id = msg.id.clone();
+    a.call(Request::Recall {
+        msg: recalled_id.clone(),
+    })
+    .await;
+
+    // X、B 侧该消息 MessageUpdated state Recalled。
+    x.wait_event(
+        |e| {
+            matches!(
+                e,
+                Event::MessageUpdated { msg } if msg.id == recalled_id && msg.state == MessageState::Recalled
+            )
+        },
+        5,
+    )
+    .await;
+    b.wait_event(
+        |e| {
+            matches!(
+                e,
+                Event::MessageUpdated { msg } if msg.id == recalled_id && msg.state == MessageState::Recalled
+            )
+        },
+        5,
+    )
+    .await;
+
+    // 三端视图均为撤回提示。
+    for n in [&a, &x, &b] {
+        let msgs = list_msgs(n, &conv).await;
+        let v = msgs
+            .iter()
+            .find(|m| m.id == recalled_id)
+            .expect("撤回消息应存在");
+        assert_eq!(v.state, MessageState::Recalled);
+        match &v.body {
+            MessageBodyView::System { text } => {
+                assert!(text.contains("撤回"), "撤回提示: {text}");
+            }
+            other => panic!("期望 System 撤回提示，实际 {other:?}"),
+        }
+    }
+}
+
+/// 撤回他人消息被拒绝（InvalidArgument）。
+#[tokio::test]
+async fn recall_others_message_rejected() {
+    let mut a = node_offline().await;
+    let a_user = a.init_first("甲").await;
+    let mut x = node_offline().await;
+    let x_user = x.init_first("小张").await;
+    befriend(&mut a, &mut x).await;
+
+    let conv = ConvId::dm(&user(&x_user), &user(&a_user)).to_hex();
+    x.call(Request::OpenDm {
+        user: a_user.clone(),
+    })
+    .await;
+    x.call(Request::SendText {
+        conv: conv.clone(),
+        text: "别人的消息".into(),
+    })
+    .await;
+    wait_until(|| async { !list_texts(&a, &conv).await.is_empty() }, 5).await;
+
+    let msg = list_texts(&a, &conv).await.remove(0);
+    let err = a
+        .try_call(Request::Recall { msg: msg.id })
+        .await
+        .expect_err("撤回他人消息应被拒绝");
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert_eq!(err.message, "只能撤回自己的消息");
+}
+
+/// A 本地删除（含我的设备）→ B 不再显示；X 侧仍在。
+#[tokio::test]
+async fn delete_local_also_my_devices() {
+    let mut a = node_offline().await;
+    let a_user = a.init_first("甲").await;
+    let mut x = node_offline().await;
+    let x_user = x.init_first("小张").await;
+    befriend(&mut a, &mut x).await;
+
+    let conv = ConvId::dm(&user(&x_user), &user(&a_user)).to_hex();
+    x.call(Request::OpenDm {
+        user: a_user.clone(),
+    })
+    .await;
+    x.call(Request::SendText {
+        conv: conv.clone(),
+        text: "删除我".into(),
+    })
+    .await;
+    wait_until(|| async { !list_texts(&a, &conv).await.is_empty() }, 5).await;
+
+    // B 配对上线，经同步拿到该消息。
+    let mut b = node_offline().await;
+    init_join(&b).await;
+    pair(&mut a, &mut b).await;
+    wait_until(|| async { !list_texts(&b, &conv).await.is_empty() }, 5).await;
+
+    let msg = list_texts(&a, &conv).await.remove(0);
+    a.call(Request::DeleteLocal {
+        msgs: vec![msg.id],
+        also_my_devices: true,
+    })
+    .await;
+
+    // A、B 均不再显示。
+    wait_until(|| async { list_texts(&b, &conv).await.is_empty() }, 5).await;
+    assert!(list_texts(&a, &conv).await.is_empty(), "A 侧删除后不应显示");
+    // X 侧仍在。
+    assert_eq!(list_texts(&x, &conv).await.len(), 1, "X 侧消息应保留");
+}
+
+/// A 本地删除后 B 与 A 同步（已删除信封仍参与同步），A 的列表仍不含该消息。
+#[tokio::test]
+async fn deleted_message_not_resurrected_by_sync() {
+    let mut a = node_offline().await;
+    let a_user = a.init_first("甲").await;
+    let mut x = node_offline().await;
+    let x_user = x.init_first("小张").await;
+    befriend(&mut a, &mut x).await;
+
+    let conv = ConvId::dm(&user(&x_user), &user(&a_user)).to_hex();
+    x.call(Request::OpenDm {
+        user: a_user.clone(),
+    })
+    .await;
+    x.call(Request::SendText {
+        conv: conv.clone(),
+        text: "将被删除的消息".into(),
+    })
+    .await;
+    wait_until(|| async { !list_texts(&a, &conv).await.is_empty() }, 5).await;
+
+    let msg = list_texts(&a, &conv).await.remove(0);
+    a.call(Request::DeleteLocal {
+        msgs: vec![msg.id],
+        also_my_devices: false,
+    })
+    .await;
+    assert!(list_texts(&a, &conv).await.is_empty());
+
+    // B 与 A 同步（配对建立连接并拉取差量，已删除信封仍参与同步）。
+    let mut b = node_offline().await;
+    init_join(&b).await;
+    pair(&mut a, &mut b).await;
+    wait_until(|| async { list_texts(&b, &conv).await.len() == 1 }, 5).await;
+
+    // A 的列表未复活。
+    assert!(
+        list_texts(&a, &conv).await.is_empty(),
+        "同步后 A 的已删除消息不应复活"
+    );
 }

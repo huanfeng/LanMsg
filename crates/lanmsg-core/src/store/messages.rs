@@ -314,6 +314,24 @@ impl Store {
         Ok(())
     }
 
+    /// 撤回无效时恢复目标：删除该目标的 recalls 行，并把状态为 recalled 的
+    /// 消息恢复为 sent（原始状态未单独记录，sent 为最接近的可用状态）。
+    pub fn undo_recall(&self, target: &MsgId) -> Result<(), crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        conn.execute(
+            "DELETE FROM recalls WHERE target_author = ?1 AND target_seq = ?2",
+            rusqlite::params![&target.author.0[..], target.seq as i64],
+        )?;
+        conn.execute(
+            "UPDATE messages SET state = 'sent'
+             WHERE author = ?1 AND seq = ?2 AND state = 'recalled'",
+            rusqlite::params![&target.author.0[..], target.seq as i64],
+        )?;
+        Ok(())
+    }
+
     /// 把该会话中 `author_user` 发出的、`hlc <= upto`、状态为 sent/delivered 的消息
     /// 置 read，返回被改的 id。
     pub fn mark_read_upto(
@@ -322,38 +340,43 @@ impl Store {
         author_user: &UserId,
         upto: lanmsg_proto::types::Hlc,
     ) -> Result<Vec<MsgId>, crate::store::StoreError> {
-        let conn = self
-            .conn()
-            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-        let mut stmt = conn.prepare(
-            "SELECT author, seq FROM messages
-             WHERE conv_id = ?1 AND author_user = ?2 AND state IN ('sent', 'delivered')
-               AND (hlc_millis < ?3 OR (hlc_millis = ?3 AND hlc_counter <= ?4))",
-        )?;
-        let rows = stmt.query_map(
-            rusqlite::params![
-                &conv.0[..],
-                &author_user.0[..],
-                upto.millis,
-                upto.counter as i64
-            ],
-            |row| {
-                let author: Vec<u8> = row.get(0)?;
-                let seq: i64 = row.get(1)?;
-                Ok((author, seq))
-            },
-        )?;
-        let mut ids = Vec::new();
-        for r in rows {
-            let (author, seq) = r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-            ids.push(MsgId {
-                author: DeviceId(author.try_into().map_err(|bytes: Vec<u8>| {
-                    crate::store::StoreError::Codec(format!("author 长度非法: {}", bytes.len()))
-                })?),
-                seq: seq as u64,
-            });
-        }
-        drop(stmt);
+        // 连接 guard 收窄到查询段：末尾 set_message_state 需重新取锁，
+        // 同线程重入 MutexGuard 会死锁。
+        let ids: Vec<MsgId> = {
+            let conn = self
+                .conn()
+                .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+            let mut stmt = conn.prepare(
+                "SELECT author, seq FROM messages
+                 WHERE conv_id = ?1 AND author_user = ?2 AND state IN ('sent', 'delivered')
+                   AND (hlc_millis < ?3 OR (hlc_millis = ?3 AND hlc_counter <= ?4))",
+            )?;
+            let rows = stmt.query_map(
+                rusqlite::params![
+                    &conv.0[..],
+                    &author_user.0[..],
+                    upto.millis,
+                    upto.counter as i64
+                ],
+                |row| {
+                    let author: Vec<u8> = row.get(0)?;
+                    let seq: i64 = row.get(1)?;
+                    Ok((author, seq))
+                },
+            )?;
+            let mut ids = Vec::new();
+            for r in rows {
+                let (author, seq) =
+                    r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+                ids.push(MsgId {
+                    author: DeviceId(author.try_into().map_err(|bytes: Vec<u8>| {
+                        crate::store::StoreError::Codec(format!("author 长度非法: {}", bytes.len()))
+                    })?),
+                    seq: seq as u64,
+                });
+            }
+            ids
+        };
         self.set_message_state_multi(&ids, MsgStateRow::Read)?;
         Ok(ids)
     }

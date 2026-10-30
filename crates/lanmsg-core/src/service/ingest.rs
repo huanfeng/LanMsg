@@ -3,12 +3,14 @@
 // 本任务处理 System{ProfileUpdated}；后续任务在此函数追加分支。
 // 注释中文，标识符英文。
 
-use lanmsg_proto::ids::DeviceId;
+use lanmsg_proto::consts::RECALL_WINDOW;
+use lanmsg_proto::ids::{DeviceId, MsgId, UserId};
 use lanmsg_proto::types::{ContactRecord, MsgBody, SystemEvent};
 
 use crate::identity::{hex_decode, hex_encode};
 use crate::service::{build_announce, now_millis, Inner};
 use crate::store::{StoredMessage, UserRow};
+use lanmsg_api::types::Event;
 use lanmsg_proto::types::Hlc;
 
 /// 消息入库后的分派入口：按消息体类型触发本地状态更新。
@@ -20,8 +22,99 @@ pub(crate) async fn after_ingest(svc: &Inner, _from: DeviceId, m: &StoredMessage
         MsgBody::System {
             event: SystemEvent::ContactUpdated(rec),
         } => on_contact_updated(svc, m, rec).await,
+        MsgBody::System {
+            event: SystemEvent::LocalDeleted { msgs },
+        } => on_local_deleted(svc, m, msgs).await,
+        MsgBody::Read { upto } => on_read(svc, m, upto).await,
+        MsgBody::Recall { target } => on_recall(svc, m, target).await,
         _ => {}
     }
+}
+
+/// 查设备所属用户（devices 表）。
+fn device_user(svc: &Inner, device: &DeviceId) -> Option<UserId> {
+    svc.store.get_device(device).ok().flatten().map(|r| r.user)
+}
+
+/// Read{upto}：作者用户 == 自己 → 同步已读水位（变化则发 ConversationUpdated）；
+/// 否则为对端已读回执 → 自己发出的、hlc <= upto 的消息置 Read，逐条发
+/// MessageUpdated。
+async fn on_read(svc: &Inner, m: &StoredMessage, upto: &Hlc) {
+    let Some(self_user) = svc.state.read().unwrap().self_user else {
+        return;
+    };
+    if device_user(svc, &m.env.id.author).as_ref() == Some(&self_user) {
+        if svc
+            .store
+            .set_last_read(&m.env.conv, upto.clone())
+            .unwrap_or(false)
+        {
+            crate::service::notify_conversation(svc, &m.env.conv);
+        }
+        return;
+    }
+    let ids = match svc
+        .store
+        .mark_read_upto(&m.env.conv, &self_user, upto.clone())
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(error = %e, "已读回执应用失败");
+            return;
+        }
+    };
+    if ids.is_empty() {
+        return;
+    }
+    let self_device = svc.identity.read().await.device_id();
+    for id in ids {
+        if let Ok(Some(sm)) = svc.store.get_message(&id) {
+            let _ = svc.events.send(Event::MessageUpdated {
+                msg: crate::service::views::message_view(svc.store.as_ref(), &self_device, &sm),
+            });
+        }
+    }
+}
+
+/// Recall{target}：存储层已在入库时处理召回状态。目标存在、目标作者用户与
+/// 撤回作者用户一致、且时限内 → 发 MessageUpdated（state Recalled）；
+/// 否则撤回无效，undo_recall 删除 recalls 行并恢复目标状态。
+async fn on_recall(svc: &Inner, m: &StoredMessage, target: &MsgId) {
+    let recall_user = device_user(svc, &m.env.id.author);
+    let target_msg = svc.store.get_message(target).ok().flatten();
+    let window_millis = RECALL_WINDOW.as_millis() as i64;
+    let valid = matches!(&target_msg, Some(t)
+        if device_user(svc, &t.env.id.author) == recall_user
+            && m.env.hlc.millis.saturating_sub(t.env.hlc.millis) <= window_millis);
+    match (valid, target_msg) {
+        (true, Some(t)) => {
+            let self_device = svc.identity.read().await.device_id();
+            let _ = svc.events.send(Event::MessageUpdated {
+                msg: crate::service::views::message_view(svc.store.as_ref(), &self_device, &t),
+            });
+        }
+        _ => {
+            if let Err(e) = svc.store.undo_recall(target) {
+                tracing::warn!(error = %e, "undo_recall 失败");
+            }
+        }
+    }
+}
+
+/// System{LocalDeleted}：作者用户 == 自己（我的其他设备的删除广播）→
+/// 本地标记删除并发 ConversationUpdated。
+async fn on_local_deleted(svc: &Inner, m: &StoredMessage, msgs: &[MsgId]) {
+    let Some(self_user) = svc.state.read().unwrap().self_user else {
+        return;
+    };
+    if device_user(svc, &m.env.id.author).as_ref() != Some(&self_user) {
+        return;
+    }
+    if let Err(e) = svc.store.mark_deleted(msgs) {
+        tracing::warn!(error = %e, "本地删除应用失败");
+        return;
+    }
+    crate::service::notify_conversation(svc, &m.env.conv);
 }
 
 /// ContactUpdated：仅当作者用户 == 自己时按 HLC 严格更新应用；变化则发

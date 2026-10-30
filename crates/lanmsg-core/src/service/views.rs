@@ -36,8 +36,19 @@ pub fn message_view(store: &Store, self_device: &DeviceId, m: &StoredMessage) ->
         None => (author_device.short(), String::new()),
     };
 
-    let body = match &env.body {
-        MsgBody::Text { text } => MessageBodyView::Text { text: text.clone() },
+    // 撤回提示用作者显示名（users 表优先，无则设备名）。
+    let author_display_name = author_user
+        .and_then(|u| store.get_user(u).ok().flatten())
+        .map(|ur| ur.display_name)
+        .unwrap_or_else(|| author_device_name.clone());
+
+    // 撤回的消息正文替换为系统提示（先于 Text 判定）；其余非 Text 体暂为
+    // Unsupported。
+    let body = match (&env.body, m.state) {
+        (_, MsgStateRow::Recalled) => MessageBodyView::System {
+            text: format!("{} 撤回了一条消息", author_display_name),
+        },
+        (MsgBody::Text { text }, _) => MessageBodyView::Text { text: text.clone() },
         _ => MessageBodyView::Unsupported,
     };
 
@@ -68,10 +79,10 @@ pub fn message_view(store: &Store, self_device: &DeviceId, m: &StoredMessage) ->
 /// - DM 标题 = 对端用户显示名（无则 user short）。
 /// - SelfDevices 标题 = `"我的设备"`。
 /// - `last_text`/`last_hlc_millis` 取最新一条消息。
-/// - `unread` 本阶段恒 0（P2 实现）。
+/// - `unread` = 他人发出、晚于已读水位、未隐藏未删除未召回的条数。
 pub fn conv_summary(
     store: &Store,
-    _self_user: Option<&UserId>,
+    self_user: Option<&UserId>,
     conv: &ConvRow,
     peer_online: bool,
 ) -> ConversationSummary {
@@ -107,13 +118,27 @@ pub fn conv_summary(
         crate::store::ConvKindRow::Station => ConvKind::Station,
     };
 
+    // 未读数按会话已读水位计算；未初始化（无 self_user）时恒 0。
+    let unread = match self_user {
+        Some(u) => {
+            let after = store
+                .last_read(&conv.conv)
+                .unwrap_or(lanmsg_proto::types::Hlc {
+                    millis: 0,
+                    counter: 0,
+                });
+            store.unread_count(&conv.conv, u, after).unwrap_or(0)
+        }
+        None => 0,
+    };
+
     ConversationSummary {
         conv: conv.conv.to_hex(),
         kind,
         title,
         last_text,
         last_hlc_millis,
-        unread: 0,
+        unread,
         peer_online,
     }
 }
