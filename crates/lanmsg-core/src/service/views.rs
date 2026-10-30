@@ -161,8 +161,8 @@ pub fn peer_view(store: &Store, p: &PeerInfo, self_user: Option<&UserId>) -> Pee
     }
 }
 
-/// 将设备行转换为设备视图（online 按当前已连接设备集合判定）。
-pub fn device_view(d: &DeviceRow, peers: &[PeerInfo], self_user: Option<&UserId>) -> DeviceView {
+/// 将设备行转换为设备视图（online 按当前已连接设备集合判定；is_self 标本机）。
+pub fn device_view(d: &DeviceRow, peers: &[PeerInfo], self_device: &DeviceId) -> DeviceView {
     DeviceView {
         device_id: d.device.to_hex(),
         device_short: d.device.short(),
@@ -175,7 +175,7 @@ pub fn device_view(d: &DeviceRow, peers: &[PeerInfo], self_user: Option<&UserId>
             lanmsg_proto::types::PathClass::Internet => PathClassDto::Internet,
             lanmsg_proto::types::PathClass::Relay => PathClassDto::Relay,
         }),
-        is_self: self_user.is_some_and(|u| d.user == *u),
+        is_self: d.device == *self_device,
     }
 }
 
@@ -184,7 +184,7 @@ pub fn contact_view(
     store: &Store,
     peers: &[PeerInfo],
     row: &ContactRow,
-    self_user: Option<&UserId>,
+    self_device: &DeviceId,
 ) -> ContactView {
     let devices = store.devices_of_user(&row.user).unwrap_or_default();
     ContactView {
@@ -201,7 +201,7 @@ pub fn contact_view(
             .any(|d| peers.iter().any(|p| p.device == d.device)),
         devices: devices
             .iter()
-            .map(|d| device_view(d, peers, self_user))
+            .map(|d| device_view(d, peers, self_device))
             .collect(),
         auto_accept: row.auto_accept,
         ask_above_bytes: row.ask_above_bytes,

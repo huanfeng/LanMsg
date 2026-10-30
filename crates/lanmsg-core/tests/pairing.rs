@@ -13,7 +13,7 @@ use lanmsg_api::types::{
 };
 use lanmsg_core::discovery::MemoryBus;
 
-use common::{node, node_offline, TestNode};
+use common::{node, node_offline, pair, wait_until, TestNode};
 
 // ===== 辅助 =====
 
@@ -456,4 +456,87 @@ async fn pairing_window_closed_rejects_uninitialized_peer() {
         Response::SelfInfo { value } => assert!(!value.initialized),
         other => panic!("期望 SelfInfo，实际 {other:?}"),
     }
+}
+
+// ===== P2 Task 8：设备吊销 =====
+
+/// A 移除 C：C 被断开且重连被拒；B 的设备列表不含 C；C 本机按未初始化处理。
+#[tokio::test]
+async fn removed_device_is_disconnected_and_refused() {
+    init_log();
+    let (mut a, mut b, mut c) = (
+        node_offline().await,
+        node_offline().await,
+        node_offline().await,
+    );
+    a.init_first("甲机").await;
+    init_join(&b).await;
+    pair(&mut a, &mut b).await;
+    init_join(&c).await;
+    pair(&mut a, &mut c).await;
+    let c_dev = c.device_id().await;
+
+    // A 移除 C。
+    a.call(Request::RemoveDevice {
+        device: c_dev.clone(),
+    })
+    .await;
+
+    // A 侧 C 被断开。
+    a.wait_event(
+        |e| matches!(e, Event::PeerOffline { device } if device == &c_dev),
+        5,
+    )
+    .await;
+
+    // B 的 ListMyDevices 不含 C。
+    match b
+        .try_call(Request::ListMyDevices)
+        .await
+        .expect("ListMyDevices 失败")
+    {
+        Response::Devices { value } => {
+            assert!(
+                !value.iter().any(|d| d.device_id == c_dev),
+                "B 不应再列出 C"
+            );
+        }
+        other => panic!("期望 Devices，实际 {other:?}"),
+    }
+
+    // C 重连 B 被拒：3 秒内 B 无 PeerOnline(C)。拨号因 accept_filter 拒绝
+    // 而报错属预期，忽略。
+    let b_addr = b.svc.local_addr().to_string();
+    let _ = c.try_call(Request::AddManualPeer { addr: b_addr }).await;
+    b.no_event(
+        |e| matches!(e, Event::PeerOnline { peer } if peer.device_id == c_dev),
+        3000,
+    )
+    .await;
+
+    // C 本机按未初始化处理（GetSelf.initialized == false）。
+    wait_until(
+        || async {
+            matches!(
+                c.try_call(Request::GetSelf).await,
+                Ok(Response::SelfInfo { value }) if !value.initialized
+            )
+        },
+        5,
+    )
+    .await;
+}
+
+/// 不能移除本机（P2 Task 8）。
+#[tokio::test]
+async fn cannot_remove_self() {
+    init_log();
+    let a = node_offline().await;
+    a.init_first("甲机").await;
+    let a_dev = a.device_id().await;
+    let err = a
+        .try_call(Request::RemoveDevice { device: a_dev })
+        .await
+        .expect_err("移除本机应被拒绝");
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
 }

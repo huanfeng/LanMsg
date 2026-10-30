@@ -166,6 +166,15 @@ impl Identity {
         self.user.as_ref().map(|u| u.user_id())
     }
 
+    /// 本机被吊销（P2 Task 8）：清空内存中的用户密钥与证书（设备密钥保留），
+    /// 此后按未初始化语义处理（is_initialized == false、请求返回 NotInitialized）。
+    /// 持久化的 user.key 与 self_cert 不删：重启后由对端的吊销检查拒绝其接入
+    /// （身份的彻底清除属后续阶段语义）。
+    pub fn mark_revoked_self(&mut self) {
+        self.user = None;
+        self.cert = None;
+    }
+
     /// 设备名变更时用用户密钥重签本设备证书。
     ///
     /// 写 setting "self_cert"，更新 users/devices 表中自己的行

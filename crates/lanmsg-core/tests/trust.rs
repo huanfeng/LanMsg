@@ -28,7 +28,8 @@ use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{BlobHash, ConvId, DeviceId, MsgId, UserId};
 use lanmsg_proto::sign::{sign_with_zeroed_sig, DeviceKey, UserKey};
 use lanmsg_proto::types::{
-    DeviceCert, DeviceType, Envelope, Hlc, MsgBody, PathClass, Signature64, Status, SyncPush,
+    DeviceCert, DeviceType, Envelope, Hlc, MsgBody, PathClass, Revocation, Signature64, Status,
+    SyncPush,
 };
 
 // ===== 辅助 =====
@@ -1198,4 +1199,38 @@ async fn gate_rules_table() {
         .collect();
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].preview, "规则七第二条", "折叠只更新 preview");
+}
+
+/// P2 Task 8：联系人伪造的吊销记录被拒——验签失败返回 Err，设备未吊销。
+#[tokio::test]
+async fn revocation_from_non_owner_is_ignored() {
+    let (trust, store, _self_cert, self_device) = rules_env().await;
+    let self_user = store.get_device(&self_device).unwrap().unwrap().user;
+
+    // 联系人 X 及其设备入库（Accepted）。
+    let x = UserKey::generate();
+    let x_device = DeviceKey::generate().device_id();
+    let x_cert = cert_for(&x, x_device);
+    seed_contact(&store, x.user_id(), ContactState::Accepted);
+    store.upsert_device(&dev_row(&x, x_device)).unwrap();
+
+    // X 用自己的用户密钥伪造「吊销 A 的设备」：user 字段填 A，签名却是 X 的。
+    let mut r = Revocation {
+        user: self_user,
+        device: self_device,
+        revoked_at: NOW,
+        key_epoch: 0,
+        sig: Signature64([0u8; 64]),
+    };
+    sign_with_zeroed_sig(&mut r, |b| x.sign(b));
+
+    let from = peer_info(Some(x_cert), PathClass::Lan, false);
+    assert!(
+        trust.on_revocation(&from, r).await.is_err(),
+        "伪造吊销应被拒绝"
+    );
+
+    // 设备未吊销。
+    assert!(!store.is_revoked(&self_device).unwrap());
+    assert!(!store.get_device(&self_device).unwrap().unwrap().revoked);
 }

@@ -13,10 +13,10 @@ use tokio::sync::{broadcast, RwLock};
 use lanmsg_api::types::Event;
 use lanmsg_proto::consts::STRANGER_GATE_WINDOW;
 use lanmsg_proto::frame::Frame;
-use lanmsg_proto::ids::{ConvId, UserId};
+use lanmsg_proto::ids::{ConvId, DeviceId, UserId};
 use lanmsg_proto::types::{
     ContactRecord, ContactRequest, ContactResponse, ContactStateWire, DeviceCert, Envelope,
-    MsgBody, PathClass, Status, SystemEvent,
+    MsgBody, PathClass, Revocation, Status, SystemEvent,
 };
 
 use crate::error::CoreError;
@@ -794,6 +794,111 @@ impl Trust {
             }
         }
         [0u8; 16]
+    }
+
+    // ---- 设备吊销（P2 Task 8）----
+
+    /// 移除自己的设备：本设备 → InvalidArgument；目标不存在或不属于自己 →
+    /// NotFound。签发吊销记录（用户密钥签名）入库并向所有已连接、已初始化
+    /// 对端（自己设备 + 联系人）发 Frame::Revocation，随后断开该设备；最后
+    /// 在 SelfDevices 会话发可见消息 System{DeviceRemoved} 并发 DevicesChanged。
+    pub async fn revoke(&self, msg: &Messaging, device: &DeviceId) -> Result<(), CoreError> {
+        let self_user = self.self_user().await?;
+        let self_device = self.identity.read().await.device_id();
+        if *device == self_device {
+            return Err(CoreError::InvalidArgument("不能移除本机".into()));
+        }
+        let row = self
+            .store
+            .get_device(device)?
+            .ok_or_else(|| CoreError::NotFound(format!("设备不存在: {device}")))?;
+        if row.user != self_user {
+            return Err(CoreError::NotFound(format!("设备不属于当前用户: {device}")));
+        }
+        // 吊销记录须由用户密钥签发（读锁作用域内取引用，无 await 穿越锁）。
+        let rev = {
+            let id = self.identity.read().await;
+            let user = id.user.as_ref().ok_or(CoreError::NotInitialized)?;
+            Revocation::issue(user, *device, now_millis())
+        };
+        self.store.insert_revocation(&rev)?;
+        self.store.revoke_device(device)?;
+        // 发给所有已连接、已初始化对端（带证书即已完成初始化）。
+        for p in self.conns.peers() {
+            if p.cert.is_some() {
+                let _ = self
+                    .conns
+                    .send(&p.device, Frame::Revocation(rev.clone()))
+                    .await;
+            }
+        }
+        // 缓冲后再断开（同 Task 7）：Revocation 帧经 write 通道异步冲刷，
+        // 立即断开会因读半部带未读数据关闭 socket（RST）而丢失在途帧。
+        if self.conns.is_connected(device) {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            self.conns.disconnect(device).await;
+        }
+        msg.send(
+            &ConvId::self_devices(&self_user),
+            MsgBody::System {
+                event: SystemEvent::DeviceRemoved { device: *device },
+            },
+        )
+        .await?;
+        let _ = self.events.send(Event::DevicesChanged);
+        Ok(())
+    }
+
+    /// 收到对端 Revocation 帧：验签（r.user 的公钥）；r.user 必须是自己或
+    /// Accepted 联系人；目标设备的已知证书 user 必须等于 r.user（未知设备也
+    /// 接受并入库，以便将来拒绝）。新插入时：revoke_device、断开该设备、
+    /// 转发给其他已连接的自己设备（不含来源），并按归属发 DevicesChanged
+    /// （自己）/ ContactsChanged（联系人）。被吊销的是本机时：清空内存身份
+    /// （此后按未初始化处理；HelloInfo 证书清空与停通告由 Service 层完成）。
+    /// 返回是否新插入。
+    pub async fn on_revocation(&self, from: &PeerInfo, r: Revocation) -> Result<bool, CoreError> {
+        if r.verify().is_err() {
+            return Err(CoreError::Rejected("吊销记录验签失败".into()));
+        }
+        let self_device = self.identity.read().await.device_id();
+        let self_user = self_user_now_sync(&self.identity);
+        let is_self_user = self_user.is_some_and(|u| u == r.user);
+        if !is_self_user && !self.is_contact(&r.user) {
+            return Err(CoreError::Rejected("吊销发布者非自己或联系人".into()));
+        }
+        if let Some(row) = self.store.get_device(&r.device)? {
+            if row.user != r.user {
+                return Err(CoreError::Rejected("吊销设备不属于该用户".into()));
+            }
+        }
+        if !self.store.insert_revocation(&r)? {
+            return Ok(false);
+        }
+        self.store.revoke_device(&r.device)?;
+        if r.device == self_device {
+            // 本机被吊销：清空内存身份，无连接可断。
+            self.identity.write().await.mark_revoked_self();
+        } else {
+            self.conns.disconnect(&r.device).await;
+        }
+        // 转发给其他已连接的自己设备（不含来源与被吊销设备本身）。
+        for p in self.conns.peers() {
+            let mine = p.cert.as_ref().is_some_and(|c| Some(c.user) == self_user)
+                && p.device != from.device
+                && p.device != r.device;
+            if mine {
+                let _ = self
+                    .conns
+                    .send(&p.device, Frame::Revocation(r.clone()))
+                    .await;
+            }
+        }
+        if is_self_user {
+            let _ = self.events.send(Event::DevicesChanged);
+        } else {
+            let _ = self.events.send(Event::ContactsChanged);
+        }
+        Ok(true)
     }
 
     // ---- 查询 ----

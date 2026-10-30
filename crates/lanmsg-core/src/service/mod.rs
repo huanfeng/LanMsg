@@ -349,6 +349,26 @@ async fn routing_task(
                             }
                         }
                     }
+                    // 吊销帧分派给 Trust；本机被吊销时清空 HelloInfo 证书、
+                    // 停止通告并清自身用户（之后按未初始化处理）。
+                    Frame::Revocation(r) => {
+                        if let Some(pi) = inner.conns.peer(&d) {
+                            let was_self = inner.identity.read().await.device_id() == r.device;
+                            match inner.trust.on_revocation(&pi, r.clone()).await {
+                                Ok(true) if was_self => {
+                                    let mut hello = inner.hello_tx.borrow().clone();
+                                    hello.cert = None;
+                                    inner.hello_tx.send_replace(hello);
+                                    let _ = inner.announce_tx.send(None);
+                                    inner.state.write().unwrap().self_user = None;
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::warn!(peer = %d, error = %e, "Revocation 处理失败");
+                                }
+                            }
+                        }
+                    }
                     // 配对帧分派给 Pairing（P2 Task 7）。
                     Frame::Pair(p) => {
                         if let Some(pi) = inner.conns.peer(&d) {

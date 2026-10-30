@@ -13,7 +13,7 @@ use lanmsg_api::types::{
 };
 use lanmsg_proto::consts::PAIR_TOKEN_TTL;
 use lanmsg_proto::frame::Frame;
-use lanmsg_proto::ids::{ConvId, MsgId, UserId};
+use lanmsg_proto::ids::{ConvId, DeviceId, MsgId, UserId};
 use lanmsg_proto::types::{DeviceType, MsgBody, PairMethodWire, Status};
 
 use crate::service::views::{conv_summary, message_view, peer_view};
@@ -54,6 +54,8 @@ pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiE
             auto_accept,
             ask_above_bytes,
         } => set_contact_policy(inner, user, auto_accept, ask_above_bytes).await,
+        Request::ListMyDevices => list_my_devices(inner).await,
+        Request::RemoveDevice { device } => remove_device(inner, device).await,
         Request::PairStart { method } => pair_start(inner, method).await,
         Request::PairJoin { target } => pair_join(inner, target).await,
         Request::PairConfirm { session, matches } => pair_confirm(inner, session, matches).await,
@@ -336,12 +338,10 @@ async fn list_contacts(inner: &Inner) -> Result<Response, ApiError> {
         .list_contacts(Some(crate::store::ContactState::Accepted))
         .map_err(crate::error::CoreError::from)?;
     let peers = inner.conns.peers();
-    let self_user = inner.state.read().unwrap().self_user;
+    let self_device = inner.identity.read().await.device_id();
     let value = rows
         .iter()
-        .map(|row| {
-            crate::service::views::contact_view(&inner.store, &peers, row, self_user.as_ref())
-        })
+        .map(|row| crate::service::views::contact_view(&inner.store, &peers, row, &self_device))
         .collect();
     Ok(Response::Contacts { value })
 }
@@ -403,6 +403,43 @@ async fn set_contact_policy(
         .trust
         .set_policy(&inner.msg, &user, auto_accept, ask_above_bytes)
         .await?;
+    Ok(Response::Ok)
+}
+
+// ---- P2 Task 8：设备吊销与设备列表 ----
+
+/// ListMyDevices：自己用户的所有未吊销设备（is_self 标本机；online/path
+/// 取设备行与当前连接）。未初始化 → NotInitialized。
+async fn list_my_devices(inner: &Inner) -> Result<Response, ApiError> {
+    let self_user = inner
+        .state
+        .read()
+        .unwrap()
+        .self_user
+        .ok_or_else(|| ApiError {
+            code: ErrorCode::NotInitialized,
+            message: "服务尚未初始化".into(),
+        })?;
+    let rows = inner
+        .store
+        .devices_of_user(&self_user)
+        .map_err(crate::error::CoreError::from)?;
+    let self_device = inner.identity.read().await.device_id();
+    let peers = inner.conns.peers();
+    let value = rows
+        .iter()
+        .filter(|d| !d.revoked)
+        .map(|d| crate::service::views::device_view(d, &peers, &self_device))
+        .collect();
+    Ok(Response::Devices { value })
+}
+
+/// RemoveDevice：吊销自己的指定设备（本机 → InvalidArgument；非自己的设备
+/// → NotFound），分发 Revocation 并断开该设备。
+async fn remove_device(inner: &Inner, device: String) -> Result<Response, ApiError> {
+    let device =
+        DeviceId::from_hex(&device).map_err(|_| invalid_arg(format!("非法设备 ID: {device}")))?;
+    inner.trust.revoke(&inner.msg, &device).await?;
     Ok(Response::Ok)
 }
 
