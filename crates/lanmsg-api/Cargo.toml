@@ -11,3 +11,7 @@ ciborium = "0.2"
 thiserror = "2"
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
+interprocess = { version = "2", features = ["tokio"] }
+tokio = { version = "1", features = ["net"] }
+futures-util = { version = "0.3", features = ["sink"] }
+blake3 = "1"

@@ -8,3 +8,9 @@ license.workspace = true
 name = "lanmsg-cli"
 
 [dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+lanmsg-api = { version = "0.1.0", path = "../lanmsg-api" }
+lanmsg-core = { version = "0.1.0", path = "../lanmsg-core" }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
