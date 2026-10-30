@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, RwLock, watch};
+use tokio::sync::{mpsc, watch, RwLock};
 
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::DeviceId;
@@ -15,7 +15,7 @@ use lanmsg_proto::sign::DeviceKey;
 
 use crate::error::CoreError;
 use crate::identity::Identity;
-use crate::net::conn::{Connection, ConnEvent, HelloInfo, PeerInfo};
+use crate::net::conn::{ConnEvent, Connection, HelloInfo, PeerInfo};
 
 /// 连接条目：持连接句柄与裁决所需元数据。
 struct ConnectionEntry {
@@ -58,13 +58,17 @@ impl ConnManager {
         drop(identity_guard);
 
         let listener = if port == 0 {
-            TcpListener::bind("0.0.0.0:0").await.map_err(|e| CoreError::Io(e))?
+            TcpListener::bind("0.0.0.0:0")
+                .await
+                .map_err(|e| CoreError::Io(e))?
         } else {
             match TcpListener::bind(format!("0.0.0.0:{port}")).await {
                 Ok(l) => l,
                 Err(_) => {
                     tracing::warn!(port, "端口被占用，回退到随机端口");
-                    TcpListener::bind("0.0.0.0:0").await.map_err(|e| CoreError::Io(e))?
+                    TcpListener::bind("0.0.0.0:0")
+                        .await
+                        .map_err(|e| CoreError::Io(e))?
                 }
             }
         };
@@ -100,7 +104,11 @@ impl ConnManager {
     }
 
     /// 出站拨号：已连接则直接返回该设备。
-    pub async fn connect(&self, addr: SocketAddr, _via_multicast: bool) -> Result<DeviceId, CoreError> {
+    pub async fn connect(
+        &self,
+        addr: SocketAddr,
+        _via_multicast: bool,
+    ) -> Result<DeviceId, CoreError> {
         // 快速路径：若已有连接到该地址且已上线，直接返回该设备。
         {
             let inner = self.inner.read().await;
@@ -193,7 +201,11 @@ impl ConnManager {
     pub fn is_connected(&self, device: &DeviceId) -> bool {
         let inner = self.inner.try_read().ok();
         match inner {
-            Some(inner) => inner.connections.get(device).map(|e| e.up_sent).unwrap_or(false),
+            Some(inner) => inner
+                .connections
+                .get(device)
+                .map(|e| e.up_sent)
+                .unwrap_or(false),
             None => false,
         }
     }
@@ -315,7 +327,7 @@ async fn accept_loop(listener: TcpListener, inner: Arc<RwLock<Inner>>) {
 mod tests {
     use super::*;
     use std::time::Duration;
-    use tokio::sync::{mpsc, RwLock, watch};
+    use tokio::sync::{mpsc, watch, RwLock};
 
     use crate::identity::Identity;
     use lanmsg_proto::ids::DeviceId;
@@ -383,7 +395,10 @@ mod tests {
         let (mgr_a, mut events_a, dev_a) = make_manager().await;
         let (mgr_b, mut events_b, dev_b) = make_manager().await;
 
-        let _ = mgr_a.connect(mgr_b.local_addr(), false).await.expect("A 拨号 B 失败");
+        let _ = mgr_a
+            .connect(mgr_b.local_addr(), false)
+            .await
+            .expect("A 拨号 B 失败");
         expect_up(&mut events_a, dev_b).await;
         expect_up(&mut events_b, dev_a).await;
 

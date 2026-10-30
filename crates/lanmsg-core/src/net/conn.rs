@@ -71,7 +71,9 @@ impl Connection {
         hello: &HelloInfo,
         event_tx: mpsc::Sender<ConnEvent>,
     ) -> Result<(PeerInfo, Arc<Connection>), CoreError> {
-        let stream = TcpStream::connect(addr).await.map_err(|e| CoreError::Io(e))?;
+        let stream = TcpStream::connect(addr)
+            .await
+            .map_err(|e| CoreError::Io(e))?;
         let peer_addr = stream.peer_addr().map_err(|e| CoreError::Io(e))?;
         let (_server_config, client_config) = make_tls_configs(device_key)?;
         let domain = ServerName::try_from(TLS_SNI.as_bytes())
@@ -98,9 +100,19 @@ impl Connection {
         };
         framed_write
             .send(Frame::Hello(own_hello.clone()))
-            .map_err(|e| CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+            .map_err(|e| {
+                CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
+            })
             .await?;
-        framed_write.flush().await.map_err(|e| CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+        framed_write.flush().await.map_err(|e| {
+            CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
 
         // 读取对端 Hello。
         let their_hello = match framed_read.next().await {
@@ -132,7 +144,8 @@ impl Connection {
                     "Hello 设备证书与 TLS 对端不一致".into(),
                 ));
             }
-            cert.verify().map_err(|e| CoreError::Rejected(e.to_string()))?;
+            cert.verify()
+                .map_err(|e| CoreError::Rejected(e.to_string()))?;
         }
         if their_hello.proto != PROTO_VERSION {
             return Err(CoreError::Rejected("协议版本不符".into()));
@@ -146,7 +159,8 @@ impl Connection {
             return Err(CoreError::Rejected("对端即自己".into()));
         }
         // 校验通过后，等待对端确认（对端若拒绝会发 Error 帧）。
-        let confirm = tokio::time::timeout(Duration::from_secs(5), framed_read.next()).await
+        let confirm = tokio::time::timeout(Duration::from_secs(5), framed_read.next())
+            .await
             .map_err(|_| CoreError::Proto("等待对端确认超时".into()))?;
         match confirm {
             Some(Ok(Frame::Error { code, message })) => {
@@ -239,7 +253,10 @@ impl Connection {
         let peer_addr = stream.peer_addr().map_err(|e| CoreError::Io(e))?;
         let (server_config, _client_config) = make_tls_configs(device_key)?;
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-        let tls_stream = acceptor.accept(stream).await.map_err(|e| CoreError::Tls(e.to_string()))?;
+        let tls_stream = acceptor
+            .accept(stream)
+            .await
+            .map_err(|e| CoreError::Tls(e.to_string()))?;
         let (_tcp_stream, tls_conn) = tls_stream.get_ref();
         let peer_device = peer_device_id(&*tls_conn).map_err(|e| CoreError::Tls(e.to_string()))?;
 
@@ -257,9 +274,19 @@ impl Connection {
         };
         framed_write
             .send(Frame::Hello(own_hello.clone()))
-            .map_err(|e| CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+            .map_err(|e| {
+                CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
+            })
             .await?;
-        framed_write.flush().await.map_err(|e| CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+        framed_write.flush().await.map_err(|e| {
+            CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
 
         // 读取对端 Hello。
         let their_hello = match framed_read.next().await {
@@ -290,7 +317,8 @@ impl Connection {
                     "Hello 设备证书与 TLS 对端不一致".into(),
                 ));
             }
-            cert.verify().map_err(|e| CoreError::Rejected(e.to_string()))?;
+            cert.verify()
+                .map_err(|e| CoreError::Rejected(e.to_string()))?;
         }
         if their_hello.proto != PROTO_VERSION {
             return Err(CoreError::Rejected("协议版本不符".into()));
@@ -379,7 +407,10 @@ impl Connection {
 
     /// 发送一帧到对端。
     pub(crate) async fn send(&self, _device: &DeviceId, frame: Frame) -> Result<(), CoreError> {
-        self.write_tx.send(frame).await.map_err(|_| CoreError::PeerOffline)
+        self.write_tx
+            .send(frame)
+            .await
+            .map_err(|_| CoreError::PeerOffline)
     }
 
     pub(crate) fn peer_info(&self) -> &PeerInfo {
