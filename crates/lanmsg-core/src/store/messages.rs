@@ -307,7 +307,7 @@ impl Store {
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
         for id in ids {
             conn.execute(
-                "UPDATE messages SET deleted = 1 WHERE author = ?2 AND seq = ?3",
+                "UPDATE messages SET deleted = 1 WHERE author = ?1 AND seq = ?2",
                 rusqlite::params![&id.author.0[..], id.seq as i64],
             )?;
         }

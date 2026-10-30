@@ -11,11 +11,12 @@ use rand::RngCore;
 use tokio::sync::{broadcast, RwLock};
 
 use lanmsg_api::types::Event;
+use lanmsg_proto::consts::STRANGER_GATE_WINDOW;
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{ConvId, UserId};
 use lanmsg_proto::types::{
-    ContactRecord, ContactRequest, ContactResponse, ContactStateWire, DeviceCert, MsgBody,
-    PathClass, Status, SystemEvent,
+    ContactRecord, ContactRequest, ContactResponse, ContactStateWire, DeviceCert, Envelope,
+    MsgBody, PathClass, Status, SystemEvent,
 };
 
 use crate::error::CoreError;
@@ -23,7 +24,10 @@ use crate::hlc::HlcClock;
 use crate::identity::Identity;
 use crate::msg::Messaging;
 use crate::net::{ConnManager, PeerInfo};
-use crate::store::{ContactRow, ContactState, DeviceRow, RequestKindRow, RequestRow, Store};
+use crate::store::{
+    ContactRow, ContactState, ConvKindRow, ConvRow, DeviceRow, Gate, RequestKindRow, RequestRow,
+    Store,
+};
 
 /// 当前墙钟时间（毫秒）。
 fn now_millis() -> i64 {
@@ -80,6 +84,20 @@ pub(crate) fn accept_rules(
     }
 }
 
+/// 陌生人消息门控决策（P2 Task 6）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateDecision {
+    /// 直接入库可见。
+    Accept,
+    /// 入库隐藏并登记/合并待处理请求。
+    Pending {
+        /// open 请求 ID（同作者同类型折叠复用）。
+        request_id: String,
+    },
+    /// 丢弃：不入库、不回 Ack。
+    Drop,
+}
+
 /// 联系人与信任模块。
 #[derive(Clone)]
 pub struct Trust {
@@ -111,6 +129,96 @@ impl Trust {
     /// 连接准入：按七条规则判定（status 与 pair_window_open 取调用时的值）。
     pub fn accept_peer(&self, p: &PeerInfo, status: Status, pair_window_open: bool) -> bool {
         accept_rules(&self.store, &self.identity, p, status, pair_window_open)
+    }
+
+    /// 陌生人消息门控：按七条规则判定入站消息去向（规则顺序即优先级）。
+    ///
+    /// 1. from 设备属于自己 → Accept（自己设备转交一律信任，门控只在首个
+    ///    接收设备上发生）；2. 作者用户是自己 → Accept；3. 作者 Blocked →
+    ///    Drop；4. 作者 Accepted → Accept；5. 会话存在且 gate Open、窗口为空
+    ///    或未到 → Accept；6. 非 Lan 且非（Vpn 且出站）→ Drop；7. 其余 →
+    ///    会话置 Pending 并登记/合并 open 请求 → Pending。
+    pub fn gate_inbound(
+        &self,
+        from: &PeerInfo,
+        env: &Envelope,
+        now: i64,
+    ) -> Result<GateDecision, CoreError> {
+        let self_user = self_user_now_sync(&self.identity);
+
+        // 规则 1：from 设备属于自己 → Accept。
+        if let Some(cert) = &from.cert {
+            if self_user.is_some_and(|u| u == cert.user) {
+                return Ok(GateDecision::Accept);
+            }
+        }
+
+        let author_user = self
+            .store
+            .get_device(&env.id.author)?
+            .map(|r| r.user)
+            .ok_or_else(|| CoreError::Rejected("作者设备未入库".into()))?;
+
+        // 规则 2：作者用户是自己 → Accept。
+        if self_user.is_some_and(|u| u == author_user) {
+            return Ok(GateDecision::Accept);
+        }
+        let state = self.store.get_contact(&author_user)?.map(|r| r.state);
+        // 规则 3：作者用户 Blocked → Drop。
+        if state == Some(ContactState::Blocked) {
+            return Ok(GateDecision::Drop);
+        }
+        // 规则 4：作者用户 Accepted 联系人 → Accept。
+        if state == Some(ContactState::Accepted) {
+            return Ok(GateDecision::Accept);
+        }
+        // 规则 5：会话已存在且 gate Open、窗口为空或未到 → Accept。
+        if self.store.get_conversation(&env.conv)?.is_some() {
+            let (gate, until) = self.store.get_gate(&env.conv)?;
+            if gate == Gate::Open && until.is_none_or(|t| t > now) {
+                return Ok(GateDecision::Accept);
+            }
+        }
+        // 规则 6：路径过滤：非 Lan 且非（Vpn 且出站）→ Drop。
+        let path_ok = match from.path {
+            PathClass::Lan => true,
+            PathClass::Vpn => from.outbound,
+            PathClass::Internet | PathClass::Relay => false,
+        };
+        if !path_ok {
+            return Ok(GateDecision::Drop);
+        }
+        // 规则 7：会话置 Pending 并登记/合并 open 请求。
+        let kind = gate_request_kind(&env.body);
+        let preview = request_preview(&env.body);
+        // 会话不存在则先建（set_gate 需要行存在）。
+        if self.store.get_conversation(&env.conv)?.is_none() {
+            self.store.ensure_conversation(&ConvRow {
+                conv: env.conv,
+                kind: ConvKindRow::Dm,
+                peer_user: Some(author_user),
+                title: None,
+                created_at: now,
+            })?;
+        }
+        self.store.set_gate(&env.conv, Gate::Pending, None)?;
+        // 复用同 (from_user, kind) 的既有 open 请求 id，仅更新 preview；无则新建。
+        let request_id = self
+            .store
+            .list_open_requests()?
+            .into_iter()
+            .find(|r| r.kind == kind && r.from_user == author_user)
+            .map(|r| r.request_id)
+            .unwrap_or_else(|| crate::identity::hex_encode(&random_request_id()));
+        self.store.upsert_open_request(&RequestRow {
+            request_id: request_id.clone(),
+            kind,
+            from_user: author_user,
+            conv: Some(env.conv),
+            preview,
+            created_at: now,
+        })?;
+        Ok(GateDecision::Pending { request_id })
     }
 
     // ---- 私有辅助 ----
@@ -277,11 +385,13 @@ impl Trust {
             Some(ContactState::Incoming) => {
                 // 视为同意：进入 Accepted 并回 accepted:true（本端是回复方，
                 // 由 enter_accepted 发 ContactAdded）。回显对方请求的 request_id。
-                self.enter_accepted(msg, user, &[], true).await?;
+                // 先回响应再发消息：对方需先经 ContactResponse 进入 Accepted，
+                // 否则随后的 ContactAdded 会被对方的陌生人门控隐藏。
                 let req_id = self.open_contact_request_id(user);
                 let _ = self
                     .send_to_user(user, self.contact_response(req_id, true))
                     .await;
+                self.enter_accepted(msg, user, &[], true).await?;
                 return Ok(());
             }
             _ => {}
@@ -340,10 +450,11 @@ impl Trust {
                 return Ok(());
             }
             Some(ContactState::Outgoing) => {
-                self.enter_accepted(msg, &user, &req.devices, true).await?;
+                // 先回响应再进入 Accepted（理由同 request_contact 的 Incoming 分支）。
                 let _ = self
                     .send_to_user(&user, self.contact_response(req.request_id, true))
                     .await;
+                self.enter_accepted(msg, &user, &req.devices, true).await?;
                 return Ok(());
             }
             _ => {}
@@ -416,10 +527,11 @@ impl Trust {
             }
             RequestAction::AddContact => {
                 if self.store.get_contact(&user)?.map(|r| r.state) != Some(ContactState::Accepted) {
-                    self.enter_accepted(msg, &user, &[], true).await?;
+                    // 先回响应再进入 Accepted（理由同 request_contact 的 Incoming 分支）。
                     let _ = self
                         .send_to_user(&user, self.contact_response(req_id_bytes, true))
                         .await;
+                    self.enter_accepted(msg, &user, &[], true).await?;
                 }
             }
             RequestAction::Reject => {
@@ -448,6 +560,119 @@ impl Trust {
             }
         }
         self.store.close_request(&req.request_id)?;
+        Ok(())
+    }
+
+    /// 本端处理 open 消息/文件请求（RespondRequest，kind == Message/File）。
+    ///
+    /// AcceptOnce：gate 置 Open（窗口 = STRANGER_GATE_WINDOW）并揭示该用户
+    /// 在本会话的全部非隐藏类消息，发 ConversationUpdated；AddContact：同
+    /// AcceptOnce 但不设窗口，随后发起联系人请求；Reject：删除该用户在会话
+    /// 中的消息、gate 置 Rejected、关闭请求（新消息重新进入规则 7）；Block：
+    /// 同 Reject 并把联系人置 Blocked（断开对方全部连接）。
+    pub async fn respond_message_request(
+        &self,
+        msg: &Messaging,
+        req: &RequestRow,
+        action: lanmsg_api::types::RequestAction,
+        now: i64,
+    ) -> Result<(), CoreError> {
+        use lanmsg_api::types::RequestAction;
+        let conv = req
+            .conv
+            .ok_or_else(|| CoreError::InvalidArgument("消息请求缺少会话".into()))?;
+        let user = req.from_user;
+        match action {
+            RequestAction::AcceptOnce => {
+                self.store.set_gate(
+                    &conv,
+                    Gate::Open,
+                    Some(now + STRANGER_GATE_WINDOW.as_millis() as i64),
+                )?;
+                self.reveal_messages(&conv, &user)?;
+                self.store.close_request(&req.request_id)?;
+                self.publish_conversation_updated(&conv).await?;
+            }
+            RequestAction::AddContact => {
+                self.store.set_gate(&conv, Gate::Open, None)?;
+                self.reveal_messages(&conv, &user)?;
+                self.store.close_request(&req.request_id)?;
+                self.publish_conversation_updated(&conv).await?;
+                self.request_contact(msg, &user).await?;
+            }
+            RequestAction::Reject => {
+                self.reject_and_close(&conv, &req.request_id, &user)?;
+            }
+            RequestAction::Block => {
+                self.reject_and_close(&conv, &req.request_id, &user)?;
+                if self.store.get_contact(&user)?.map(|r| r.state) != Some(ContactState::Blocked) {
+                    self.set_state(&user, ContactState::Blocked)?;
+                    self.publish_contact_updated(msg, &user).await?;
+                }
+                // 断开对方全部连接（Task 5 Block 效果）。
+                for p in self.conns.peers() {
+                    if p.cert.as_ref().is_some_and(|c| c.user == user) {
+                        self.conns.disconnect(&p.device).await;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject/Block 公共部分：删除该用户在会话中的消息、gate 置 Rejected、
+    /// 关闭请求。
+    fn reject_and_close(
+        &self,
+        conv: &ConvId,
+        request_id: &str,
+        user: &UserId,
+    ) -> Result<(), CoreError> {
+        let ids = self.store.messages_of_user_in_conv(conv, user)?;
+        self.store.mark_deleted(&ids)?;
+        self.store.set_gate(conv, Gate::Rejected, None)?;
+        self.store.close_request(request_id)?;
+        Ok(())
+    }
+
+    /// 揭示会话中该用户的全部非隐藏类消息（AcceptOnce/AddContact 用）。
+    fn reveal_messages(&self, conv: &ConvId, user: &UserId) -> Result<(), CoreError> {
+        let mut visible = Vec::new();
+        for id in self.store.messages_of_user_in_conv(conv, user)? {
+            if let Some(m) = self.store.get_message(&id)? {
+                if !lanmsg_proto::body_is_hidden(&m.env.body) {
+                    visible.push(id);
+                }
+            }
+        }
+        self.store.set_hidden(&visible, false)?;
+        Ok(())
+    }
+
+    /// 会话可见性变化后同步 ConversationUpdated。
+    async fn publish_conversation_updated(&self, conv: &ConvId) -> Result<(), CoreError> {
+        let self_user = self.self_user().await?;
+        let conv_row = self
+            .store
+            .get_conversation(conv)?
+            .ok_or_else(|| CoreError::NotFound(format!("会话不存在: {conv}")))?;
+        let peer_online = match conv_row.kind {
+            ConvKindRow::Dm => conv_row.peer_user.is_some_and(|pu| {
+                self.conns
+                    .peers()
+                    .iter()
+                    .any(|p| p.cert.as_ref().is_some_and(|c| c.user == pu))
+            }),
+            _ => false,
+        };
+        let _ = self.events.send(Event::ConversationUpdated {
+            summary: crate::service::views::conv_summary(
+                &self.store,
+                Some(&self_user),
+                &conv_row,
+                peer_online,
+            ),
+        });
         Ok(())
     }
 
@@ -641,6 +866,55 @@ fn random_request_id() -> [u8; 16] {
     let mut id = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut id);
     id
+}
+
+/// 消息体对应的请求类型：Files/Folder → File，其余 → Message。
+pub(crate) fn gate_request_kind(body: &MsgBody) -> RequestKindRow {
+    match body {
+        MsgBody::Files { .. } | MsgBody::Folder { .. } => RequestKindRow::File,
+        _ => RequestKindRow::Message,
+    }
+}
+
+/// 请求预览文案：Text 取前 50 字符；Files 为「{首个文件名} 等 {n} 个文件
+/// （{总大小}）」（n=1 省略「等 n 个文件」）；Folder 为「文件夹 {name}（{n}
+/// 个文件）」。
+fn request_preview(body: &MsgBody) -> String {
+    match body {
+        MsgBody::Text { text } => text.chars().take(50).collect(),
+        MsgBody::Files { items } => {
+            let n = items.len();
+            let total: u64 = items.iter().map(|b| b.size).sum();
+            let name = items.first().map(|b| b.name.as_str()).unwrap_or_default();
+            let size = human_size(total);
+            if n == 1 {
+                format!("{name}（{size}）")
+            } else {
+                format!("{name} 等 {n} 个文件（{size}）")
+            }
+        }
+        MsgBody::Folder { name, entries } => {
+            format!("文件夹 {name}（{} 个文件）", entries.len())
+        }
+        _ => "收到一条消息".into(),
+    }
+}
+
+/// 字节数的人类可读表示（1024 进制，一位小数并去尾零）。
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = bytes as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        return format!("{bytes} B");
+    }
+    let s = format!("{v:.1}");
+    let s = s.strip_suffix(".0").unwrap_or(&s);
+    format!("{s} {}", UNITS[i])
 }
 
 /// 校验入站 ContactRequest/ContactResponse：发送方必须带证书，且随附设备

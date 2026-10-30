@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use tokio::sync::broadcast;
 
-use lanmsg_api::types::{ConvKind, ErrorCode, Event, InitMode, Request, Response, StatusDto};
+use lanmsg_api::types::{
+    ConvKind, ErrorCode, Event, InitMode, Request, RequestAction, RequestKind, Response, StatusDto,
+};
 use lanmsg_core::discovery::{DiscoveryMode, MemoryBus};
 use lanmsg_core::keystore::FileKeyStore;
 use lanmsg_core::platform::PlatformHooks;
@@ -112,6 +114,29 @@ async fn two_services_discover_and_chat_over_memory_bus() {
     };
     assert!(value.iter().any(|p| p.device_id == b_device));
 
+    // 先结为联系人：陌生人的消息会被门控拦截为 Pending（P2 Task 6）。
+    a.handle(Request::RequestContact {
+        user: b_user.clone(),
+    })
+    .await
+    .unwrap();
+    let ev = next_event(
+        &mut ev_b,
+        |e| matches!(e, Event::IncomingRequest { request } if matches!(request.kind, RequestKind::Contact)),
+    )
+    .await;
+    let Event::IncomingRequest { request } = ev else {
+        panic!("期望 IncomingRequest");
+    };
+    b.handle(Request::RespondRequest {
+        request: request.request,
+        action: RequestAction::AddContact,
+    })
+    .await
+    .unwrap();
+    next_event(&mut ev_a, |e| matches!(e, Event::ContactsChanged)).await;
+    next_event(&mut ev_b, |e| matches!(e, Event::ContactsChanged)).await;
+
     // A: OpenDm(B) → SendText("hello")。
     let resp = a.handle(Request::OpenDm { user: b_user }).await.unwrap();
     let Response::ConvId { value: conv_id } = resp else {
@@ -135,7 +160,7 @@ async fn two_services_discover_and_chat_over_memory_bus() {
     )
     .await;
 
-    // B: ListMessages 返回 1 条。
+    // B: ListMessages 返回 2 条（ContactAdded + hello）。
     let resp = b
         .handle(Request::ListMessages {
             conv: conv_id,
@@ -147,7 +172,13 @@ async fn two_services_discover_and_chat_over_memory_bus() {
     let Response::Messages { value } = resp else {
         panic!("期望 Messages");
     };
-    assert_eq!(value.len(), 1);
+    assert_eq!(value.len(), 2);
+    assert!(
+        value
+            .iter()
+            .any(|m| matches!(&m.body, lanmsg_api::types::MessageBodyView::Text { text } if text == "hello")),
+        "应含 hello 消息: {value:?}"
+    );
 }
 
 #[tokio::test]

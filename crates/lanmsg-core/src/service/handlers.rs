@@ -374,11 +374,12 @@ async fn respond_request(
                 .respond_contact(&inner.msg, &row, action)
                 .await?;
         }
-        kind => {
-            return Err(ApiError {
-                code: ErrorCode::Internal,
-                message: format!("未实现：RespondRequest({kind:?})"),
-            });
+        // Message/File：陌生人消息门控的接收一次/加为联系人/拒绝/屏蔽。
+        crate::store::RequestKindRow::Message | crate::store::RequestKindRow::File => {
+            inner
+                .trust
+                .respond_message_request(&inner.msg, &row, action, now_millis())
+                .await?;
         }
     }
     Ok(Response::Ok)

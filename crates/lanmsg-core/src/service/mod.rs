@@ -216,6 +216,12 @@ impl Service {
             }
         }));
 
+        // 注入门控回调：SyncPush 经 Trust::gate_inbound 判定陌生人消息去向。
+        let gate_trust = inner.trust.clone();
+        inner.msg.set_gate_callback(Arc::new(move |p, e, now| {
+            gate_trust.gate_inbound(p, e, now)
+        }));
+
         tokio::spawn(routing_task(inner.clone(), conn_rx, disc_rx));
         for addr in static_peers {
             tokio::spawn(static_peer_task(inner.clone(), addr));

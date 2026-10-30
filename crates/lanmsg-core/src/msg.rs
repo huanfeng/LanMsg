@@ -17,9 +17,10 @@ use lanmsg_proto::types::{Ack, Envelope, MsgBody, Signature64};
 use crate::error::CoreError;
 use crate::hlc::HlcClock;
 use crate::identity::Identity;
-use crate::net::ConnManager;
-use crate::service::views::{conv_summary, message_view};
+use crate::net::{ConnManager, PeerInfo};
+use crate::service::views::{conv_summary, message_view, request_view};
 use crate::store::{ConvKindRow, ConvRow, MsgStateRow, Store, StoredMessage};
+use crate::trust::{gate_request_kind, GateDecision};
 
 /// 当前墙钟时间（毫秒）。
 fn now_millis() -> i64 {
@@ -32,6 +33,12 @@ fn now_millis() -> i64 {
 /// 新消息入库回调类型（Service 注入，指向 service::ingest::after_ingest）。
 type IngestCallback = Arc<Mutex<Option<Arc<dyn Fn(DeviceId, StoredMessage) + Send + Sync>>>>;
 
+/// 门控回调类型（Service 注入，指向 Trust::gate_inbound）。
+pub type GateFn =
+    Arc<dyn Fn(&PeerInfo, &Envelope, i64) -> Result<GateDecision, CoreError> + Send + Sync>;
+
+type GateCallback = Arc<Mutex<Option<GateFn>>>;
+
 /// 文字消息收发模块。
 #[derive(Clone)]
 pub struct Messaging {
@@ -42,6 +49,8 @@ pub struct Messaging {
     events: broadcast::Sender<Event>,
     /// 新消息入库回调；Arc+Mutex 使注入可在组装完成后进行且保持 Messaging 可 Clone。
     ingest_cb: IngestCallback,
+    /// 门控回调；未注入时入站消息不做门控（保持 P1 行为）。
+    gate_cb: GateCallback,
 }
 
 impl Messaging {
@@ -60,12 +69,18 @@ impl Messaging {
             conns,
             events,
             ingest_cb: Arc::new(Mutex::new(None)),
+            gate_cb: Arc::new(Mutex::new(None)),
         }
     }
 
     /// 注入新消息入库回调（Service 启动时调用一次）。
     pub fn set_ingest_callback(&self, cb: Arc<dyn Fn(DeviceId, StoredMessage) + Send + Sync>) {
         *self.ingest_cb.lock().unwrap() = Some(cb);
+    }
+
+    /// 注入门控回调（Service 启动时调用一次）。
+    pub fn set_gate_callback(&self, cb: GateFn) {
+        *self.gate_cb.lock().unwrap() = Some(cb);
     }
 
     /// 发送消息到指定会话。
@@ -217,8 +232,10 @@ impl Messaging {
 
     /// 处理对端发来的帧。
     ///
-    /// - `SyncPush`：验签、检查作者设备、observe HLC、确保会话存在、insert_envelope(Delivered)、
-    ///   仅新插入时发事件，最后回 `Ack { ids }`。
+    /// - `SyncPush`：验签、检查作者设备、observe HLC、会话校验、门控决策
+    ///   （Accept → insert_envelope(Delivered)；Pending → 隐藏入库并按首条
+    ///   与否发 IncomingRequest；Drop → 不入库不回 Ack）、仅新插入时发事件，
+    ///   最后回 `Ack { ids }`（Drop 的不回）。
     /// - `Ack`：对自己发的且状态为 Sending/Sent 的消息置 Delivered，发 `MessageUpdated`。
     /// - 其他帧：忽略。
     pub async fn on_frame(&self, from: DeviceId, frame: Frame) -> Result<(), CoreError> {
@@ -256,65 +273,127 @@ impl Messaging {
                         clock.observe(env.hlc.clone(), wall);
                     }
 
-                    // 4. 会话不存在则按 DM 规则创建；ConvId::dm(self_user, author_user) 必须等于 env.conv。
+                    // 4. 会话校验：不存在时校验 DM 规则（创建延后到门控决策之后，
+                    //    避免新会话默认 Open 门控放行陌生人）。
                     let conv_id = env.conv;
-                    let conv_exists = self.store.get_conversation(&conv_id)?.is_some();
-                    if !conv_exists {
+                    let conv_row = self.store.get_conversation(&conv_id)?;
+                    if conv_row.is_none() {
                         let Some(self_user) = self_user else {
-                            continue; // 未初始化，无法创建 DM 会话
+                            continue; // 未初始化，无法校验 DM 会话
                         };
                         let expected_conv = ConvId::dm(&self_user, &author_user);
                         if expected_conv != conv_id {
                             warn!(peer = %from, "SyncPush conv 不匹配，丢弃");
                             continue;
                         }
-                        self.store.ensure_conversation(&ConvRow {
-                            conv: conv_id,
-                            kind: ConvKindRow::Dm,
-                            peer_user: Some(author_user),
-                            title: None,
-                            created_at: wall,
-                        })?;
                     }
 
-                    // 5. insert_envelope(Delivered)。
-                    let inserted =
-                        self.store
-                            .insert_envelope(&env, MsgStateRow::Delivered, wall)?;
-                    let msg_id = env.id.clone();
-                    ids.push(msg_id);
+                    // 5. 门控决策（未注入回调或对端信息缺失时保持 P1 行为直接入库）。
+                    let gate_cb = self.gate_cb.lock().unwrap().clone();
+                    let (decision, had_open_request) = match gate_cb {
+                        Some(cb) => {
+                            // 首条判定：门控前是否已有同（作者, 类型）的 open 请求。
+                            let had = self
+                                .store
+                                .list_open_requests()
+                                .map(|l| {
+                                    l.iter().any(|r| {
+                                        r.kind == gate_request_kind(&env.body)
+                                            && r.from_user == author_user
+                                    })
+                                })
+                                .unwrap_or(false);
+                            match self.conns.peer(&from) {
+                                Some(pi) => match cb(&pi, &env, wall) {
+                                    Ok(d) => (d, had),
+                                    Err(e) => {
+                                        warn!(peer = %from, error = %e, "SyncPush 门控失败，丢弃");
+                                        continue;
+                                    }
+                                },
+                                // 对端信息不可得（连接刚断开）：按 Accept 处理。
+                                None => (GateDecision::Accept, had),
+                            }
+                        }
+                        None => (GateDecision::Accept, false),
+                    };
 
-                    // 6. 仅当新插入时发事件并触发入库回调。
-                    if inserted {
-                        let stored = StoredMessage {
-                            env: env.clone(),
-                            state: MsgStateRow::Delivered,
-                            received_at: wall,
-                        };
-                        let msg_view = message_view(self.store.as_ref(), &self_device, &stored);
-                        let _ = self.events.send(Event::MessageAdded { msg: msg_view });
+                    match decision {
+                        GateDecision::Drop => {
+                            // 不入库、不回 Ack（发送方保持 Sending）。
+                            warn!(peer = %from, author = %author_user, "SyncPush 被门控丢弃");
+                        }
+                        GateDecision::Accept => {
+                            // 6a. 会话不存在则按 DM 规则创建；insert_envelope(Delivered)
+                            //     （步骤 4 已保证此时 self_user 必为 Some）。
+                            if conv_row.is_none() && self_user.is_some() {
+                                self.store.ensure_conversation(&ConvRow {
+                                    conv: conv_id,
+                                    kind: ConvKindRow::Dm,
+                                    peer_user: Some(author_user),
+                                    title: None,
+                                    created_at: wall,
+                                })?;
+                            }
+                            let inserted =
+                                self.store
+                                    .insert_envelope(&env, MsgStateRow::Delivered, wall)?;
+                            let msg_id = env.id.clone();
+                            ids.push(msg_id);
 
-                        let conv_row = self.store.get_conversation(&env.conv)?.unwrap();
-                        let peer_online = match conv_row.kind {
-                            ConvKindRow::Dm => conv_row.peer_user.is_some_and(|pu| {
-                                self.conns
-                                    .peers()
-                                    .iter()
-                                    .any(|p| p.cert.as_ref().is_some_and(|c| c.user == pu))
-                            }),
-                            _ => false,
-                        };
-                        let summary = conv_summary(
-                            self.store.as_ref(),
-                            self_user.as_ref(),
-                            &conv_row,
-                            peer_online,
-                        );
-                        let _ = self.events.send(Event::ConversationUpdated { summary });
+                            // 7a. 仅当新插入时发事件并触发入库回调。
+                            if inserted {
+                                let stored = StoredMessage {
+                                    env: env.clone(),
+                                    state: MsgStateRow::Delivered,
+                                    received_at: wall,
+                                };
+                                let msg_view =
+                                    message_view(self.store.as_ref(), &self_device, &stored);
+                                let _ = self.events.send(Event::MessageAdded { msg: msg_view });
 
-                        // 入库回调：同步取出克隆后立即放锁，回调内部自行 spawn 异步分派。
-                        if let Some(cb) = self.ingest_cb.lock().unwrap().clone() {
-                            cb(from, stored);
+                                let conv_row = self.store.get_conversation(&env.conv)?.unwrap();
+                                let peer_online = match conv_row.kind {
+                                    ConvKindRow::Dm => conv_row.peer_user.is_some_and(|pu| {
+                                        self.conns
+                                            .peers()
+                                            .iter()
+                                            .any(|p| p.cert.as_ref().is_some_and(|c| c.user == pu))
+                                    }),
+                                    _ => false,
+                                };
+                                let summary = conv_summary(
+                                    self.store.as_ref(),
+                                    self_user.as_ref(),
+                                    &conv_row,
+                                    peer_online,
+                                );
+                                let _ = self.events.send(Event::ConversationUpdated { summary });
+
+                                // 入库回调：同步取出克隆后立即放锁，回调内部自行 spawn 异步分派。
+                                if let Some(cb) = self.ingest_cb.lock().unwrap().clone() {
+                                    cb(from, stored);
+                                }
+                            }
+                        }
+                        GateDecision::Pending { request_id } => {
+                            // 6b. 隐藏入库；仅当新插入且是该请求首条时发 IncomingRequest
+                            //     （后续合并到同一请求的只更新 preview 不发事件）。
+                            let inserted = self.store.insert_envelope_hidden(
+                                &env,
+                                MsgStateRow::Delivered,
+                                wall,
+                                true,
+                            )?;
+                            let msg_id = env.id.clone();
+                            ids.push(msg_id);
+                            if inserted && !had_open_request {
+                                if let Some(row) = self.store.get_request(&request_id)? {
+                                    let _ = self.events.send(Event::IncomingRequest {
+                                        request: request_view(self.store.as_ref(), &row),
+                                    });
+                                }
+                            }
                         }
                     }
                 }
