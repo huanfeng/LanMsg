@@ -76,6 +76,8 @@ pub(crate) struct Inner {
     pub(crate) pairing: Pairing,
     /// 多设备同步、转交与离线补投。
     pub(crate) sync: crate::sync::SyncEngine,
+    /// Blob 数据服务端与持有者帧处理（P2 Task 11）。
+    pub(crate) blob: Arc<crate::blob::serve::BlobServer>,
 }
 
 /// 核心服务（C6）。内部状态由 Arc 持有，Clone 廉价。
@@ -121,7 +123,7 @@ impl Service {
             discovery,
             keystore,
             static_peers,
-            platform: _platform,
+            platform,
             localsend_port: _localsend_port,
         } = cfg;
 
@@ -187,7 +189,12 @@ impl Service {
             clock.clone(),
             conns.clone(),
             events_tx.clone(),
+            platform.clone(),
         );
+
+        // Blob 数据服务端：注册为数据连接处理器（须在连接涌入前完成注册）。
+        let blob = crate::blob::serve::BlobServer::new(store.clone(), identity.clone());
+        conns.set_data_handler(blob.clone().handler());
 
         // Trust：联系人确认、准入过滤、证书更新接收。
         let trust = crate::trust::Trust::new(
@@ -254,6 +261,7 @@ impl Service {
             discovered,
             pairing,
             sync,
+            blob,
         });
         let svc = Service {
             inner: inner.clone(),
@@ -281,6 +289,9 @@ impl Service {
             tokio::spawn(static_peer_task(inner.clone(), addr));
         }
 
+        // 恢复遗留的 preparing 行（重启前的文件发送重新走后台任务）。
+        inner.msg.resume_preparing().await?;
+
         Ok(svc)
     }
 
@@ -297,13 +308,39 @@ impl Service {
         self.inner.events.subscribe()
     }
 
+    /// 打开到指定设备的数据连接（后续传输引擎与集成测试使用）。
+    pub async fn open_data(
+        &self,
+        device: &lanmsg_proto::ids::DeviceId,
+    ) -> Result<crate::net::DataStream, CoreError> {
+        self.inner.conns.open_data(device).await
+    }
+
+    /// 测试辅助：向指定设备发送控制帧（BlobQuery 等测试用）。
+    #[doc(hidden)]
+    pub async fn send_frame_for_test(
+        &self,
+        device: &lanmsg_proto::ids::DeviceId,
+        frame: Frame,
+    ) -> Result<(), CoreError> {
+        self.inner.conns.send(device, frame).await
+    }
+
+    /// 测试辅助：访问存储（集成测试断言 holders 等用）。
+    #[doc(hidden)]
+    pub fn store_for_test(&self) -> Arc<Store> {
+        self.inner.store.clone()
+    }
+
     /// 实际监听地址（测试用）。
     pub fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr
     }
 
-    /// 关闭发现与所有连接。
+    /// 关闭发现与所有连接；同时中止后台文件准备任务（preparing 行保留，
+    /// 重启后续做）。
     pub async fn shutdown(&self) {
+        self.inner.msg.abort_prepares();
         self.inner.discovery.shutdown();
         self.inner.conns.shutdown().await;
     }
@@ -412,6 +449,9 @@ async fn routing_task(
                             }
                         }
                     }
+                    // Blob 持有者查询/应答分派给 BlobServer（P2 Task 11）。
+                    Frame::BlobQuery(q) => inner.blob.handle_blob_query(&inner, d, q).await,
+                    Frame::BlobHave(h) => inner.blob.handle_blob_have(d, h).await,
                     _ => {
                         let _ = inner.msg.on_frame(d, f).await;
                     }

@@ -2,13 +2,138 @@
 // message_view / conv_summary 将存储层记录转换为 API 层 DTO。
 // 注释中文，标识符英文。
 
-use lanmsg_api::types::{
-    ConvKind, ConversationSummary, MessageBodyView, MessageState, MessageView,
-};
-use lanmsg_proto::ids::{DeviceId, UserId};
-use lanmsg_proto::types::MsgBody;
+use std::path::PathBuf;
 
-use crate::store::{ConvRow, MsgStateRow, Store, StoredMessage};
+use lanmsg_api::types::{
+    BlobState, ConvKind, ConversationSummary, FileItemView, MessageBodyView, MessageState,
+    MessageView,
+};
+use lanmsg_proto::ids::{DeviceId, MsgId, UserId};
+use lanmsg_proto::types::{BlobMeta, MsgBody};
+
+use crate::store::{ConvRow, MsgStateRow, PreparingKind, PreparingRow, Store, StoredMessage};
+
+/// 由 Blob 元数据构造文件项视图：本地有对应文件 → Local，否则 Remote
+/// （自动下载策略在 Task 13 引入）。`source_label` 先给出作者名，
+/// 持有者在线与下载状态的完整描述由 Task 13 完善。
+fn file_item_view(
+    store: &Store,
+    meta: &BlobMeta,
+    is_mine: bool,
+    author_name: &str,
+) -> FileItemView {
+    let local = store.get_local(&meta.hash).ok().flatten();
+    FileItemView {
+        hash: meta.hash.to_hex(),
+        name: meta.name.clone(),
+        size: meta.size,
+        mime: meta.mime.clone(),
+        width: meta.media.as_ref().map(|m| m.width),
+        height: meta.media.as_ref().map(|m| m.height),
+        duration_ms: meta.media.as_ref().and_then(|m| m.duration_ms),
+        thumb_path: None,
+        local_path: local
+            .as_ref()
+            .map(|l| l.path.to_string_lossy().into_owned()),
+        state: if local.is_some() {
+            BlobState::Local
+        } else {
+            BlobState::Remote
+        },
+        source_label: format!(
+            "来自 {}",
+            if is_mine {
+                "我".to_string()
+            } else {
+                author_name.to_string()
+            }
+        ),
+    }
+}
+
+/// preparing 行的消息视图（文件名与大小即时 stat 文件系统；文件缺失时
+/// size 记 0）。阻塞函数（读文件元数据），调用方需在 spawn_blocking 中执行。
+/// `state` 正常为 Sending；准备失败时调用方传 Failed。
+///
+/// paths 约定（与 Messaging::send_prepare 一致）：Folder 时 `paths[0]` 为
+/// 根目录，其余为条目文件；Files 时全部为文件。
+pub fn preparing_view(
+    store: &Store,
+    row: &PreparingRow,
+    self_user: Option<&UserId>,
+    state: MessageState,
+) -> MessageView {
+    let author_row = store.get_device(&row.author).ok().flatten();
+    let is_mine = author_row
+        .as_ref()
+        .zip(self_user)
+        .map(|(r, s)| r.user == *s)
+        .unwrap_or(false);
+    let author_device_name = author_row
+        .as_ref()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| row.author.short());
+    let author_user_str = author_row
+        .as_ref()
+        .map(|r| r.user.to_hex())
+        .unwrap_or_default();
+
+    let (folder_name, paths): (Option<String>, &[PathBuf]) = match row.kind {
+        PreparingKind::Files => (None, &row.paths),
+        PreparingKind::Folder => (
+            row.paths.first().map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            }),
+            row.paths.get(1..).unwrap_or(&[]),
+        ),
+    };
+    let items = paths
+        .iter()
+        .map(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let mime = crate::blob::mime::mime_from_name(&name);
+            FileItemView {
+                hash: String::new(),
+                name,
+                size,
+                mime: mime.into(),
+                width: None,
+                height: None,
+                duration_ms: None,
+                thumb_path: None,
+                local_path: None,
+                state: BlobState::Preparing,
+                source_label: String::new(),
+            }
+        })
+        .collect();
+    let body = match folder_name {
+        None => MessageBodyView::Files { items },
+        Some(name) => MessageBodyView::Folder { name, items },
+    };
+
+    MessageView {
+        id: MsgId {
+            author: row.author,
+            seq: row.seq,
+        }
+        .to_string(),
+        conv: row.conv.to_hex(),
+        author_user: author_user_str,
+        author_device: row.author.to_hex(),
+        author_device_name,
+        is_mine,
+        hlc_millis: row.hlc.millis,
+        body,
+        state,
+    }
+}
 
 /// 将存储消息转换为消息视图。
 ///
@@ -42,13 +167,26 @@ pub fn message_view(store: &Store, self_device: &DeviceId, m: &StoredMessage) ->
         .map(|ur| ur.display_name)
         .unwrap_or_else(|| author_device_name.clone());
 
-    // 撤回的消息正文替换为系统提示（先于 Text 判定）；其余非 Text 体暂为
-    // Unsupported。
+    // 撤回的消息正文替换为系统提示（先于 Text 判定）；其余非 Text 体按
+    // Files/Folder 展开，其他暂为 Unsupported。
     let body = match (&env.body, m.state) {
         (_, MsgStateRow::Recalled) => MessageBodyView::System {
             text: format!("{} 撤回了一条消息", author_display_name),
         },
         (MsgBody::Text { text }, _) => MessageBodyView::Text { text: text.clone() },
+        (MsgBody::Files { items }, _) => MessageBodyView::Files {
+            items: items
+                .iter()
+                .map(|b| file_item_view(store, b, is_mine, &author_display_name))
+                .collect(),
+        },
+        (MsgBody::Folder { name, entries }, _) => MessageBodyView::Folder {
+            name: name.clone(),
+            items: entries
+                .iter()
+                .map(|e| file_item_view(store, &e.blob, is_mine, &author_display_name))
+                .collect(),
+        },
         _ => MessageBodyView::Unsupported,
     };
 

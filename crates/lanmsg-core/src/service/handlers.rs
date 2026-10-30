@@ -40,6 +40,8 @@ pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiE
         } => list_messages(inner, conv, before, limit).await,
         Request::OpenDm { user } => open_dm(inner, user).await,
         Request::SendText { conv, text } => send_text(inner, conv, text).await,
+        Request::SendFiles { conv, paths } => send_files(inner, conv, paths).await,
+        Request::SendFolder { conv, path } => send_folder(inner, conv, path).await,
         Request::MarkRead { conv, upto } => mark_read(inner, conv, upto).await,
         Request::Recall { msg } => recall(inner, msg).await,
         Request::DeleteLocal {
@@ -306,10 +308,44 @@ async fn list_messages(
         .list_messages(&conv, before.as_ref(), limit)
         .map_err(crate::error::CoreError::from)?;
     let self_device = inner.identity.read().await.device_id();
-    let value = msgs
+    let mut value: Vec<lanmsg_api::types::MessageView> = msgs
         .iter()
         .map(|m| message_view(inner.store.as_ref(), &self_device, m))
         .collect();
+    // 首页（before == None）时把准备中的文件消息按 hlc 追加在末尾；
+    // 视图构造要 stat 文件系统，放 spawn_blocking。
+    if before.is_none() {
+        let rows = inner
+            .store
+            .preparing_in_conv(&conv)
+            .map_err(crate::error::CoreError::from)?;
+        if !rows.is_empty() {
+            let store = inner.store.clone();
+            let self_user = inner.state.read().unwrap().self_user;
+            let views = tokio::task::spawn_blocking(move || {
+                let mut with_hlc: Vec<_> = rows
+                    .into_iter()
+                    .map(|row| {
+                        let view = crate::service::views::preparing_view(
+                            store.as_ref(),
+                            &row,
+                            self_user.as_ref(),
+                            lanmsg_api::types::MessageState::Sending,
+                        );
+                        (row.hlc, view)
+                    })
+                    .collect();
+                with_hlc.sort_by(|a, b| a.0.cmp(&b.0));
+                with_hlc.into_iter().map(|(_, v)| v).collect::<Vec<_>>()
+            })
+            .await
+            .map_err(|e| ApiError {
+                code: ErrorCode::Internal,
+                message: e.to_string(),
+            })?;
+            value.extend(views);
+        }
+    }
     Ok(Response::Messages { value })
 }
 
@@ -324,6 +360,28 @@ async fn open_dm(inner: &Inner, user: String) -> Result<Response, ApiError> {
 async fn send_text(inner: &Inner, conv: String, text: String) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
     let msg_id = inner.msg.send(&conv, MsgBody::Text { text }).await?;
+    Ok(Response::MsgId {
+        value: msg_id.to_string(),
+    })
+}
+
+/// SendFiles：发送文件消息，返回预留的 MsgId（后台完成哈希后入库投递）。
+async fn send_files(inner: &Inner, conv: String, paths: Vec<String>) -> Result<Response, ApiError> {
+    let conv = parse_conv(&conv)?;
+    let paths = paths.into_iter().map(std::path::PathBuf::from).collect();
+    let msg_id = inner.msg.send_files(&conv, paths).await?;
+    Ok(Response::MsgId {
+        value: msg_id.to_string(),
+    })
+}
+
+/// SendFolder：发送文件夹消息。
+async fn send_folder(inner: &Inner, conv: String, path: String) -> Result<Response, ApiError> {
+    let conv = parse_conv(&conv)?;
+    let msg_id = inner
+        .msg
+        .send_folder(&conv, std::path::PathBuf::from(path))
+        .await?;
     Ok(Response::MsgId {
         value: msg_id.to_string(),
     })

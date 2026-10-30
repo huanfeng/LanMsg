@@ -218,6 +218,7 @@ async fn raw_node() -> RawNode {
         clock,
         conns.clone(),
         events_tx,
+        lanmsg_core::PlatformHooks::default(),
     );
     RawNode {
         store,

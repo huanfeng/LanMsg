@@ -327,6 +327,22 @@ impl Store {
         self.query_preparing("SELECT author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, kind, paths, created_at FROM preparing ORDER BY created_at ASC")
     }
 
+    /// 删除 preparing 行（后台准备失败时调用）。
+    pub fn delete_preparing(
+        &self,
+        author: &DeviceId,
+        seq: u64,
+    ) -> Result<(), crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        conn.execute(
+            "DELETE FROM preparing WHERE author = ?1 AND seq = ?2",
+            rusqlite::params![&author.0[..], seq as i64],
+        )?;
+        Ok(())
+    }
+
     /// 会话内的 preparing 行。
     pub fn preparing_in_conv(
         &self,

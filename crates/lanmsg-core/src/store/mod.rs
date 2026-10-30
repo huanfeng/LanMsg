@@ -9,6 +9,10 @@ pub mod messages;
 pub mod schema;
 pub mod users;
 
+pub use blobs::{
+    BlobLocalKind, BlobLocalRow, MessageBlobRow, PreparingKind, PreparingRow, TransferRow,
+    TransferState,
+};
 pub use contacts::{ContactRow, ContactState, RequestKindRow, RequestRow};
 pub use convs::{ConvKindRow, ConvRow, Gate};
 pub use messages::{MsgStateRow, StoredMessage};

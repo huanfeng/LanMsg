@@ -4,7 +4,7 @@
 // 注释中文，标识符英文。
 
 use lanmsg_proto::consts::RECALL_WINDOW;
-use lanmsg_proto::ids::{DeviceId, MsgId, UserId};
+use lanmsg_proto::ids::{BlobHash, DeviceId, MsgId, UserId};
 use lanmsg_proto::types::{ContactRecord, MsgBody, SystemEvent};
 
 use crate::identity::{hex_decode, hex_encode};
@@ -27,7 +27,24 @@ pub(crate) async fn after_ingest(svc: &Inner, _from: DeviceId, m: &StoredMessage
         } => on_local_deleted(svc, m, msgs).await,
         MsgBody::Read { upto } => on_read(svc, m, upto).await,
         MsgBody::Recall { target } => on_recall(svc, m, target).await,
+        MsgBody::Files { items } => {
+            on_blobs_received(svc, m, items.iter().map(|b| b.hash).collect()).await
+        }
+        MsgBody::Folder { entries, .. } => {
+            on_blobs_received(svc, m, entries.iter().map(|e| e.blob.hash).collect()).await
+        }
         _ => {}
+    }
+}
+
+/// Files/Folder 消息：把消息作者（发送设备）记为各 Blob 的持有者，
+/// 供下载时挑选数据源。
+async fn on_blobs_received(svc: &Inner, m: &StoredMessage, hashes: Vec<BlobHash>) {
+    let now = now_millis();
+    for h in hashes {
+        if let Err(e) = svc.store.add_holder(&h, &m.env.id.author, now) {
+            tracing::warn!(error = %e, "记录 Blob 持有者失败");
+        }
     }
 }
 

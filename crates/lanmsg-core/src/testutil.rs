@@ -17,6 +17,7 @@ use crate::identity::Identity;
 use crate::keystore::FileKeyStore;
 use crate::msg::Messaging;
 use crate::net::{ConnManager, HelloInfo, PeerInfo};
+use crate::platform::PlatformHooks;
 use crate::store::Store;
 use lanmsg_api::types::Event;
 
@@ -129,6 +130,7 @@ pub async fn node() -> Node {
         clock.clone(),
         conns.clone(),
         event_tx,
+        PlatformHooks::default(),
     );
 
     // 路由任务。

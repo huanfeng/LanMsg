@@ -2,6 +2,7 @@
 // Messaging 负责消息的发送、接收（on_frame）与 DM 会话打开。
 // 注释中文，标识符英文。
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -9,17 +10,25 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::warn;
 
 use lanmsg_api::types::Event;
+use lanmsg_proto::consts::THUMB_MAX_BYTES;
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{ConvId, DeviceId, MsgId, UserId};
 use lanmsg_proto::sign::{sign_with_zeroed_sig, DeviceKey};
-use lanmsg_proto::types::{Ack, Envelope, MsgBody, Signature64};
+use lanmsg_proto::types::{
+    Ack, BlobMeta, Envelope, FolderEntry, MediaInfo, MsgBody, Signature64, SyncPush,
+};
 
+use crate::blob::{self, FileSource};
 use crate::error::CoreError;
 use crate::hlc::HlcClock;
 use crate::identity::Identity;
 use crate::net::{ConnManager, PeerInfo};
-use crate::service::views::{conv_summary, message_view, request_view};
-use crate::store::{ContactState, ConvKindRow, ConvRow, Gate, MsgStateRow, Store, StoredMessage};
+use crate::platform::PlatformHooks;
+use crate::service::views::{conv_summary, message_view, preparing_view, request_view};
+use crate::store::{
+    BlobLocalKind, BlobLocalRow, ContactState, ConvKindRow, ConvRow, Gate, MsgStateRow,
+    PreparingKind, PreparingRow, Store, StoredMessage,
+};
 use crate::sync::conv_member_ok;
 use crate::trust::{gate_request_kind, GateDecision};
 
@@ -40,6 +49,41 @@ pub type GateFn =
 
 type GateCallback = Arc<Mutex<Option<GateFn>>>;
 
+/// 计算消息投递目标：Dm → 对端用户所有已连接设备 + 自己其他已连接设备
+/// （转交）；SelfDevices → 自己其他已连接设备；其他 kind（Guest/LocalSend/
+/// Station）→ 空列表（不报错，状态保持 Sending）。
+fn delivery_targets(
+    conv_row: &ConvRow,
+    self_user: &UserId,
+    self_device: &DeviceId,
+    conns: &ConnManager,
+) -> Vec<DeviceId> {
+    match conv_row.kind {
+        ConvKindRow::Dm => {
+            let Some(peer_user) = conv_row.peer_user else {
+                warn!("DM 会话缺少 peer_user，无投递目标");
+                return Vec::new();
+            };
+            conns
+                .peers()
+                .into_iter()
+                .filter(|p| {
+                    let u = p.cert.as_ref().map(|c| c.user);
+                    u == Some(peer_user) || (u == Some(*self_user) && p.device != *self_device)
+                })
+                .map(|p| p.device)
+                .collect()
+        }
+        ConvKindRow::SelfDevices => conns
+            .peers()
+            .into_iter()
+            .filter(|p| p.device != *self_device)
+            .map(|p| p.device)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// 文字消息收发模块。
 #[derive(Clone)]
 pub struct Messaging {
@@ -52,16 +96,22 @@ pub struct Messaging {
     ingest_cb: IngestCallback,
     /// 门控回调；未注入时入站消息不做门控（保持 P1 行为）。
     gate_cb: GateCallback,
+    /// 平台钩子（缩略图生成等）。
+    platform: PlatformHooks,
+    /// 后台准备任务句柄（shutdown 时统一中止）。
+    prepare_handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl Messaging {
     /// 构造 Messaging。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<Store>,
         identity: Arc<RwLock<Identity>>,
         clock: Arc<Mutex<HlcClock>>,
         conns: ConnManager,
         events: broadcast::Sender<Event>,
+        platform: PlatformHooks,
     ) -> Self {
         Self {
             store,
@@ -71,6 +121,8 @@ impl Messaging {
             events,
             ingest_cb: Arc::new(Mutex::new(None)),
             gate_cb: Arc::new(Mutex::new(None)),
+            platform,
+            prepare_handles: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -189,33 +241,9 @@ impl Messaging {
             let _ = self.events.send(Event::ConversationUpdated { summary });
         }
 
-        // 7. 计算投递目标 targets(conv)：Dm → 对端用户所有已连接设备 + 自己其他
-        //    已连接设备（转交）；SelfDevices → 自己其他已连接设备；其他 kind
-        //    （Guest/LocalSend/Station）→ 空列表（不报错，状态保持 Sending）。
-        let targets: Vec<DeviceId> = match conv_row.kind {
-            ConvKindRow::Dm => {
-                let peer_user = conv_row
-                    .peer_user
-                    .ok_or_else(|| CoreError::InvalidArgument("DM 会话缺少 peer_user".into()))?;
-                self.conns
-                    .peers()
-                    .into_iter()
-                    .filter(|p| {
-                        let u = p.cert.as_ref().map(|c| c.user);
-                        u == Some(peer_user) || (u == Some(self_user) && p.device != self_device)
-                    })
-                    .map(|p| p.device)
-                    .collect()
-            }
-            ConvKindRow::SelfDevices => self
-                .conns
-                .peers()
-                .into_iter()
-                .filter(|p| p.device != self_device)
-                .map(|p| p.device)
-                .collect(),
-            _ => Vec::new(),
-        };
+        // 7. 计算投递目标 targets(conv)（Dm → 对端 + 自己其他设备转交；
+        //    SelfDevices → 自己其他设备；其他 kind → 空列表）。
+        let targets = delivery_targets(&conv_row, &self_user, &self_device, &self.conns);
 
         // 8. 对每个目标发送 SyncPush。
         let mut any_sent = false;
@@ -234,6 +262,289 @@ impl Messaging {
         }
 
         Ok(env.id)
+    }
+
+    // ---- P2 Task 11：文件与文件夹发送 ----
+
+    /// 发送文件消息：先校验并插入 preparing 行（发 `MessageAdded`，各项
+    /// state = Preparing、hash = ""），随后由后台任务完成哈希、缩略图与投递。
+    pub async fn send_files(&self, conv: &ConvId, paths: Vec<PathBuf>) -> Result<MsgId, CoreError> {
+        let sources = tokio::task::spawn_blocking(move || blob::collect_file_sources(&paths))
+            .await
+            .map_err(|e| CoreError::Proto(e.to_string()))??;
+        self.send_prepare(conv, PreparingKind::Files, sources, None)
+            .await
+    }
+
+    /// 发送文件夹消息：根必须是目录；遍历（跳过符号链接）文件数超过
+    /// `MAX_FOLDER_ENTRIES` → InvalidArgument。
+    pub async fn send_folder(&self, conv: &ConvId, root: PathBuf) -> Result<MsgId, CoreError> {
+        // 信封中的文件夹名在 prepare_envelope 里取 root.file_name()，此处忽略 name。
+        let cloned = root.clone();
+        let (_, sources) =
+            tokio::task::spawn_blocking(move || blob::collect_folder_sources(&cloned))
+                .await
+                .map_err(|e| CoreError::Proto(e.to_string()))??;
+        self.send_prepare(conv, PreparingKind::Folder, sources, Some(root))
+            .await
+    }
+
+    /// 发送公共准备流程：校验链已在收集阶段完成，这里分配序号、写 preparing
+    /// 行、发 MessageAdded 并派发后台任务。`folder_root` 仅 Folder 消息使用。
+    async fn send_prepare(
+        &self,
+        conv: &ConvId,
+        kind: PreparingKind,
+        sources: Vec<FileSource>,
+        folder_root: Option<PathBuf>,
+    ) -> Result<MsgId, CoreError> {
+        // 1. 未初始化 → NotInitialized；会话不存在 → NotFound。
+        let identity = self.identity.read().await;
+        if !identity.is_initialized() {
+            return Err(CoreError::NotInitialized);
+        }
+        let self_device = identity.device_id();
+        let self_user = identity.user_id().ok_or(CoreError::NotInitialized)?;
+        drop(identity);
+        self.store
+            .get_conversation(conv)?
+            .ok_or_else(|| CoreError::NotFound(format!("会话不存在: {conv}")))?;
+
+        // 2. next_seqs + clock.now → insert_preparing。paths 约定：Folder 时
+        //    paths[0] 为根目录，其余为条目文件（视图与恢复共用该约定）。
+        let (seq, conv_seq) = self.store.next_seqs(&self_device, conv)?;
+        let hlc = {
+            let mut clock = self.clock.lock().unwrap();
+            clock.now(now_millis())
+        };
+        let mut paths: Vec<PathBuf> = sources.iter().map(|s| s.path.clone()).collect();
+        if kind == PreparingKind::Folder {
+            paths.insert(0, folder_root.unwrap_or_default());
+        }
+        let row = PreparingRow {
+            author: self_device,
+            seq,
+            conv: *conv,
+            conv_seq,
+            hlc: hlc.clone(),
+            kind,
+            paths,
+            created_at: now_millis(),
+        };
+        self.store.insert_preparing(&row)?;
+
+        // 3. 发 MessageAdded（Preparing 视图，hash 为空、名字与大小取自文件系统）。
+        let view = preparing_view(
+            self.store.as_ref(),
+            &row,
+            Some(&self_user),
+            lanmsg_api::types::MessageState::Sending,
+        );
+        let _ = self.events.send(Event::MessageAdded { msg: view });
+
+        // 4. 后台任务完成哈希、缩略图、签名入库与投递；返回预留的 MsgId。
+        self.spawn_prepare(row);
+        Ok(MsgId {
+            author: self_device,
+            seq,
+        })
+    }
+
+    /// 派发后台准备任务并登记句柄（shutdown 时可整体中止）。
+    fn spawn_prepare(&self, row: PreparingRow) {
+        let this = self.clone();
+        let handle = tokio::spawn(async move {
+            this.run_prepare(row).await;
+        });
+        let mut handles = self.prepare_handles.lock().unwrap();
+        handles.retain(|h| !h.is_finished());
+        handles.push(handle);
+    }
+
+    /// 中止全部后台准备任务（Service::shutdown 调用）：preparing 行保留，
+    /// 重启后由 resume_preparing 续做。
+    pub fn abort_prepares(&self) {
+        for h in self.prepare_handles.lock().unwrap().drain(..) {
+            h.abort();
+        }
+    }
+
+    /// Service 启动时调用：对遗留 preparing 行重新走后台准备任务。
+    pub async fn resume_preparing(&self) -> Result<(), CoreError> {
+        for row in self.store.list_preparing()? {
+            self.spawn_prepare(row);
+        }
+        Ok(())
+    }
+
+    /// 后台准备：逐文件 spawn_blocking 哈希与缩略图 → 组信封签名 →
+    /// finish_preparing → MessageUpdated → 按 targets 发 SyncPush。
+    /// 任一文件失败 → 删 preparing 行并发 MessageUpdated（state Failed）。
+    async fn run_prepare(&self, row: PreparingRow) {
+        let identity = self.identity.read().await;
+        if !identity.is_initialized() {
+            return; // 服务已关闭，静默放弃
+        }
+        let self_device = identity.device_id();
+        let self_user = match identity.user_id() {
+            Some(u) => u,
+            None => return,
+        };
+        let device_key_bytes = identity.device.to_bytes();
+        drop(identity);
+
+        match self.prepare_envelope(&row, &device_key_bytes).await {
+            Ok(env) => {
+                // 投递目标与 send_impl 相同。
+                let Ok(Some(conv_row)) = self.store.get_conversation(&row.conv) else {
+                    return;
+                };
+                let targets = delivery_targets(&conv_row, &self_user, &self_device, &self.conns);
+                let mut any_sent = false;
+                for device in &targets {
+                    let frame = Frame::SyncPush(SyncPush {
+                        envelopes: vec![env.clone()],
+                    });
+                    if self.conns.send(device, frame).await.is_ok() {
+                        any_sent = true;
+                    }
+                }
+                if any_sent {
+                    let _ = self.store.set_message_state(&env.id, MsgStateRow::Sent);
+                }
+                // MessageUpdated（重取以反映 Sending/Sent 最新状态）。
+                if let Ok(Some(m)) = self.store.get_message(&env.id) {
+                    let _ = self.events.send(Event::MessageUpdated {
+                        msg: message_view(self.store.as_ref(), &self_device, &m),
+                    });
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "文件准备失败");
+                let _ = self.store.delete_preparing(&row.author, row.seq);
+                let view = preparing_view(
+                    self.store.as_ref(),
+                    &row,
+                    Some(&self_user),
+                    lanmsg_api::types::MessageState::Failed,
+                );
+                let _ = self.events.send(Event::MessageUpdated { msg: view });
+            }
+        }
+    }
+
+    /// 逐文件哈希与缩略图 → 组信封签名 → finish_preparing。
+    async fn prepare_envelope(
+        &self,
+        row: &PreparingRow,
+        device_key_bytes: &[u8; 32],
+    ) -> Result<Envelope, CoreError> {
+        // Folder 约定：paths[0] 为根目录，其余为条目文件。
+        let (root, entry_paths): (Option<PathBuf>, &[PathBuf]) = match row.kind {
+            PreparingKind::Files => (None, &row.paths),
+            PreparingKind::Folder => (Some(row.paths[0].clone()), &row.paths[1..]),
+        };
+
+        let mut items: Vec<BlobMeta> = Vec::new();
+        let mut segs: Vec<(lanmsg_proto::ids::BlobHash, Vec<[u8; 32]>)> = Vec::new();
+        let mut locals: Vec<BlobLocalRow> = Vec::new();
+        for path in entry_paths {
+            let p = path.clone();
+            let hashed = tokio::task::spawn_blocking(move || blob::hash::hash_file(&p))
+                .await
+                .map_err(|e| CoreError::Proto(e.to_string()))??;
+
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mime = blob::mime::mime_from_name(&name);
+            let (thumb, media) = self.make_thumbnail(path, mime).await;
+            items.push(BlobMeta {
+                hash: hashed.hash,
+                size: hashed.size,
+                name,
+                mime: mime.into(),
+                media,
+                thumb,
+            });
+            segs.push((hashed.hash, hashed.segment_hashes));
+            locals.push(BlobLocalRow {
+                hash: hashed.hash,
+                path: path.clone(),
+                kind: BlobLocalKind::Source,
+                size: hashed.size,
+                mtime: hashed.mtime,
+            });
+        }
+
+        let body = match (row.kind, root) {
+            (PreparingKind::Files, _) => MsgBody::Files { items },
+            (PreparingKind::Folder, Some(root)) => {
+                let entries = items
+                    .into_iter()
+                    .zip(entry_paths.iter())
+                    .map(|(meta, path)| FolderEntry {
+                        rel_path: path
+                            .strip_prefix(&root)
+                            .map(|r| r.to_string_lossy().replace('\\', "/"))
+                            .unwrap_or_default(),
+                        blob: meta,
+                    })
+                    .collect();
+                MsgBody::Folder {
+                    name: root
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    entries,
+                }
+            }
+            (PreparingKind::Folder, None) => {
+                return Err(CoreError::Proto("preparing 行缺少文件夹根路径".into()))
+            }
+        };
+
+        let mut env = Envelope {
+            conv: row.conv,
+            id: MsgId {
+                author: row.author,
+                seq: row.seq,
+            },
+            conv_seq: row.conv_seq,
+            hlc: row.hlc.clone(),
+            body,
+            enc: None,
+            sig: Signature64([0u8; 64]),
+        };
+        let device_key = DeviceKey::from_bytes(device_key_bytes);
+        sign_with_zeroed_sig(&mut env, |b| device_key.sign(b));
+
+        let now = now_millis();
+        self.store
+            .finish_preparing(&row.author, row.seq, &env, &segs, &locals, now)?;
+        Ok(env)
+    }
+
+    /// 缩略图生成：mime 为 image/* 或 video/* 且平台缩略图器存在时调用；
+    /// 结果超过 THUMB_MAX_BYTES 不采用。
+    async fn make_thumbnail(
+        &self,
+        path: &Path,
+        mime: &str,
+    ) -> (Option<Vec<u8>>, Option<MediaInfo>) {
+        let Some(provider) = self.platform.thumbnailer.clone() else {
+            return (None, None);
+        };
+        if !(mime.starts_with("image/") || mime.starts_with("video/")) {
+            return (None, None);
+        }
+        let p = path.to_path_buf();
+        let mime = mime.to_string();
+        match tokio::task::spawn_blocking(move || provider.thumbnail(&p, &mime)).await {
+            Ok(Some(t)) if t.jpeg.len() <= THUMB_MAX_BYTES => (Some(t.jpeg), Some(t.media)),
+            _ => (None, None),
+        }
     }
 
     /// 处理对端发来的帧。
