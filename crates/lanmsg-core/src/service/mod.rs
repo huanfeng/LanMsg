@@ -107,6 +107,7 @@ impl Service {
         let (hello_tx, hello_rx) = watch::channel(HelloInfo {
             display_name: String::new(),
             cert: None,
+            listen_port: 0,
         });
         let (announce_tx, announce_rx) = watch::channel(None);
 
@@ -155,6 +156,7 @@ impl Service {
             hello_tx.send_replace(HelloInfo {
                 display_name: display.clone(),
                 cert,
+                listen_port: 0,
             });
             if let Some(ann) =
                 build_announce(&identity, &display, Status::Online, local_addr.port()).await

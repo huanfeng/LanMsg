@@ -100,6 +100,7 @@ pub async fn node() -> Node {
     let (hello_tx, hello_rx) = watch::channel(HelloInfo {
         display_name: "测试".into(),
         cert: None,
+        listen_port: 0,
     });
     let (conn_events_tx, conn_events_rx) = mpsc::channel(32);
     let filter = Arc::new(|_: &PeerInfo| true);
@@ -115,6 +116,7 @@ pub async fn node() -> Node {
             let _ = hello_tx.send_replace(HelloInfo {
                 display_name: cert.device_name.clone(),
                 cert: Some(cert.clone()),
+                listen_port: 0,
             });
         }
     }

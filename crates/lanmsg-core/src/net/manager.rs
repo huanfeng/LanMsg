@@ -9,13 +9,22 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch, RwLock};
 
+use crate::net::conn::{
+    Accepted, ConnEvent, Connection, DataHandler, DataStream, HelloInfo, PeerInfo,
+};
+use crate::net::tls::{make_tls_configs, TLS_SNI};
+use lanmsg_proto::consts::CHANNEL_DATA;
+use lanmsg_proto::data::{write_data_frame, DataFrame};
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::DeviceId;
 use lanmsg_proto::sign::DeviceKey;
+use rustls::pki_types::ServerName;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 
 use crate::error::CoreError;
 use crate::identity::Identity;
-use crate::net::conn::{ConnEvent, Connection, HelloInfo, PeerInfo};
 
 /// 连接条目：持连接句柄与裁决所需元数据。
 struct ConnectionEntry {
@@ -38,6 +47,7 @@ struct Inner {
     events: mpsc::Sender<ConnEvent>,
     hello_rx: watch::Receiver<HelloInfo>,
     accept_filter: Arc<dyn Fn(&PeerInfo) -> bool + Send + Sync>,
+    data_handler: Option<DataHandler>,
     self_device: DeviceId,
     device_key: Arc<DeviceKey>,
 }
@@ -78,6 +88,7 @@ impl ConnManager {
             events,
             hello_rx: hello,
             accept_filter,
+            data_handler: None,
             self_device,
             device_key: Arc::new(device_key),
         };
@@ -88,9 +99,10 @@ impl ConnManager {
         };
 
         // 启动 accept 循环。
+        let listen_port = manager.local_addr.port();
         let inner_clone = manager.inner.clone();
         tokio::spawn(async move {
-            accept_loop(listener, inner_clone).await;
+            accept_loop(listener, listen_port, inner_clone).await;
         });
 
         Ok(manager)
@@ -226,11 +238,68 @@ impl ConnManager {
 
     // ---- 私有辅助 ----
 
+    /// 注册数据连接处理器（SyncEngine 等模块在启动时调用）。
+    ///
+    /// 约定在服务启动早期、无并发持锁时调用；写锁被占用说明违反该约定，
+    /// 按 fail-fast 直接 panic。
+    pub fn set_data_handler(&self, h: DataHandler) {
+        let mut inner = self
+            .inner
+            .try_write()
+            .expect("set_data_handler 需要写锁空闲：应在服务启动早期调用");
+        inner.data_handler = Some(h);
+    }
+
+    /// 数据连接：向 `peer.dial_addr` 拨号（不用 `addr`：被拨方看到的是对端
+    /// 临时源端口），TLS 后写通道字节 CHANNEL_DATA 与 DataHello。
+    pub async fn open_data(&self, device: &DeviceId) -> Result<DataStream, CoreError> {
+        let peer = self.peer(device).ok_or(CoreError::PeerOffline)?;
+        let addr = peer.dial_addr;
+        let device_key = self.device_key().await;
+        // 未初始化设备没有证书，无法自证身份，数据通道不可用。
+        let own_cert = {
+            let inner = self.inner.read().await;
+            let cert = inner.hello_rx.borrow().cert.clone();
+            cert
+        }
+        .ok_or_else(|| CoreError::Rejected("本机身份未初始化，数据通道不可用".into()))?;
+
+        let stream = TcpStream::connect(addr).await.map_err(CoreError::Io)?;
+        let (_server_config, client_config) = make_tls_configs(&device_key)?;
+        let domain = ServerName::try_from(TLS_SNI.as_bytes())
+            .map_err(|e| CoreError::Tls(format!("非法 SNI: {e}")))?;
+        let mut tls_stream = tokio_rustls::TlsStream::from(
+            TlsConnector::from(client_config)
+                .connect(domain, stream)
+                .await
+                .map_err(|e| CoreError::Tls(e.to_string()))?,
+        );
+        tls_stream
+            .write_all(&[CHANNEL_DATA])
+            .await
+            .map_err(CoreError::Io)?;
+        write_data_frame(&mut tls_stream, &DataFrame::DataHello { cert: own_cert })
+            .await
+            .map_err(|e| CoreError::Tls(e.to_string()))?;
+        Ok(tls_stream)
+    }
+
+    /// 查询已上线对端的信息（含 tls_exporter 与 dial_addr）。
+    pub fn peer(&self, device: &DeviceId) -> Option<PeerInfo> {
+        let inner = self.inner.try_read().ok()?;
+        inner
+            .connections
+            .get(device)
+            .filter(|e| e.up_sent)
+            .map(|e| e.connection.peer_info().clone())
+    }
+
     async fn build_hello(&self) -> HelloInfo {
         let hello_info = self.inner.read().await.hello_rx.borrow().clone();
         HelloInfo {
             display_name: hello_info.display_name,
             cert: hello_info.cert,
+            listen_port: self.local_addr.port(),
         }
     }
 
@@ -248,7 +317,7 @@ impl ConnManager {
 }
 
 /// 接受循环：持续接受入站 TCP 连接并进行 TLS + Hello 校验。
-async fn accept_loop(listener: TcpListener, inner: Arc<RwLock<Inner>>) {
+async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<Inner>>) {
     loop {
         let (stream, _peer_addr) = match listener.accept().await {
             Ok(s) => s,
@@ -257,12 +326,13 @@ async fn accept_loop(listener: TcpListener, inner: Arc<RwLock<Inner>>) {
 
         let inner_clone = inner.clone();
         tokio::spawn(async move {
-            let (self_device, device_key, accept_filter, events) = {
+            let (self_device, device_key, accept_filter, data_handler, events) = {
                 let guard = inner_clone.read().await;
                 (
                     guard.self_device,
                     DeviceKey::from_bytes(&guard.device_key.to_bytes()),
                     guard.accept_filter.clone(),
+                    guard.data_handler.clone(),
                     guard.events.clone(),
                 )
             };
@@ -273,20 +343,22 @@ async fn accept_loop(listener: TcpListener, inner: Arc<RwLock<Inner>>) {
                 HelloInfo {
                     display_name: borrowed.display_name.clone(),
                     cert: borrowed.cert.clone(),
+                    listen_port,
                 }
             };
 
-            match Connection::accept_inbound(
+            match Connection::accept_channel(
                 stream,
                 &device_key,
                 self_device,
                 &hello_info,
                 accept_filter.as_ref(),
                 events,
+                data_handler,
             )
             .await
             {
-                Ok((peer_info, connection)) => {
+                Ok(Accepted::Control(peer_info, connection)) => {
                     let device = peer_info.device;
                     let mut guard = inner_clone.write().await;
                     // 重复连接裁决：入站连接的拨号方为 peer。
@@ -312,6 +384,10 @@ async fn accept_loop(listener: TcpListener, inner: Arc<RwLock<Inner>>) {
                             up_sent: true,
                         },
                     );
+                }
+                Ok(Accepted::Data(peer_info)) => {
+                    // 数据连接已交给注册的处理器，无需登记；仅记录审计日志。
+                    tracing::debug!(device = %peer_info.device, "数据连接已建立");
                 }
                 Err(_) => {
                     // 校验失败：已在 Connection 内发送 Error 帧并关闭。
@@ -359,6 +435,7 @@ mod tests {
         let (hello_tx, hello_rx) = watch::channel(HelloInfo {
             display_name: "测试".into(),
             cert: None,
+            listen_port: 0,
         });
         let (events_tx, events_rx) = mpsc::channel(32);
         let filter = Arc::new(|_: &PeerInfo| true);
@@ -368,6 +445,33 @@ mod tests {
         let _ = hello_tx;
         let device_id = device.device_id();
         (manager, events_rx, device_id)
+    }
+
+    /// 带证书的管理器：用于数据通道与身份校验测试。
+    #[allow(dead_code)] // 数据测试分批使用
+    async fn make_manager_with_cert(
+    ) -> (ConnManager, mpsc::Receiver<ConnEvent>, DeviceId, DeviceCert) {
+        let (device, _identity) = make_identity();
+        let cert = make_cert_for(device.device_id());
+        let identity = Identity {
+            device: DeviceKey::from_bytes(&device.to_bytes()),
+            user: None,
+            cert: Some(cert.clone()),
+        };
+        let identity = Arc::new(RwLock::new(identity));
+        let (hello_tx, hello_rx) = watch::channel(HelloInfo {
+            display_name: "测试".into(),
+            cert: Some(cert.clone()),
+            listen_port: 0,
+        });
+        let (events_tx, events_rx) = mpsc::channel(32);
+        let filter = Arc::new(|_: &PeerInfo| true);
+        let manager = ConnManager::bind(identity.clone(), 0, hello_rx, filter, events_tx)
+            .await
+            .expect("bind 失败");
+        let _ = hello_tx;
+        let device_id = device.device_id();
+        (manager, events_rx, device_id, cert)
     }
 
     async fn expect_up(rx: &mut mpsc::Receiver<ConnEvent>, device: DeviceId) {
@@ -390,8 +494,10 @@ mod tests {
 
     #[tokio::test]
     async fn two_managers_connect_and_exchange_frames() {
-        let (mgr_a, mut events_a, dev_a) = make_manager().await;
-        let (mgr_b, mut events_b, dev_b) = make_manager().await;
+        // 带证书的管理器：Presence 等普通帧在全身份下自由交换；
+        // cert=None 场景的帧过滤由 uninitialized_peer_only_allowed_pair_frames 覆盖。
+        let (mgr_a, mut events_a, dev_a, _cert_a) = make_manager_with_cert().await;
+        let (mgr_b, mut events_b, dev_b, _cert_b) = make_manager_with_cert().await;
 
         let _ = mgr_a
             .connect(mgr_b.local_addr(), false)
@@ -469,6 +575,7 @@ mod tests {
         let (_hello_tx, hello_rx) = watch::channel(HelloInfo {
             display_name: "A".into(),
             cert: Some(cert_c),
+            listen_port: 0,
         });
         // 改为新建一个 A'（带错误的 cert）。
         let (_device_a2, _identity_raw) = make_identity();
@@ -502,6 +609,7 @@ mod tests {
         let (hello_tx, hello_rx) = watch::channel(HelloInfo {
             display_name: "B".into(),
             cert: None,
+            listen_port: 0,
         });
         let (events_tx_b, _events_b) = mpsc::channel(32);
         // B 的 filter 恒 false。
@@ -548,5 +656,154 @@ mod tests {
         );
         assert!(cert.verify().is_ok());
         let _ = Signature64([0u8; 64]);
+    }
+
+    #[tokio::test]
+    async fn both_sides_see_same_tls_exporter() {
+        let (mgr_a, mut events_a, dev_a) = make_manager().await;
+        let (mgr_b, mut events_b, dev_b) = make_manager().await;
+
+        mgr_a
+            .connect(mgr_b.local_addr(), false)
+            .await
+            .expect("A 拨号 B 失败");
+        expect_up(&mut events_a, dev_b).await;
+        expect_up(&mut events_b, dev_a).await;
+
+        let a_view = mgr_a.peer(&dev_b).expect("A 看不到 B");
+        let b_view = mgr_b.peer(&dev_a).expect("B 看不到 A");
+        assert_eq!(
+            a_view.tls_exporter, b_view.tls_exporter,
+            "双方 TLS 导出值应一致"
+        );
+        assert_ne!(a_view.tls_exporter, [0u8; 32], "导出值不应为全零");
+    }
+
+    #[tokio::test]
+    async fn data_channel_reaches_handler_with_peer_identity() {
+        let (mgr_a, mut events_a, dev_a, _cert_a) = make_manager_with_cert().await;
+        let (mgr_b, mut events_b, dev_b, _cert_b) = make_manager_with_cert().await;
+
+        mgr_a
+            .connect(mgr_b.local_addr(), false)
+            .await
+            .expect("A 拨号 B 失败");
+        expect_up(&mut events_a, dev_b).await;
+        expect_up(&mut events_b, dev_a).await;
+
+        // B 注册数据处理器：把对端设备 ID 转发给测试。
+        let (data_tx, mut data_rx) = mpsc::unbounded_channel();
+        let data_tx_for_handler = data_tx.clone();
+        mgr_b.set_data_handler(Arc::new(move |peer, _stream| {
+            let _ = data_tx_for_handler.send(peer.device);
+        }));
+
+        // A 打开数据连接，B 的处理器应收到 A 的身份。
+        let _stream = mgr_a.open_data(&dev_b).await.expect("open_data 应成功");
+        let device = tokio::time::timeout(Duration::from_secs(5), data_rx.recv())
+            .await
+            .expect("5 秒内 handler 未被调用")
+            .expect("handler 通道关闭");
+        assert_eq!(device, dev_a, "handler 收到的对端身份应为 A");
+    }
+
+    #[tokio::test]
+    async fn uninitialized_peer_only_allowed_pair_frames() {
+        let (mgr_a, mut events_a, dev_a) = make_manager().await;
+        let (mgr_b, mut events_b, dev_b) = make_manager().await;
+
+        mgr_a
+            .connect(mgr_b.local_addr(), false)
+            .await
+            .expect("A 拨号 B 失败");
+        expect_up(&mut events_a, dev_b).await;
+        expect_up(&mut events_b, dev_a).await;
+
+        // A 无证书，发 Presence → B 的读循环应拦下（不产生 Frame 事件），A 收到 Error 403。
+        mgr_a
+            .send(&dev_b, Frame::Presence(lanmsg_proto::types::Status::Online))
+            .await
+            .expect("A 发送 Presence 失败");
+        match tokio::time::timeout(Duration::from_secs(5), events_a.recv()).await {
+            Ok(Some(ConnEvent::Frame(d, Frame::Error { code, .. }))) => {
+                assert_eq!(d, dev_b);
+                assert_eq!(code, 403, "未初始化对端发普通帧应收到 403");
+            }
+            other => panic!("A 应收到 Error 403，却收到 {:?}", other),
+        }
+        // B 的事件通道不应收到 Frame 事件（超时即通过）。
+        match tokio::time::timeout(Duration::from_millis(500), events_b.recv()).await {
+            Err(_) => {}
+            Ok(Some(ConnEvent::Frame(d, f))) => {
+                panic!("B 不应收到未初始化对端的帧，却收到 {:?} 的 {:?}", d, f)
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("B 的事件通道提前关闭"),
+        }
+
+        // A 发 Pair(Abort) → B 应收到 Frame 事件。
+        mgr_a
+            .send(
+                &dev_b,
+                Frame::Pair(lanmsg_proto::types::PairMsg::Abort {
+                    reason: "测试".into(),
+                }),
+            )
+            .await
+            .expect("A 发送 Pair(Abort) 失败");
+        match tokio::time::timeout(Duration::from_secs(5), events_b.recv()).await {
+            Ok(Some(ConnEvent::Frame(d, f))) => {
+                assert_eq!(d, dev_a);
+                assert!(
+                    matches!(f, Frame::Pair(_)),
+                    "Pair 帧应放行给未初始化对端，收到 {:?}",
+                    f
+                );
+            }
+            other => panic!("B 应收到 Pair(Abort)，却收到 {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn data_hello_with_foreign_cert_rejected() {
+        let (_mgr_a, mut events_a, _dev_a, _cert_a) = make_manager_with_cert().await;
+        let (mgr_b, mut events_b, _dev_b, _cert_b) = make_manager_with_cert().await;
+        // B 注册 handler，若被调用则测试失败。
+        let (data_tx, mut data_rx) = mpsc::unbounded_channel();
+        let data_tx_for_handler = data_tx.clone();
+        mgr_b.set_data_handler(Arc::new(move |peer, _stream| {
+            let _ = data_tx_for_handler.send(peer.device);
+        }));
+
+        // 手工构造数据连接：TLS 用攻击者自己的设备密钥，DataHello 却带别人的证书。
+        let attacker_key = DeviceKey::generate();
+        let victim_cert = make_cert_for(DeviceKey::generate().device_id());
+        let stream = TcpStream::connect(mgr_b.local_addr())
+            .await
+            .expect("拨号 B 失败");
+        let (_server_config, client_config) =
+            make_tls_configs(&attacker_key).expect("TLS 配置失败");
+        let domain = ServerName::try_from(TLS_SNI.as_bytes()).expect("非法 SNI");
+        let mut tls = tokio_rustls::TlsStream::from(
+            TlsConnector::from(client_config)
+                .connect(domain, stream)
+                .await
+                .expect("TLS 握手失败"),
+        );
+        tls.write_all(&[CHANNEL_DATA])
+            .await
+            .expect("写通道字节失败");
+        lanmsg_proto::data::write_data_frame(&mut tls, &DataFrame::DataHello { cert: victim_cert })
+            .await
+            .expect("写 DataHello 复赛 失败");
+
+        // B 的 handler 不应被调用（500ms 内无事件），A' 也不应有 Up。
+        match tokio::time::timeout(Duration::from_millis(500), data_rx.recv()).await {
+            Err(_) => {} // 超时 = 未被调用，通过
+            Ok(Some(d)) => panic!("假证书数据连接的 handler 不应被调用，却收到 {:?}", d),
+            Ok(None) => panic!("handler 通道提前关闭"),
+        }
+        expect_no_up(&mut events_b).await;
+        expect_no_up(&mut events_a).await;
     }
 }

@@ -144,6 +144,7 @@ async fn init(
     inner.hello_tx.send_replace(crate::net::HelloInfo {
         display_name: display_name.clone(),
         cert: cert.clone(),
+        listen_port: 0,
     });
     if let Some(ann) = build_announce(
         &inner.identity,
