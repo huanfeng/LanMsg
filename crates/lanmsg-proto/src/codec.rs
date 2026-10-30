@@ -93,6 +93,7 @@ mod tests {
             Frame::SyncOffer(SyncOffer {
                 conv: ConvId([0u8; 32]),
                 vv: VersionVector(std::collections::BTreeMap::new()),
+                meta: None,
             }),
             Frame::SyncPush(SyncPush { envelopes: vec![] }),
             Frame::Ack(Ack { ids: vec![] }),

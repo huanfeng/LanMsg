@@ -14,20 +14,34 @@ pub const TYPE_SYNC_OFFER: u16 = 10;
 pub const TYPE_SYNC_PUSH: u16 = 11;
 pub const TYPE_ACK: u16 = 12;
 pub const TYPE_PRESENCE: u16 = 13;
+pub const TYPE_BLOB_QUERY: u16 = 20;
+pub const TYPE_BLOB_HAVE: u16 = 21;
+pub const TYPE_PAIR: u16 = 30;
+pub const TYPE_CONTACT_REQUEST: u16 = 40;
+pub const TYPE_CONTACT_RESPONSE: u16 = 41;
+pub const TYPE_REVOCATION: u16 = 42;
+pub const TYPE_CERT_UPDATE: u16 = 43;
 pub const TYPE_ERROR: u16 = 99;
 
 /// 帧枚举。P1 阶段定义以下变体，P2/P5 变体由对应阶段追加。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
-    Hello(Hello),                         // 1
-    Ping(u64),                            // 2
-    Pong(u64),                            // 3
-    SyncOffer(SyncOffer),                 // 10
-    SyncPush(SyncPush),                   // 11
-    Ack(Ack),                             // 12
-    Presence(Status),                     // 13
-    Error { code: u16, message: String }, // 99
-    Unknown(u16),                         // 解码遇到未知类型号时产生
+    Hello(Hello),                                   // 1
+    Ping(u64),                                      // 2
+    Pong(u64),                                      // 3
+    SyncOffer(SyncOffer),                           // 10
+    SyncPush(SyncPush),                             // 11
+    Ack(Ack),                                       // 12
+    Presence(Status),                               // 13
+    BlobQuery(crate::types::BlobQuery),             // 20
+    BlobHave(crate::types::BlobHave),               // 21
+    Pair(crate::types::PairMsg),                    // 30
+    ContactRequest(crate::types::ContactRequest),   // 40
+    ContactResponse(crate::types::ContactResponse), // 41
+    Revocation(crate::types::Revocation),           // 42
+    CertUpdate(Vec<DeviceCert>),                    // 43
+    Error { code: u16, message: String },           // 99
+    Unknown(u16),                                   // 解码遇到未知类型号时产生
 }
 
 /// Hello 握手帧的负载。
@@ -99,6 +113,13 @@ impl Frame {
             Frame::SyncPush(_) => TYPE_SYNC_PUSH,
             Frame::Ack(_) => TYPE_ACK,
             Frame::Presence(_) => TYPE_PRESENCE,
+            Frame::BlobQuery(_) => TYPE_BLOB_QUERY,
+            Frame::BlobHave(_) => TYPE_BLOB_HAVE,
+            Frame::Pair(_) => TYPE_PAIR,
+            Frame::ContactRequest(_) => TYPE_CONTACT_REQUEST,
+            Frame::ContactResponse(_) => TYPE_CONTACT_RESPONSE,
+            Frame::Revocation(_) => TYPE_REVOCATION,
+            Frame::CertUpdate(_) => TYPE_CERT_UPDATE,
             Frame::Error { .. } => TYPE_ERROR,
             Frame::Unknown(id) => *id,
         }
@@ -114,6 +135,13 @@ impl Frame {
             Frame::SyncPush(push) => to_cbor(push),
             Frame::Ack(ack) => to_cbor(ack),
             Frame::Presence(status) => to_cbor(status),
+            Frame::BlobQuery(q) => to_cbor(q),
+            Frame::BlobHave(h) => to_cbor(h),
+            Frame::Pair(p) => to_cbor(p),
+            Frame::ContactRequest(r) => to_cbor(r),
+            Frame::ContactResponse(r) => to_cbor(r),
+            Frame::Revocation(r) => to_cbor(r),
+            Frame::CertUpdate(certs) => to_cbor(certs),
             Frame::Error { code, message } => to_cbor(&ErrorPayload {
                 code: *code,
                 message: message.clone(),
@@ -168,6 +196,41 @@ impl Frame {
                     message: err.message,
                 })
             }
+            TYPE_BLOB_QUERY => {
+                let q: crate::types::BlobQuery =
+                    ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
+                Ok(Frame::BlobQuery(q))
+            }
+            TYPE_BLOB_HAVE => {
+                let h: crate::types::BlobHave =
+                    ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
+                Ok(Frame::BlobHave(h))
+            }
+            TYPE_PAIR => {
+                let p: crate::types::PairMsg =
+                    ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
+                Ok(Frame::Pair(p))
+            }
+            TYPE_CONTACT_REQUEST => {
+                let r: crate::types::ContactRequest =
+                    ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
+                Ok(Frame::ContactRequest(r))
+            }
+            TYPE_CONTACT_RESPONSE => {
+                let r: crate::types::ContactResponse =
+                    ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
+                Ok(Frame::ContactResponse(r))
+            }
+            TYPE_REVOCATION => {
+                let r: crate::types::Revocation =
+                    ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
+                Ok(Frame::Revocation(r))
+            }
+            TYPE_CERT_UPDATE => {
+                let certs: Vec<DeviceCert> =
+                    ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
+                Ok(Frame::CertUpdate(certs))
+            }
             _ => Ok(Frame::Unknown(type_id)),
         }
     }
@@ -214,6 +277,50 @@ mod tests {
             FrameCodec.decode(&mut buf).unwrap(),
             Some(Frame::Unknown(777))
         );
+    }
+
+    #[test]
+    fn new_frames_roundtrip() {
+        let user = crate::sign::UserKey::generate();
+        let cert = crate::types::DeviceCert::issue(
+            &user,
+            crate::sign::DeviceKey::generate().device_id(),
+            "测试设备".into(),
+            crate::types::DeviceType::Desktop,
+            1,
+        );
+        let frames = vec![
+            (
+                Frame::Pair(crate::types::PairMsg::Begin {
+                    session: None,
+                    method: crate::types::PairMethodWire::Qr,
+                    device_name: "新设备".into(),
+                    device_type: crate::types::DeviceType::Phone,
+                }),
+                30,
+            ),
+            (Frame::CertUpdate(vec![cert.clone()]), 43),
+            (
+                Frame::BlobHave(crate::types::BlobHave {
+                    hashes: vec![crate::ids::BlobHash([3u8; 32])],
+                }),
+                21,
+            ),
+            (
+                Frame::ContactRequest(crate::types::ContactRequest {
+                    request_id: [9u8; 16],
+                    from_display_name: "同事甲".into(),
+                    devices: vec![cert],
+                }),
+                40,
+            ),
+        ];
+        for (frame, id) in frames {
+            let payload = frame.encode_payload();
+            let decoded = Frame::decode(id, &payload).unwrap();
+            assert_eq!(decoded, frame);
+            assert_eq!(decoded.type_id(), id);
+        }
     }
 
     #[test]
@@ -270,6 +377,7 @@ mod tests {
             Frame::SyncOffer(crate::types::SyncOffer {
                 conv: crate::ids::ConvId([0u8; 32]),
                 vv: crate::types::VersionVector(std::collections::BTreeMap::new()),
+                meta: None,
             })
             .type_id(),
             10

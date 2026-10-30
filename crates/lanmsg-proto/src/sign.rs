@@ -8,7 +8,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::ids::{DeviceId, UserId};
-use crate::types::{Announce, DeviceCert, Envelope, Signature64};
+use crate::types::{Announce, DeviceCert, Envelope, Revocation, Signature64};
 
 /// 签名与密钥错误。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -156,6 +156,15 @@ impl Signed for Announce {
     }
 }
 
+impl Signed for Revocation {
+    fn sig_mut(&mut self) -> &mut Signature64 {
+        &mut self.sig
+    }
+    fn sig(&self) -> &Signature64 {
+        &self.sig
+    }
+}
+
 impl DeviceCert {
     /// 由用户密钥签发设备证书，key_epoch = 0。
     pub fn issue(
@@ -204,6 +213,16 @@ mod tests {
     use super::*;
     use crate::ids::{ConvId, MsgId};
     use crate::types::{DeviceType, Hlc, MsgBody};
+
+    #[test]
+    fn revocation_signed_by_user_verifies() {
+        let u = UserKey::generate();
+        let d = DeviceKey::generate().device_id();
+        let mut r = Revocation::issue(&u, d, 1);
+        assert!(r.verify().is_ok());
+        r.device = DeviceKey::generate().device_id();
+        assert!(r.verify().is_err());
+    }
 
     #[test]
     fn cert_issued_by_user_verifies_and_tamper_fails() {

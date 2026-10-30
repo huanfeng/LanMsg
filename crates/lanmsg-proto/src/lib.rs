@@ -1,5 +1,6 @@
 pub mod codec;
 pub mod consts;
+pub mod data;
 pub mod frame;
 pub mod ids;
 pub mod sign;
