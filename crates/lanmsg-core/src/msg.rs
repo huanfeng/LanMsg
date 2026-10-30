@@ -19,7 +19,8 @@ use crate::hlc::HlcClock;
 use crate::identity::Identity;
 use crate::net::{ConnManager, PeerInfo};
 use crate::service::views::{conv_summary, message_view, request_view};
-use crate::store::{ConvKindRow, ConvRow, MsgStateRow, Store, StoredMessage};
+use crate::store::{ContactState, ConvKindRow, ConvRow, Gate, MsgStateRow, Store, StoredMessage};
+use crate::sync::conv_member_ok;
 use crate::trust::{gate_request_kind, GateDecision};
 
 /// 当前墙钟时间（毫秒）。
@@ -188,7 +189,9 @@ impl Messaging {
             let _ = self.events.send(Event::ConversationUpdated { summary });
         }
 
-        // 7. 计算投递目标 targets(conv)。
+        // 7. 计算投递目标 targets(conv)：Dm → 对端用户所有已连接设备 + 自己其他
+        //    已连接设备（转交）；SelfDevices → 自己其他已连接设备；其他 kind
+        //    （Guest/LocalSend/Station）→ 空列表（不报错，状态保持 Sending）。
         let targets: Vec<DeviceId> = match conv_row.kind {
             ConvKindRow::Dm => {
                 let peer_user = conv_row
@@ -197,7 +200,10 @@ impl Messaging {
                 self.conns
                     .peers()
                     .into_iter()
-                    .filter(|p| p.cert.as_ref().is_some_and(|c| c.user == peer_user))
+                    .filter(|p| {
+                        let u = p.cert.as_ref().map(|c| c.user);
+                        u == Some(peer_user) || (u == Some(self_user) && p.device != self_device)
+                    })
                     .map(|p| p.device)
                     .collect()
             }
@@ -273,18 +279,47 @@ impl Messaging {
                         clock.observe(env.hlc.clone(), wall);
                     }
 
-                    // 4. 会话校验：不存在时校验 DM 规则（创建延后到门控决策之后，
-                    //    避免新会话默认 Open 门控放行陌生人）。
+                    // 4. 成员校验与会话创建：会话不存在时若 env.conv ==
+                    //    dm(self, author_user) 则创建 Dm 会话（gate = Pending 若
+                    //    作者为陌生人，Open 若为联系人/自己），否则丢弃；已存在
+                    //    的会话按 conv_member_ok 校验成员，不匹配丢弃。
                     let conv_id = env.conv;
-                    let conv_row = self.store.get_conversation(&conv_id)?;
-                    if conv_row.is_none() {
-                        let Some(self_user) = self_user else {
-                            continue; // 未初始化，无法校验 DM 会话
-                        };
-                        let expected_conv = ConvId::dm(&self_user, &author_user);
-                        if expected_conv != conv_id {
-                            warn!(peer = %from, "SyncPush conv 不匹配，丢弃");
-                            continue;
+                    match self.store.get_conversation(&conv_id)? {
+                        None => {
+                            let Some(self_user) = self_user else {
+                                continue; // 未初始化，无法校验
+                            };
+                            if conv_id != ConvId::dm(&self_user, &author_user) {
+                                warn!(peer = %from, "SyncPush conv 不匹配，丢弃");
+                                continue;
+                            }
+                            let row = ConvRow {
+                                conv: conv_id,
+                                kind: ConvKindRow::Dm,
+                                peer_user: Some(author_user),
+                                title: None,
+                                created_at: wall,
+                            };
+                            self.store.ensure_conversation(&row)?;
+                            let is_contact = author_user == self_user
+                                || self
+                                    .store
+                                    .get_contact(&author_user)
+                                    .ok()
+                                    .flatten()
+                                    .is_some_and(|r| r.state == ContactState::Accepted);
+                            if !is_contact {
+                                self.store.set_gate(&conv_id, Gate::Pending, None)?;
+                            }
+                        }
+                        Some(row) => {
+                            let Some(self_user) = self_user else {
+                                continue; // 未初始化，无法校验
+                            };
+                            if !conv_member_ok(&row, &author_user, &self_user) {
+                                warn!(peer = %from, "SyncPush 成员校验失败，丢弃");
+                                continue;
+                            }
                         }
                     }
 
@@ -324,16 +359,12 @@ impl Messaging {
                             warn!(peer = %from, author = %author_user, "SyncPush 被门控丢弃");
                         }
                         GateDecision::Accept => {
-                            // 6a. 会话不存在则按 DM 规则创建；insert_envelope(Delivered)
-                            //     （步骤 4 已保证此时 self_user 必为 Some）。
-                            if conv_row.is_none() && self_user.is_some() {
-                                self.store.ensure_conversation(&ConvRow {
-                                    conv: conv_id,
-                                    kind: ConvKindRow::Dm,
-                                    peer_user: Some(author_user),
-                                    title: None,
-                                    created_at: wall,
-                                })?;
+                            // 6a. 会话已存在（步骤 4 已创建）；若 Dm 会话 gate 为
+                            //     Pending 且门控 Accept（作者是联系人/自己设备等），
+                            //     把 gate 置 Open。
+                            let (gate, _) = self.store.get_gate(&conv_id)?;
+                            if gate == Gate::Pending {
+                                self.store.set_gate(&conv_id, Gate::Open, None)?;
                             }
                             let inserted =
                                 self.store
@@ -402,15 +433,36 @@ impl Messaging {
                 let _ = self.conns.send(&from, Frame::Ack(Ack { ids })).await;
             }
             Frame::Ack(ack) => {
+                // 送达规则（确认设备为 D）：
+                // - 消息所在会话为 Dm 且 D 属于 peer_user → Delivered；
+                // - 会话为 SelfDevices 且 D 属于自己（非本机）→ Delivered；
+                // - 其他情况（例如自己的设备确认收到转交）→ 不改状态。
                 for id in ack.ids {
-                    if id.author == self_device {
-                        if let Some(m) = self.store.get_message(&id)? {
-                            if matches!(m.state, MsgStateRow::Sending | MsgStateRow::Sent) {
-                                self.store.set_message_state(&id, MsgStateRow::Delivered)?;
-                                let msg_view = message_view(self.store.as_ref(), &self_device, &m);
-                                let _ = self.events.send(Event::MessageUpdated { msg: msg_view });
-                            }
+                    if id.author != self_device {
+                        continue;
+                    }
+                    let Some(m) = self.store.get_message(&id)? else {
+                        continue;
+                    };
+                    if !matches!(m.state, MsgStateRow::Sending | MsgStateRow::Sent) {
+                        continue;
+                    }
+                    let Some(row) = self.store.get_conversation(&m.env.conv)? else {
+                        continue;
+                    };
+                    let device_user = self.store.get_device(&from).ok().flatten().map(|d| d.user);
+                    let delivered = match row.kind {
+                        ConvKindRow::Dm => device_user.is_some_and(|u| Some(u) == row.peer_user),
+                        ConvKindRow::SelfDevices => {
+                            device_user.is_some_and(|u| matches!(self_user, Some(su) if su == u))
+                                && from != self_device
                         }
+                        _ => false,
+                    };
+                    if delivered {
+                        self.store.set_message_state(&id, MsgStateRow::Delivered)?;
+                        let msg_view = message_view(self.store.as_ref(), &self_device, &m);
+                        let _ = self.events.send(Event::MessageUpdated { msg: msg_view });
                     }
                 }
             }

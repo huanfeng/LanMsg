@@ -16,7 +16,7 @@ use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{ConvId, DeviceId, MsgId, UserId};
 use lanmsg_proto::types::{DeviceType, MsgBody, PairMethodWire, Status};
 
-use crate::service::views::{conv_summary, message_view, peer_view};
+use crate::service::views::{conv_summary, message_view, peer_view, PeerView};
 use crate::service::{build_announce, now_millis, Inner};
 use crate::store::{ConvKindRow, DeviceRow, UserRow};
 
@@ -238,12 +238,26 @@ async fn set_status(inner: &Inner, status: StatusDto) -> Result<Response, ApiErr
 
 async fn list_peers(inner: &Inner) -> Result<Response, ApiError> {
     let self_user = inner.state.read().unwrap().self_user;
-    let value = inner
-        .conns
-        .peers()
+    let peers = inner.conns.peers();
+    let mut value: Vec<PeerView> = peers
         .iter()
         .map(|p| peer_view(&inner.store, p, self_user.as_ref()))
         .collect();
+    // 并入近期发现但未连接的设备（离线补投目标可见；路径按组播来源判 LAN）。
+    for (ann, addr) in inner.discovered.recent(lanmsg_proto::consts::OFFLINE_AFTER) {
+        let device_id = ann.cert.device.to_hex();
+        if peers.iter().any(|p| p.device.to_hex() == device_id)
+            || value.iter().any(|v| v.device_id == device_id)
+        {
+            continue;
+        }
+        value.push(crate::service::views::discovered_peer_view(
+            &inner.store,
+            &ann,
+            addr,
+            self_user.as_ref(),
+        ));
+    }
     Ok(Response::Peers { value })
 }
 

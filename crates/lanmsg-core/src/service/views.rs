@@ -121,12 +121,49 @@ pub fn conv_summary(
 // Task 11：peer_view 将连接层 PeerInfo 转换为对端设备视图（addr 用 dial_addr）。
 // P2 Task 5：is_contact 按联系人表真实状态填写；新增 contact_view / device_view /
 // request_view 供 ListContacts / ListRequests 使用。
-use lanmsg_api::types::{
-    ContactView, DeviceView, PathClassDto, PeerView, RequestKind, RequestView,
-};
+pub use lanmsg_api::types::PeerView;
+use lanmsg_api::types::{ContactView, DeviceView, PathClassDto, RequestKind, RequestView};
 
 use crate::net::PeerInfo;
 use crate::store::{ContactRow, DeviceRow, RequestRow};
+
+/// 将发现表条目（近期发现但未连接的设备）转换为对端设备视图：
+/// `addr` 用发现来源地址，`path` 按 `classify(.., via_multicast = true)` 判定。
+pub fn discovered_peer_view(
+    store: &Store,
+    ann: &lanmsg_proto::types::Announce,
+    addr: std::net::SocketAddr,
+    self_user: Option<&UserId>,
+) -> PeerView {
+    let cert = &ann.cert;
+    let path = crate::net::classify(addr.ip(), &crate::net::local_ifaces(), true);
+    PeerView {
+        device_id: cert.device.to_hex(),
+        device_short: cert.device.short(),
+        user_id: cert.user.to_hex(),
+        display_name: ann.display_name.clone(),
+        device_name: cert.device_name.clone(),
+        device_type: format!("{:?}", cert.device_type),
+        addr: addr.to_string(),
+        path: path_dto(path),
+        is_contact: store
+            .get_contact(&cert.user)
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.state == crate::store::ContactState::Accepted),
+        is_mine: self_user.is_some_and(|u| u == &cert.user),
+    }
+}
+
+/// 路径等级 → DTO。
+fn path_dto(p: lanmsg_proto::types::PathClass) -> PathClassDto {
+    match p {
+        lanmsg_proto::types::PathClass::Lan => PathClassDto::Lan,
+        lanmsg_proto::types::PathClass::Vpn => PathClassDto::Vpn,
+        lanmsg_proto::types::PathClass::Internet => PathClassDto::Internet,
+        lanmsg_proto::types::PathClass::Relay => PathClassDto::Relay,
+    }
+}
 
 /// 将对端连接信息转换为对端设备视图（is_contact 查联系人表）。
 pub fn peer_view(store: &Store, p: &PeerInfo, self_user: Option<&UserId>) -> PeerView {

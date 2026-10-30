@@ -74,6 +74,8 @@ pub(crate) struct Inner {
     pub(crate) discovered: Arc<DiscoveredTable>,
     /// 「我的设备」配对。
     pub(crate) pairing: Pairing,
+    /// 多设备同步、转交与离线补投。
+    pub(crate) sync: crate::sync::SyncEngine,
 }
 
 /// 核心服务（C6）。内部状态由 Arc 持有，Clone 廉价。
@@ -213,6 +215,9 @@ impl Service {
             window,
         });
 
+        // 多设备同步引擎（P2 Task 9）。
+        let sync = crate::sync::SyncEngine::new(store.clone(), identity.clone(), conns.clone());
+
         let inner = Arc::new(Inner {
             store,
             identity,
@@ -228,6 +233,7 @@ impl Service {
             discovery,
             discovered,
             pairing,
+            sync,
         });
         let svc = Service {
             inner: inner.clone(),
@@ -318,6 +324,7 @@ async fn routing_task(
             evt = conn_rx.recv() => match evt {
                 Some(ConnEvent::Up(peer)) => on_up(&inner, peer).await,
                 Some(ConnEvent::Down(device)) => {
+                    inner.sync.on_peer_down(&device);
                     let _ = inner
                         .events
                         .send(Event::PeerOffline { device: device.to_hex() });
@@ -377,6 +384,14 @@ async fn routing_task(
                             }
                         }
                     }
+                    // 同步 offer 分派给 SyncEngine（P2 Task 9）。
+                    Frame::SyncOffer(offer) => {
+                        if let Some(pi) = inner.conns.peer(&d) {
+                            if let Err(e) = inner.sync.on_offer(&pi, offer).await {
+                                tracing::warn!(peer = %d, error = %e, "SyncOffer 处理失败");
+                            }
+                        }
+                    }
                     _ => {
                         let _ = inner.msg.on_frame(d, f).await;
                     }
@@ -424,6 +439,12 @@ async fn on_up(inner: &Inner, peer: PeerInfo) {
     let _ = inner.events.send(Event::PeerOnline {
         peer: views::peer_view(&inner.store, &peer, self_user.as_ref()),
     });
+
+    // 多设备同步：对端上线即互发证书与 SyncOffer（陌生人同样调用，以投递
+    // 离线消息）。
+    if let Err(e) = inner.sync.on_peer_up(&peer).await {
+        tracing::warn!(peer = %peer.device, error = %e, "SyncOffer 生成失败");
+    }
 }
 
 /// 发现事件：未连接且自身设备 ID 较小时出站拨号；Invisible 不主动外联其他用户。
@@ -434,6 +455,10 @@ async fn on_discovery(inner: &Inner, de: DiscoveryEvent) {
     }
     {
         let st = inner.state.read().unwrap();
+        // 未初始化的 Service 不因发现而自动拨号（配对经 PairJoin 显式连接）。
+        if st.self_user.is_none() {
+            return;
+        }
         if matches!(st.status, Status::Invisible)
             && !st.self_user.is_some_and(|u| u == de.announce.cert.user)
         {
