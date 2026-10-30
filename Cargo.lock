@@ -612,6 +612,7 @@ name = "lanmsg-core"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "futures-util",
  "if-addrs",
  "ipnet",
  "lanmsg-api",
@@ -625,6 +626,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tracing",
  "x509-parser",
 ]
