@@ -647,39 +647,6 @@ mod tests {
         }
     }
 
-    /// 断言双方各恰好一次 Up、连接数为 1、无多余事件，且能互发一帧。
-    async fn assert_single_link_and_exchange(
-        dialer: (&ConnManager, &mut mpsc::Receiver<ConnEvent>, DeviceId),
-        acceptor: (&ConnManager, &mut mpsc::Receiver<ConnEvent>, DeviceId),
-    ) {
-        let (mgr_d, ev_d, dev_d) = dialer;
-        let (mgr_a, ev_a, dev_a) = acceptor;
-        expect_up(ev_d, dev_a).await;
-        expect_up(ev_a, dev_d).await;
-        // 之后不应再有 Up/Down（恰好一次 Up）。
-        expect_no_up(ev_d).await;
-        expect_no_up(ev_a).await;
-        assert_eq!(mgr_d.peers().len(), 1);
-        assert_eq!(mgr_a.peers().len(), 1);
-
-        mgr_d
-            .send(&dev_a, Frame::Presence(lanmsg_proto::types::Status::Online))
-            .await
-            .expect("拨号方发帧失败");
-        match tokio::time::timeout(Duration::from_secs(5), ev_a.recv()).await {
-            Ok(Some(ConnEvent::Frame(d, Frame::Presence(_)))) => assert_eq!(d, dev_d),
-            other => panic!("接受方应收到 Presence，却收到 {:?}", other),
-        }
-        mgr_a
-            .send(&dev_d, Frame::Presence(lanmsg_proto::types::Status::Online))
-            .await
-            .expect("接受方发帧失败");
-        match tokio::time::timeout(Duration::from_secs(5), ev_d.recv()).await {
-            Ok(Some(ConnEvent::Frame(d, Frame::Presence(_)))) => assert_eq!(d, dev_a),
-            other => panic!("拨号方应收到 Presence，却收到 {:?}", other),
-        }
-    }
-
     /// DeviceId 较大的 A 单向拨较小的 B：出站侧（A.connect）与入站侧（B.accept）
     /// 都因“拨号方较大”先等待宽限窗口，故两侧 Up 都不早于 DUP_DIAL_GRACE_MS。
     #[tokio::test]
@@ -688,6 +655,21 @@ mod tests {
         assert!(dev_a > dev_b);
 
         let grace = Duration::from_millis(DUP_DIAL_GRACE_MS);
+        // 在拨号前启动观察任务，记录 B 收到 Up(A) 的真实时刻；不能在 connect 返回
+        // 之后再取 elapsed（出站侧已等过宽限，必然 >= grace，无法区分入站宽限）。
+        // B 的登记只取决于 B 自己的握手与入站宽限，与 A 的出站宽限无关。
+        let watcher = tokio::spawn(async move {
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), ev_b.recv()).await {
+                    Ok(Some(ConnEvent::Up(p))) => {
+                        assert_eq!(p.device, dev_a);
+                        return (ev_b, tokio::time::Instant::now());
+                    }
+                    Ok(Some(_)) => {}
+                    other => panic!("B 应收到 Up(A)，却收到 {:?}", other),
+                }
+            }
+        });
         let start = tokio::time::Instant::now();
         mgr_a
             .connect(mgr_b.local_addr(), false)
@@ -700,12 +682,12 @@ mod tests {
             start.elapsed()
         );
         expect_up(&mut ev_a, dev_b).await;
-        // 入站侧：B 的 Up 同样不早于宽限（从拨号开始计）。
-        expect_up(&mut ev_b, dev_a).await;
+        // 入站侧：B 的 Up 到达时刻（观察任务记录）不早于宽限。
+        let (mut ev_b, t_b_up) = watcher.await.expect("观察任务失败");
         assert!(
-            start.elapsed() >= grace,
+            t_b_up - start >= grace,
             "入站侧未等待宽限: {:?}",
-            start.elapsed()
+            t_b_up - start
         );
 
         // Up 已消费，这里复核无多余事件、连接数与双向帧。
@@ -738,12 +720,40 @@ mod tests {
         let ((mgr_a, mut ev_a, dev_a), (mgr_b, mut ev_b, dev_b)) = make_ordered_pair().await;
         assert!(dev_a > dev_b);
 
+        let start = tokio::time::Instant::now();
         mgr_b
             .connect(mgr_a.local_addr(), false)
             .await
             .expect("B 拨号 A 失败");
-        assert_single_link_and_exchange((&mgr_b, &mut ev_b, dev_b), (&mgr_a, &mut ev_a, dev_a))
-            .await;
+        // 反向断言：双方 Up 都不经宽限，总耗时以 DUP_DIAL_GRACE_MS 为上界。
+        expect_up(&mut ev_b, dev_a).await;
+        expect_up(&mut ev_a, dev_b).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(DUP_DIAL_GRACE_MS),
+            "较小方拨号不应等待宽限: {:?}",
+            start.elapsed()
+        );
+        // 以下复核无多余 Up、连接数与双向帧（Up 已在上面消费）。
+        expect_no_up(&mut ev_b).await;
+        expect_no_up(&mut ev_a).await;
+        assert_eq!(mgr_a.peers().len(), 1);
+        assert_eq!(mgr_b.peers().len(), 1);
+        mgr_b
+            .send(&dev_a, Frame::Presence(lanmsg_proto::types::Status::Online))
+            .await
+            .expect("B 发帧失败");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), ev_a.recv()).await,
+            Ok(Some(ConnEvent::Frame(d, Frame::Presence(_)))) if d == dev_b
+        ));
+        mgr_a
+            .send(&dev_b, Frame::Presence(lanmsg_proto::types::Status::Online))
+            .await
+            .expect("A 发帧失败");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), ev_b.recv()).await,
+            Ok(Some(ConnEvent::Frame(d, Frame::Presence(_)))) if d == dev_a
+        ));
     }
 
     #[tokio::test]

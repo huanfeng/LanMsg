@@ -476,10 +476,21 @@ async fn routing_task(
                     Frame::SyncOffer(offer) => {
                         if let Some(pi) = inner.conns.peer(&d) {
                             // 建会话/去重在循环内同步完成，推送交给该对端的后台任务。
+                            let conv = offer.conv;
                             match inner.sync.prepare_offer(&pi, offer) {
                                 Ok(Some(plan)) => {
-                                    if let Some(tx) = sync_workers.get(&d) {
-                                        try_enqueue(tx, SyncJob::Offer(pi, plan), &d);
+                                    let was_reply = plan.is_reply();
+                                    let enqueued = match sync_workers.get(&d) {
+                                        Some(tx) => {
+                                            try_enqueue(tx, SyncJob::Offer(pi, plan), &d)
+                                        }
+                                        None => false,
+                                    };
+                                    // 回发作业被丢弃：撤销登记，否则对端下次同会话 offer
+                                    // 也不会再回发，同步停滞到重连。被丢的纯推送无登记，
+                                    // 由对端下次 offer 或重连恢复，可接受。
+                                    if !enqueued && was_reply {
+                                        inner.sync.forget_replied(&d, &conv);
                                     }
                                 }
                                 Ok(None) => {}

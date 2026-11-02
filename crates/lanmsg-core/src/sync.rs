@@ -36,6 +36,13 @@ pub struct OfferPlan {
     reply: bool,
 }
 
+impl OfferPlan {
+    /// 本作业是否包含回发（已登记 replied，丢弃时需撤销）。
+    pub fn is_reply(&self) -> bool {
+        self.reply
+    }
+}
+
 /// 会话成员规则：SelfDevices 仅接受自己用户；Dm 接受自己与对端用户；
 /// 其他 kind（Guest/LocalSend/Station）不参与同步，一律拒绝。
 pub fn conv_member_ok(conv: &ConvRow, author_user: &UserId, self_user: &UserId) -> bool {
@@ -142,6 +149,13 @@ impl SyncEngine {
     /// 对端下线：清除该连接上的 offer 回发去重记录。
     pub fn on_peer_down(&self, device: &DeviceId) {
         self.replied.lock().unwrap().retain(|(d, _)| d != device);
+    }
+
+    /// 撤销某会话的回发登记：回发作业被丢弃（队列满）时调用，使对端下一次
+    /// 同会话 offer 仍可触发回发，避免同步停滞到重连。被丢弃的纯推送不撤销
+    /// 任何状态，由对端下次 offer 或重连恢复，可接受。
+    pub fn forget_replied(&self, dev: &DeviceId, conv: &ConvId) {
+        self.replied.lock().unwrap().remove(&(*dev, *conv));
     }
 
     /// 处理对端 SyncOffer 的同步部分（在事件循环内顺序执行，不 await）：
@@ -404,5 +418,70 @@ mod tests {
             meta: None,
         };
         assert!(engine.prepare_offer(&peer, offer).unwrap().is_none());
+    }
+
+    /// 回发登记后 forget_replied 撤销：对同一 offer 再次 prepare，reply 仍为 true。
+    #[tokio::test]
+    async fn forget_replied_allows_reply_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let ks = FileKeyStore::new(dir.path().join("keys"));
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut identity = Identity::load_or_create(&ks, &store).unwrap();
+        identity
+            .init_first_device(&ks, &store, "本机", DeviceType::Desktop, now_millis())
+            .unwrap();
+        let self_user = identity.user_id().unwrap();
+        let cert = identity.cert.clone().unwrap();
+        let identity = Arc::new(RwLock::new(identity));
+
+        let (_hello_tx, hello_rx) = watch::channel(HelloInfo {
+            display_name: "测试".into(),
+            cert: None,
+            listen_port: 0,
+        });
+        let (events_tx, _events_rx) = mpsc::channel(8);
+        let conns = ConnManager::bind(
+            identity.clone(),
+            0,
+            hello_rx,
+            Arc::new(|_: &PeerInfo| true),
+            events_tx,
+        )
+        .await
+        .unwrap();
+        let engine = SyncEngine::new(store.clone(), identity, conns);
+
+        let addr = "127.0.0.1:1".parse().unwrap();
+        let peer = PeerInfo {
+            device: DeviceId([9u8; 32]),
+            cert: Some(cert),
+            display_name: "对端".into(),
+            addr,
+            dial_addr: addr,
+            path: PathClass::Lan,
+            caps: Vec::new(),
+            outbound: false,
+            tls_exporter: [0u8; 32],
+        };
+        let conv = ConvId::self_devices(&self_user);
+        // 对端向量里有本地没有的作者条目 → need = true。
+        let mut vv: VersionVector = store.version_vector(&conv).unwrap();
+        vv.0.insert(DeviceId([7u8; 32]), 5);
+        let offer = SyncOffer {
+            conv,
+            vv,
+            meta: None,
+        };
+
+        let first = engine.prepare_offer(&peer, offer.clone()).unwrap().unwrap();
+        assert!(first.reply);
+        // 已登记：同一 offer 不再回发（无推送 → None）。
+        assert!(engine
+            .prepare_offer(&peer, offer.clone())
+            .unwrap()
+            .is_none());
+        engine.forget_replied(&peer.device, &conv);
+        let again = engine.prepare_offer(&peer, offer).unwrap().unwrap();
+        assert!(again.reply, "撤销登记后应可再次回发");
     }
 }
