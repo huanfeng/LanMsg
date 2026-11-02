@@ -7,6 +7,7 @@ pub mod handlers;
 pub mod ingest;
 pub mod views;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::SystemTime;
@@ -16,7 +17,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use lanmsg_api::types::Event;
 use lanmsg_proto::consts::{PROTO_VERSION, RETRY_MAX, RETRY_MIN};
 use lanmsg_proto::frame::Frame;
-use lanmsg_proto::ids::{ConvId, UserId};
+use lanmsg_proto::ids::{ConvId, DeviceId, UserId};
 use lanmsg_proto::sign::{sign_with_zeroed_sig, DeviceKey};
 use lanmsg_proto::types::{Announce, Signature64, Status};
 
@@ -395,11 +396,22 @@ async fn routing_task(
     mut disc_rx: mpsc::Receiver<DiscoveryEvent>,
 ) {
     let mut disc_open = true;
+    // 每个在线对端一个出站同步任务：Up 时创建、Down 时移除（丢弃发送端后任务
+    // 处理完队列即退出；对已断开连接的 send 返回 PeerOffline 也会让其快速结束）。
+    // 会长时间等待对端写队列的发送放在这里，避免慢对端阻塞整个事件循环；
+    // 同一对端的发送按入队顺序串行，入站摄取仍在本循环内顺序处理。
+    let mut sync_workers: HashMap<DeviceId, mpsc::UnboundedSender<SyncJob>> = HashMap::new();
     loop {
         tokio::select! {
             evt = conn_rx.recv() => match evt {
-                Some(ConnEvent::Up(peer)) => on_up(&inner, peer).await,
+                Some(ConnEvent::Up(peer)) => {
+                    let (tx, rx) = mpsc::unbounded_channel();
+                    tokio::spawn(sync_worker(inner.sync.clone(), rx));
+                    sync_workers.insert(peer.device, tx.clone());
+                    on_up(&inner, peer, &tx).await;
+                }
                 Some(ConnEvent::Down(device)) => {
+                    sync_workers.remove(&device);
                     inner.sync.on_peer_down(&device);
                     let _ = inner
                         .events
@@ -463,8 +475,17 @@ async fn routing_task(
                     // 同步 offer 分派给 SyncEngine（P2 Task 9）。
                     Frame::SyncOffer(offer) => {
                         if let Some(pi) = inner.conns.peer(&d) {
-                            if let Err(e) = inner.sync.on_offer(&pi, offer).await {
-                                tracing::warn!(peer = %d, error = %e, "SyncOffer 处理失败");
+                            // 建会话/去重在循环内同步完成，推送交给该对端的后台任务。
+                            match inner.sync.prepare_offer(&pi, offer) {
+                                Ok(Some(plan)) => {
+                                    if let Some(tx) = sync_workers.get(&d) {
+                                        let _ = tx.send(SyncJob::Offer(pi, plan));
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    tracing::warn!(peer = %d, error = %e, "SyncOffer 处理失败");
+                                }
                             }
                         }
                     }
@@ -491,7 +512,7 @@ async fn routing_task(
 
 /// 连接上线：设备与用户入库，发 PeerOnline；未初始化对端（cert == None，
 /// 配对流程专用）只记日志，不写库、不发 PeerOnline。
-async fn on_up(inner: &Inner, peer: PeerInfo) {
+async fn on_up(inner: &Inner, peer: PeerInfo, sync_tx: &mpsc::UnboundedSender<SyncJob>) {
     let Some(cert) = &peer.cert else {
         tracing::debug!(peer = %peer.device, "未初始化对端连接（配对流程专用）");
         return;
@@ -520,9 +541,31 @@ async fn on_up(inner: &Inner, peer: PeerInfo) {
     });
 
     // 多设备同步：对端上线即互发证书与 SyncOffer（陌生人同样调用，以投递
-    // 离线消息）。
-    if let Err(e) = inner.sync.on_peer_up(&peer).await {
-        tracing::warn!(peer = %peer.device, error = %e, "SyncOffer 生成失败");
+    // 离线消息）；发送在该对端的后台任务中进行。
+    let _ = sync_tx.send(SyncJob::Up(peer));
+}
+
+/// 交给对端后台同步任务的作业。
+enum SyncJob {
+    Up(PeerInfo),
+    Offer(PeerInfo, crate::sync::OfferPlan),
+}
+
+/// 单个对端的出站同步任务：按入队顺序串行执行，发送端被丢弃后退出。
+async fn sync_worker(sync: crate::sync::SyncEngine, mut rx: mpsc::UnboundedReceiver<SyncJob>) {
+    while let Some(job) = rx.recv().await {
+        match job {
+            SyncJob::Up(peer) => {
+                if let Err(e) = sync.on_peer_up(&peer).await {
+                    tracing::warn!(peer = %peer.device, error = %e, "SyncOffer 生成失败");
+                }
+            }
+            SyncJob::Offer(peer, plan) => {
+                if let Err(e) = sync.run_offer(&peer, plan).await {
+                    tracing::warn!(peer = %peer.device, error = %e, "SyncOffer 处理失败");
+                }
+            }
+        }
     }
 }
 

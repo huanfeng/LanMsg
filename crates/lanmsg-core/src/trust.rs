@@ -884,16 +884,26 @@ impl Trust {
             self.conns.disconnect(&r.device).await;
         }
         // 转发给其他已连接的自己设备（不含来源与被吊销设备本身）。
-        for p in self.conns.peers() {
-            let mine = p.cert.as_ref().is_some_and(|c| Some(c.user) == self_user)
-                && p.device != from.device
-                && p.device != r.device;
-            if mine {
-                let _ = self
-                    .conns
-                    .send(&p.device, Frame::Revocation(r.clone()))
-                    .await;
-            }
+        // 发送放后台任务：慢对端的写队列不应阻塞事件循环。
+        let targets: Vec<DeviceId> = self
+            .conns
+            .peers()
+            .into_iter()
+            .filter(|p| {
+                p.cert.as_ref().is_some_and(|c| Some(c.user) == self_user)
+                    && p.device != from.device
+                    && p.device != r.device
+            })
+            .map(|p| p.device)
+            .collect();
+        if !targets.is_empty() {
+            let conns = self.conns.clone();
+            let rev = r.clone();
+            tokio::spawn(async move {
+                for d in targets {
+                    let _ = conns.send(&d, Frame::Revocation(rev.clone())).await;
+                }
+            });
         }
         if is_self_user {
             let _ = self.events.send(Event::DevicesChanged);

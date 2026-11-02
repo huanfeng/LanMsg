@@ -28,6 +28,14 @@ pub struct SyncEngine {
     replied: Arc<Mutex<HashSet<(DeviceId, ConvId)>>>,
 }
 
+/// `prepare_offer` 的产物：交给后台任务执行的发送计划。
+pub struct OfferPlan {
+    offer: SyncOffer,
+    local_vv: lanmsg_proto::types::VersionVector,
+    push: bool,
+    reply: bool,
+}
+
 /// 会话成员规则：SelfDevices 仅接受自己用户；Dm 接受自己与对端用户；
 /// 其他 kind（Guest/LocalSend/Station）不参与同步，一律拒绝。
 pub fn conv_member_ok(conv: &ConvRow, author_user: &UserId, self_user: &UserId) -> bool {
@@ -136,15 +144,21 @@ impl SyncEngine {
         self.replied.lock().unwrap().retain(|(d, _)| d != device);
     }
 
-    /// 处理对端 SyncOffer：
+    /// 处理对端 SyncOffer 的同步部分（在事件循环内顺序执行，不 await）：
     /// 1. 会话不存在 → 按创建规则建会话（自己设备按 meta；其他用户仅 dm(self, U)
-    ///    先建 Pending），不满足则丢弃；
-    /// 2. gate ≠ Open → 不推送（待处理的陌生人消息不外传）；
-    /// 3. 对本地向量中的每个作者按 SYNC_BATCH 分批推送差量；
-    /// 4. 对方向量里有我缺的作者 → 回发本端 offer（同一连接同一会话最多一次）。
-    pub async fn on_offer(&self, from: &PeerInfo, offer: SyncOffer) -> Result<(), CoreError> {
+    ///    先建 Pending），不满足则丢弃（返回 None）；
+    /// 2. 计算是否推送（gate = Open）与是否回发本端 offer（对方向量里有我缺的
+    ///    作者，且同一连接同一会话最多一次，去重记录在此登记）。
+    ///
+    /// 建会话必须在循环内完成：同一对端紧随其后的 SyncPush 要求会话已存在。
+    /// 向外发送（可能等待对端写队列）交给 [`SyncEngine::run_offer`] 在后台执行。
+    pub fn prepare_offer(
+        &self,
+        from: &PeerInfo,
+        offer: SyncOffer,
+    ) -> Result<Option<OfferPlan>, CoreError> {
         let Some(cert) = &from.cert else {
-            return Ok(());
+            return Ok(None);
         };
         let self_user = {
             let id = self.identity.read().unwrap();
@@ -156,14 +170,42 @@ impl SyncEngine {
         if self.store.get_conversation(&offer.conv)?.is_none()
             && !self.create_missing_conv(&self_user, peer_user, &offer, now)?
         {
-            return Ok(()); // 不满足创建规则，丢弃
+            return Ok(None); // 不满足创建规则，丢弃
         }
 
         let gate_open = self.store.get_gate(&offer.conv)?.0 == Gate::Open;
         let local_vv = self.store.version_vector(&offer.conv)?;
 
-        // 3. 推送本地有而对方缺的。
-        if gate_open {
+        // 对方有我缺的 → 回发本端 offer（去重防乒乓）。
+        let need = offer
+            .vv
+            .0
+            .iter()
+            .any(|(a, v)| local_vv.0.get(a).is_none_or(|m| v > m));
+        let reply = need
+            && self
+                .replied
+                .lock()
+                .unwrap()
+                .insert((from.device, offer.conv));
+        Ok(Some(OfferPlan {
+            offer,
+            local_vv,
+            push: gate_open,
+            reply,
+        }))
+    }
+
+    /// 执行 [`OfferPlan`] 的发送部分：对本地向量中的每个作者按 SYNC_BATCH 分批
+    /// 推送差量，再按需回发本端 offer。可能长时间等待对端写队列，须在后台任务中调用。
+    pub async fn run_offer(&self, from: &PeerInfo, plan: OfferPlan) -> Result<(), CoreError> {
+        let OfferPlan {
+            offer,
+            local_vv,
+            push,
+            reply,
+        } = plan;
+        if push {
             for (author, mine) in &local_vv.0 {
                 let mut cursor = offer.vv.0.get(author).copied().unwrap_or(0);
                 if cursor >= *mine {
@@ -189,20 +231,7 @@ impl SyncEngine {
                 }
             }
         }
-
-        // 4. 对方有我缺的 → 回发本端 offer（去重防乒乓）。
-        let need = offer
-            .vv
-            .0
-            .iter()
-            .any(|(a, v)| local_vv.0.get(a).is_none_or(|m| v > m));
-        if need
-            && self
-                .replied
-                .lock()
-                .unwrap()
-                .insert((from.device, offer.conv))
-        {
+        if reply {
             let _ = self
                 .conns
                 .send(
