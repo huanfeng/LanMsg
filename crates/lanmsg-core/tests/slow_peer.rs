@@ -181,12 +181,16 @@ async fn slow_peer_does_not_block_other_peers() {
     };
     let mut last = usize::MAX;
     let mut stable = 0;
-    while stable < 3 {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let now = sent.load(Ordering::SeqCst);
-        stable = if now == last { stable + 1 } else { 0 };
-        last = now;
-    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while stable < 3 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let now = sent.load(Ordering::SeqCst);
+            stable = if now == last { stable + 1 } else { 0 };
+            last = now;
+        }
+    })
+    .await
+    .expect("10 秒内写队列未稳定占满");
     assert!(last > 256, "应已占满写队列，实际仅发出 {last} 帧");
 
     // S 请求差量（空向量）：A 须向 S 推送，写队列已满而阻塞。

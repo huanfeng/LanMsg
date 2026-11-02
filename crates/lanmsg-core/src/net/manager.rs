@@ -155,6 +155,8 @@ impl ConnManager {
         let peer_addr = peer_info.addr;
         let self_dev = self.self_device();
 
+        // 假设：对端在自己发 Up 之前不发帧，故宽限期间读循环推送的 Frame 不会
+        // 被外层丢弃；即使丢了，也会由 Up 之后的 SyncOffer 收敛。
         // 同时拨号：裁决保留“拨号方 DeviceId 较小”的连接。本端较大时，本条出站
         // 连接若遇对端同时拨入，必被对端关闭；若此时先登记并发 Up，读循环随后
         // 自清理发 Down，对端拨入连接再发 Up，外层看到 Up/Down/Up。故先在宽限窗口内
@@ -626,6 +628,122 @@ mod tests {
             Ok(None) => panic!("事件通道被提前关闭"),
             Ok(Some(other)) => panic!("不应收到事件，却收到 {:?}", other),
         }
+    }
+
+    /// 生成一对带证书的管理器，使 (larger, smaller) 满足 larger.device > smaller.device
+    /// （与裁决代码一致的 DeviceId 比较），不满足则重新生成。
+    async fn make_ordered_pair() -> (
+        (ConnManager, mpsc::Receiver<ConnEvent>, DeviceId),
+        (ConnManager, mpsc::Receiver<ConnEvent>, DeviceId),
+    ) {
+        loop {
+            let (m1, e1, d1, _) = make_manager_with_cert().await;
+            let (m2, e2, d2, _) = make_manager_with_cert().await;
+            if d1 > d2 {
+                return ((m1, e1, d1), (m2, e2, d2));
+            } else if d2 > d1 {
+                return ((m2, e2, d2), (m1, e1, d1));
+            }
+        }
+    }
+
+    /// 断言双方各恰好一次 Up、连接数为 1、无多余事件，且能互发一帧。
+    async fn assert_single_link_and_exchange(
+        dialer: (&ConnManager, &mut mpsc::Receiver<ConnEvent>, DeviceId),
+        acceptor: (&ConnManager, &mut mpsc::Receiver<ConnEvent>, DeviceId),
+    ) {
+        let (mgr_d, ev_d, dev_d) = dialer;
+        let (mgr_a, ev_a, dev_a) = acceptor;
+        expect_up(ev_d, dev_a).await;
+        expect_up(ev_a, dev_d).await;
+        // 之后不应再有 Up/Down（恰好一次 Up）。
+        expect_no_up(ev_d).await;
+        expect_no_up(ev_a).await;
+        assert_eq!(mgr_d.peers().len(), 1);
+        assert_eq!(mgr_a.peers().len(), 1);
+
+        mgr_d
+            .send(&dev_a, Frame::Presence(lanmsg_proto::types::Status::Online))
+            .await
+            .expect("拨号方发帧失败");
+        match tokio::time::timeout(Duration::from_secs(5), ev_a.recv()).await {
+            Ok(Some(ConnEvent::Frame(d, Frame::Presence(_)))) => assert_eq!(d, dev_d),
+            other => panic!("接受方应收到 Presence，却收到 {:?}", other),
+        }
+        mgr_a
+            .send(&dev_d, Frame::Presence(lanmsg_proto::types::Status::Online))
+            .await
+            .expect("接受方发帧失败");
+        match tokio::time::timeout(Duration::from_secs(5), ev_d.recv()).await {
+            Ok(Some(ConnEvent::Frame(d, Frame::Presence(_)))) => assert_eq!(d, dev_a),
+            other => panic!("拨号方应收到 Presence，却收到 {:?}", other),
+        }
+    }
+
+    /// DeviceId 较大的 A 单向拨较小的 B：出站侧（A.connect）与入站侧（B.accept）
+    /// 都因“拨号方较大”先等待宽限窗口，故两侧 Up 都不早于 DUP_DIAL_GRACE_MS。
+    #[tokio::test]
+    async fn larger_dialer_only_connects_after_grace() {
+        let ((mgr_a, mut ev_a, dev_a), (mgr_b, mut ev_b, dev_b)) = make_ordered_pair().await;
+        assert!(dev_a > dev_b);
+
+        let grace = Duration::from_millis(DUP_DIAL_GRACE_MS);
+        let start = tokio::time::Instant::now();
+        mgr_a
+            .connect(mgr_b.local_addr(), false)
+            .await
+            .expect("A 拨号 B 失败");
+        // 出站侧：connect 返回（已登记并发 Up）不早于宽限。
+        assert!(
+            start.elapsed() >= grace,
+            "出站侧未等待宽限: {:?}",
+            start.elapsed()
+        );
+        expect_up(&mut ev_a, dev_b).await;
+        // 入站侧：B 的 Up 同样不早于宽限（从拨号开始计）。
+        expect_up(&mut ev_b, dev_a).await;
+        assert!(
+            start.elapsed() >= grace,
+            "入站侧未等待宽限: {:?}",
+            start.elapsed()
+        );
+
+        // Up 已消费，这里复核无多余事件、连接数与双向帧。
+        expect_no_up(&mut ev_a).await;
+        expect_no_up(&mut ev_b).await;
+        assert_eq!(mgr_a.peers().len(), 1);
+        assert_eq!(mgr_b.peers().len(), 1);
+        mgr_a
+            .send(&dev_b, Frame::Presence(lanmsg_proto::types::Status::Online))
+            .await
+            .expect("A 发帧失败");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), ev_b.recv()).await,
+            Ok(Some(ConnEvent::Frame(d, Frame::Presence(_)))) if d == dev_a
+        ));
+        mgr_b
+            .send(&dev_a, Frame::Presence(lanmsg_proto::types::Status::Online))
+            .await
+            .expect("B 发帧失败");
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), ev_a.recv()).await,
+            Ok(Some(ConnEvent::Frame(d, Frame::Presence(_)))) if d == dev_b
+        ));
+    }
+
+    /// 较小的 B 拨较大的 A：两侧宽限条件（出站 self>peer、入站 peer>self）均不成立，
+    /// 无需等待直接连上，双方恰好一次 Up、可互发帧。
+    #[tokio::test]
+    async fn smaller_dialer_connects_to_larger_acceptor() {
+        let ((mgr_a, mut ev_a, dev_a), (mgr_b, mut ev_b, dev_b)) = make_ordered_pair().await;
+        assert!(dev_a > dev_b);
+
+        mgr_b
+            .connect(mgr_a.local_addr(), false)
+            .await
+            .expect("B 拨号 A 失败");
+        assert_single_link_and_exchange((&mgr_b, &mut ev_b, dev_b), (&mgr_a, &mut ev_a, dev_a))
+            .await;
     }
 
     #[tokio::test]

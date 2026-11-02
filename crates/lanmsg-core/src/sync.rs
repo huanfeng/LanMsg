@@ -188,10 +188,19 @@ impl SyncEngine {
                 .lock()
                 .unwrap()
                 .insert((from.device, offer.conv));
+        // 本地有对方缺的消息才需要推送。
+        let has_diff = local_vv
+            .0
+            .iter()
+            .any(|(a, m)| offer.vv.0.get(a).copied().unwrap_or(0) < *m);
+        let push = gate_open && has_diff;
+        if !push && !reply {
+            return Ok(None); // 既不推送也不回发，无需后台作业
+        }
         Ok(Some(OfferPlan {
             offer,
             local_vv,
-            push: gate_open,
+            push,
             reply,
         }))
     }
@@ -332,5 +341,68 @@ impl SyncEngine {
             }
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keystore::FileKeyStore;
+    use crate::net::HelloInfo;
+    use lanmsg_proto::types::{DeviceType, PathClass, VersionVector};
+    use tokio::sync::{mpsc, watch};
+
+    /// 本地与对端 vv 相同：既无需推送也无需回发，prepare_offer 返回 None。
+    #[tokio::test]
+    async fn prepare_offer_returns_none_when_vv_equal() {
+        let dir = tempfile::tempdir().unwrap();
+        let ks = FileKeyStore::new(dir.path().join("keys"));
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut identity = Identity::load_or_create(&ks, &store).unwrap();
+        identity
+            .init_first_device(&ks, &store, "本机", DeviceType::Desktop, now_millis())
+            .unwrap();
+        let self_user = identity.user_id().unwrap();
+        let cert = identity.cert.clone().unwrap();
+        let identity = Arc::new(RwLock::new(identity));
+
+        let (_hello_tx, hello_rx) = watch::channel(HelloInfo {
+            display_name: "测试".into(),
+            cert: None,
+            listen_port: 0,
+        });
+        let (events_tx, _events_rx) = mpsc::channel(8);
+        let conns = ConnManager::bind(
+            identity.clone(),
+            0,
+            hello_rx,
+            Arc::new(|_: &PeerInfo| true),
+            events_tx,
+        )
+        .await
+        .unwrap();
+        let engine = SyncEngine::new(store.clone(), identity, conns);
+
+        // 对端为自己的另一台设备（同 user），会话为已存在的 SelfDevices。
+        let addr = "127.0.0.1:1".parse().unwrap();
+        let peer = PeerInfo {
+            device: DeviceId([9u8; 32]),
+            cert: Some(cert),
+            display_name: "对端".into(),
+            addr,
+            dial_addr: addr,
+            path: PathClass::Lan,
+            caps: Vec::new(),
+            outbound: false,
+            tls_exporter: [0u8; 32],
+        };
+        let conv = ConvId::self_devices(&self_user);
+        let vv: VersionVector = store.version_vector(&conv).unwrap();
+        let offer = SyncOffer {
+            conv,
+            vv,
+            meta: None,
+        };
+        assert!(engine.prepare_offer(&peer, offer).unwrap().is_none());
     }
 }

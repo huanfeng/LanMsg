@@ -103,6 +103,9 @@ pub const MAX_FOLDER_ENTRIES: usize = 10_000;
 /// 同步批次大小。
 pub const SYNC_BATCH: usize = 256;
 
+/// 每个对端后台同步任务的作业队列容量（满则丢弃，防远端洪泛放大）。
+pub const SYNC_JOB_QUEUE: usize = 64;
+
 /// 同时拨号宽限窗口（毫秒）：出站连接建立后若本端 DeviceId 大于对端
 /// （按重复连接裁决该出站连接注定被对端关闭），先等待该时长看对端拨入
 /// 的连接是否到达，避免对必被淘汰的连接先发 Up 再发 Down。

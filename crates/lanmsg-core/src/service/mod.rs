@@ -15,7 +15,7 @@ use std::time::SystemTime;
 use tokio::sync::{broadcast, mpsc, watch};
 
 use lanmsg_api::types::Event;
-use lanmsg_proto::consts::{PROTO_VERSION, RETRY_MAX, RETRY_MIN};
+use lanmsg_proto::consts::{PROTO_VERSION, RETRY_MAX, RETRY_MIN, SYNC_JOB_QUEUE};
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{ConvId, DeviceId, UserId};
 use lanmsg_proto::sign::{sign_with_zeroed_sig, DeviceKey};
@@ -400,12 +400,12 @@ async fn routing_task(
     // 处理完队列即退出；对已断开连接的 send 返回 PeerOffline 也会让其快速结束）。
     // 会长时间等待对端写队列的发送放在这里，避免慢对端阻塞整个事件循环；
     // 同一对端的发送按入队顺序串行，入站摄取仍在本循环内顺序处理。
-    let mut sync_workers: HashMap<DeviceId, mpsc::UnboundedSender<SyncJob>> = HashMap::new();
+    let mut sync_workers: HashMap<DeviceId, mpsc::Sender<SyncJob>> = HashMap::new();
     loop {
         tokio::select! {
             evt = conn_rx.recv() => match evt {
                 Some(ConnEvent::Up(peer)) => {
-                    let (tx, rx) = mpsc::unbounded_channel();
+                    let (tx, rx) = mpsc::channel(SYNC_JOB_QUEUE);
                     tokio::spawn(sync_worker(inner.sync.clone(), rx));
                     sync_workers.insert(peer.device, tx.clone());
                     on_up(&inner, peer, &tx).await;
@@ -479,7 +479,7 @@ async fn routing_task(
                             match inner.sync.prepare_offer(&pi, offer) {
                                 Ok(Some(plan)) => {
                                     if let Some(tx) = sync_workers.get(&d) {
-                                        let _ = tx.send(SyncJob::Offer(pi, plan));
+                                        try_enqueue(tx, SyncJob::Offer(pi, plan), &d);
                                     }
                                 }
                                 Ok(None) => {}
@@ -512,7 +512,7 @@ async fn routing_task(
 
 /// 连接上线：设备与用户入库，发 PeerOnline；未初始化对端（cert == None，
 /// 配对流程专用）只记日志，不写库、不发 PeerOnline。
-async fn on_up(inner: &Inner, peer: PeerInfo, sync_tx: &mpsc::UnboundedSender<SyncJob>) {
+async fn on_up(inner: &Inner, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJob>) {
     let Some(cert) = &peer.cert else {
         tracing::debug!(peer = %peer.device, "未初始化对端连接（配对流程专用）");
         return;
@@ -542,7 +542,20 @@ async fn on_up(inner: &Inner, peer: PeerInfo, sync_tx: &mpsc::UnboundedSender<Sy
 
     // 多设备同步：对端上线即互发证书与 SyncOffer（陌生人同样调用，以投递
     // 离线消息）；发送在该对端的后台任务中进行。
-    let _ = sync_tx.send(SyncJob::Up(peer));
+    let device = peer.device;
+    try_enqueue(sync_tx, SyncJob::Up(peer), &device);
+}
+
+/// 非阻塞入队：队列满（对端不读我方数据）则丢弃并告警。丢弃安全：
+/// SyncOffer 可由对端或下次上线重发。返回是否入队成功。
+fn try_enqueue<T>(tx: &mpsc::Sender<T>, job: T, peer: &DeviceId) -> bool {
+    match tx.try_send(job) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(peer = %peer, error = %e, "同步作业队列已满或已关闭，丢弃作业");
+            false
+        }
+    }
 }
 
 /// 交给对端后台同步任务的作业。
@@ -552,7 +565,7 @@ enum SyncJob {
 }
 
 /// 单个对端的出站同步任务：按入队顺序串行执行，发送端被丢弃后退出。
-async fn sync_worker(sync: crate::sync::SyncEngine, mut rx: mpsc::UnboundedReceiver<SyncJob>) {
+async fn sync_worker(sync: crate::sync::SyncEngine, mut rx: mpsc::Receiver<SyncJob>) {
     while let Some(job) = rx.recv().await {
         match job {
             SyncJob::Up(peer) => {
@@ -613,5 +626,28 @@ async fn static_peer_task(inner: Arc<Inner>, addr: SocketAddr) {
                 delay = (delay * 2).min(RETRY_MAX);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    /// 对端不读数据（接收端不消费）时，洪泛入队最多接受 SYNC_JOB_QUEUE 个，
+    /// 其余被丢弃，队列长度有上限。选确定性单测而非网络洪泛：入队决策是
+    /// 唯一的放大点，直接断言它比依赖时序的集成测试稳定。
+    #[test]
+    fn flood_enqueue_is_bounded() {
+        let (tx, mut rx) = mpsc::channel::<u32>(SYNC_JOB_QUEUE);
+        let peer = DeviceId([7u8; 32]);
+        let accepted = (0..(SYNC_JOB_QUEUE * 4) as u32)
+            .filter(|i| try_enqueue(&tx, *i, &peer))
+            .count();
+        assert_eq!(accepted, SYNC_JOB_QUEUE);
+        let mut queued = 0;
+        while rx.try_recv().is_ok() {
+            queued += 1;
+        }
+        assert_eq!(queued, SYNC_JOB_QUEUE);
     }
 }

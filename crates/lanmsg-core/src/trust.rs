@@ -901,7 +901,9 @@ impl Trust {
             let rev = r.clone();
             tokio::spawn(async move {
                 for d in targets {
-                    let _ = conns.send(&d, Frame::Revocation(rev.clone())).await;
+                    if let Err(e) = conns.send(&d, Frame::Revocation(rev.clone())).await {
+                        tracing::debug!(peer = %d, error = %e, "吊销转发发送失败");
+                    }
                 }
             });
         }
