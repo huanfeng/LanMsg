@@ -4,10 +4,10 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch};
 
 use crate::net::conn::{
     Accepted, ConnEvent, Connection, DataHandler, DataStream, ExitCleanup, HelloInfo, PeerInfo,
@@ -66,10 +66,14 @@ impl ConnManager {
         accept_filter: Arc<dyn Fn(&PeerInfo) -> bool + Send + Sync>,
         events: mpsc::Sender<ConnEvent>,
     ) -> Result<ConnManager, CoreError> {
-        let identity_guard = identity.read().await;
-        let device_key = DeviceKey::from_bytes(&identity_guard.device.to_bytes());
-        let self_device = identity_guard.device_id();
-        drop(identity_guard);
+        // 毒化锁说明持锁线程已 panic，沿用仓库 lock().unwrap() 风格直接传播。
+        let (device_key, self_device) = {
+            let identity_guard = identity.read().unwrap();
+            (
+                DeviceKey::from_bytes(&identity_guard.device.to_bytes()),
+                identity_guard.device_id(),
+            )
+        };
 
         let listener = if port == 0 {
             TcpListener::bind("0.0.0.0:0")
@@ -127,7 +131,7 @@ impl ConnManager {
     ) -> Result<DeviceId, CoreError> {
         // 快速路径：若已有连接到该地址且已上线，直接返回该设备。
         {
-            let inner = self.inner.read().await;
+            let inner = self.read_inner();
             for (device, entry) in inner.connections.iter() {
                 if entry.peer_addr == addr && entry.up_sent {
                     return Ok(*device);
@@ -135,24 +139,28 @@ impl ConnManager {
             }
         }
 
-        let hello = self.build_hello().await;
+        let hello = self.build_hello();
         let cleanup = make_exit_cleanup(&self.inner);
         let (peer_info, connection) = Connection::connect_outbound(
             addr,
-            &*self.device_key().await,
-            self.self_device().await,
+            &self.device_key(),
+            self.self_device(),
             &hello,
-            self.events_clone().await,
+            self.events_clone(),
             cleanup,
         )
         .await?;
 
         let device = peer_info.device;
         let peer_addr = peer_info.addr;
-        let self_dev = self.self_device().await;
+        let self_dev = self.self_device();
+
+        // 先预留事件通道名额（可能 await），再在锁内同步完成裁决/登记/发 Up：
+        // 名额发送是同步的，Up 与读循环自清理后的 Down 仍严格有序，且锁内不 await。
+        let permit = self.events_clone().reserve_owned().await.ok();
 
         // 重复连接裁决：同一设备已有连接时，保留"拨号方 DeviceId 较小"的那条。
-        let mut inner = self.inner.write().await;
+        let mut inner = self.write_inner();
         if let Some(existing) = inner.connections.get(&device) {
             let existing_dialer = existing.dialer_device;
             if existing_dialer <= self_dev {
@@ -182,7 +190,9 @@ impl ConnManager {
         }
 
         connection.set_up_sent();
-        let _ = inner.events.send(ConnEvent::Up(peer_info.clone())).await;
+        if let Some(permit) = permit {
+            permit.send(ConnEvent::Up(peer_info.clone()));
+        }
         inner.connections.insert(
             device,
             ConnectionEntry {
@@ -201,36 +211,38 @@ impl ConnManager {
 
     /// 发送帧：未连接 → `CoreError::PeerOffline`。
     pub async fn send(&self, device: &DeviceId, frame: Frame) -> Result<(), CoreError> {
-        let inner = self.inner.read().await;
-        match inner.connections.get(device) {
-            Some(entry) => entry.connection.send(device, frame).await,
+        // 锁内只取出连接句柄，释放锁后再 await 发送（写队列满时不阻塞其他查询）。
+        let connection = self
+            .read_inner()
+            .connections
+            .get(device)
+            .map(|e| e.connection.clone());
+        match connection {
+            Some(connection) => connection.send(device, frame).await,
             None => Err(CoreError::PeerOffline),
         }
     }
 
     /// 所有已连接对端的 PeerInfo（应用证书覆盖）。
     pub fn peers(&self) -> Vec<PeerInfo> {
-        let inner = self.inner.try_read().ok();
-        match inner {
-            Some(inner) => inner
-                .connections
-                .values()
-                .filter(|e| e.up_sent)
-                .map(|e| {
-                    let mut pi = e.connection.peer_info().clone();
-                    Self::apply_cert_override(&inner, &mut pi);
-                    pi
-                })
-                .collect(),
-            None => Vec::new(),
-        }
+        let inner = self.read_inner();
+        inner
+            .connections
+            .values()
+            .filter(|e| e.up_sent)
+            .map(|e| {
+                let mut pi = e.connection.peer_info().clone();
+                Self::apply_cert_override(&inner, &mut pi);
+                pi
+            })
+            .collect()
     }
 
     /// 更新对端证书视图（收到对端 CertUpdate 时调用）。
     ///
     /// 仅当该设备连接存在时记录；连接重建或断开时覆盖被清除，以新握手为准。
     pub(crate) async fn update_peer_cert(&self, device: &DeviceId, cert: DeviceCert) {
-        let inner = self.inner.write().await;
+        let inner = self.read_inner();
         if inner.connections.contains_key(device) {
             let _ = inner.cert_overrides.lock().unwrap().insert(*device, cert);
         }
@@ -238,15 +250,11 @@ impl ConnManager {
 
     /// 是否已与指定设备建立连接。
     pub fn is_connected(&self, device: &DeviceId) -> bool {
-        let inner = self.inner.try_read().ok();
-        match inner {
-            Some(inner) => inner
-                .connections
-                .get(device)
-                .map(|e| e.up_sent)
-                .unwrap_or(false),
-            None => false,
-        }
+        self.read_inner()
+            .connections
+            .get(device)
+            .map(|e| e.up_sent)
+            .unwrap_or(false)
     }
 
     /// 断开与指定设备的连接。
@@ -254,17 +262,21 @@ impl ConnManager {
     /// 显式断开时由本函数补发 Down 通知外层（读循环退出自清理时条目已移除，
     /// 不会再发，保证 Down 恰好一次）。
     pub async fn disconnect(&self, device: &DeviceId) {
-        let mut inner = self.inner.write().await;
+        // 先预留名额再持锁：锁内同步移除并发 Down，锁内不 await。
+        let permit = self.events_clone().reserve_owned().await.ok();
+        let mut inner = self.write_inner();
         if let Some(entry) = inner.connections.remove(device) {
             entry.connection.shutdown();
-            let _ = inner.events.send(ConnEvent::Down(*device)).await;
+            if let Some(permit) = permit {
+                permit.send(ConnEvent::Down(*device));
+            }
         }
         let _ = inner.cert_overrides.lock().unwrap().remove(device);
     }
 
     /// 关闭所有连接与监听器。
     pub async fn shutdown(&self) {
-        let mut inner = self.inner.write().await;
+        let mut inner = self.write_inner();
         for (_device, entry) in inner.connections.drain() {
             entry.connection.shutdown();
         }
@@ -275,23 +287,18 @@ impl ConnManager {
 
     /// 把存储的证书覆盖应用到对端信息上（覆盖不存在时保持握手值）。
     fn apply_cert_override(inner: &Inner, pi: &mut PeerInfo) {
-        if let Ok(map) = inner.cert_overrides.try_lock() {
-            if let Some(cert) = map.get(&pi.device) {
-                pi.cert = Some(cert.clone());
-            }
+        // cert_overrides 锁仅在极短的同步区间内持有，直接阻塞获取。
+        let map = inner.cert_overrides.lock().unwrap();
+        if let Some(cert) = map.get(&pi.device) {
+            pi.cert = Some(cert.clone());
         }
     }
 
     /// 注册数据连接处理器（SyncEngine 等模块在启动时调用）。
     ///
-    /// 约定在服务启动早期、无并发持锁时调用；写锁被占用说明违反该约定，
-    /// 按 fail-fast 直接 panic。
+    /// std 写锁持有时间极短，阻塞获取即可。
     pub fn set_data_handler(&self, h: DataHandler) {
-        let mut inner = self
-            .inner
-            .try_write()
-            .expect("set_data_handler 需要写锁空闲：应在服务启动早期调用");
-        inner.data_handler = Some(h);
+        self.write_inner().data_handler = Some(h);
     }
 
     /// 数据连接：向 `peer.dial_addr` 拨号（不用 `addr`：被拨方看到的是对端
@@ -299,10 +306,10 @@ impl ConnManager {
     pub async fn open_data(&self, device: &DeviceId) -> Result<DataStream, CoreError> {
         let peer = self.peer(device).ok_or(CoreError::PeerOffline)?;
         let addr = peer.dial_addr;
-        let device_key = self.device_key().await;
+        let device_key = self.device_key();
         // 未初始化设备没有证书，无法自证身份，数据通道不可用。
         let own_cert = {
-            let inner = self.inner.read().await;
+            let inner = self.read_inner();
             let cert = inner.hello_rx.borrow().cert.clone();
             cert
         }
@@ -330,7 +337,7 @@ impl ConnManager {
 
     /// 查询已上线对端的信息（含 tls_exporter 与 dial_addr；应用证书覆盖）。
     pub fn peer(&self, device: &DeviceId) -> Option<PeerInfo> {
-        let inner = self.inner.try_read().ok()?;
+        let inner = self.read_inner();
         let mut pi = inner
             .connections
             .get(device)
@@ -340,8 +347,17 @@ impl ConnManager {
         Some(pi)
     }
 
-    async fn build_hello(&self) -> HelloInfo {
-        let hello_info = self.inner.read().await.hello_rx.borrow().clone();
+    // 以下辅助均为同步：锁毒化说明持锁线程已 panic，沿用仓库 lock().unwrap() 风格传播。
+    fn read_inner(&self) -> std::sync::RwLockReadGuard<'_, Inner> {
+        self.inner.read().unwrap()
+    }
+
+    fn write_inner(&self) -> std::sync::RwLockWriteGuard<'_, Inner> {
+        self.inner.write().unwrap()
+    }
+
+    fn build_hello(&self) -> HelloInfo {
+        let hello_info = self.read_inner().hello_rx.borrow().clone();
         HelloInfo {
             display_name: hello_info.display_name,
             cert: hello_info.cert,
@@ -349,16 +365,16 @@ impl ConnManager {
         }
     }
 
-    async fn device_key(&self) -> Arc<DeviceKey> {
-        self.inner.read().await.device_key.clone()
+    fn device_key(&self) -> Arc<DeviceKey> {
+        self.read_inner().device_key.clone()
     }
 
-    async fn self_device(&self) -> DeviceId {
-        self.inner.read().await.self_device
+    fn self_device(&self) -> DeviceId {
+        self.read_inner().self_device
     }
 
-    async fn events_clone(&self) -> mpsc::Sender<ConnEvent> {
-        self.inner.read().await.events.clone()
+    fn events_clone(&self) -> mpsc::Sender<ConnEvent> {
+        self.read_inner().events.clone()
     }
 }
 
@@ -371,7 +387,7 @@ fn make_exit_cleanup(inner: &Arc<RwLock<Inner>>) -> ExitCleanup {
     Arc::new(move |conn_id| {
         let inner = Arc::clone(&inner);
         Box::pin(async move {
-            let mut guard = inner.write().await;
+            let mut guard = inner.write().unwrap();
             let mine = guard
                 .connections
                 .iter()
@@ -399,7 +415,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
         let inner_clone = inner.clone();
         tokio::spawn(async move {
             let (self_device, device_key, accept_filter, data_handler, events, cleanup) = {
-                let guard = inner_clone.read().await;
+                let guard = inner_clone.read().unwrap();
                 (
                     guard.self_device,
                     DeviceKey::from_bytes(&guard.device_key.to_bytes()),
@@ -411,7 +427,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
             };
 
             let hello_info = {
-                let guard = inner_clone.read().await;
+                let guard = inner_clone.read().unwrap();
                 let borrowed = guard.hello_rx.borrow();
                 HelloInfo {
                     display_name: borrowed.display_name.clone(),
@@ -420,6 +436,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                 }
             };
 
+            let events_for_up = events.clone();
             match Connection::accept_channel(
                 stream,
                 &device_key,
@@ -434,7 +451,9 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
             {
                 Ok(Accepted::Control(peer_info, connection)) => {
                     let device = peer_info.device;
-                    let mut guard = inner_clone.write().await;
+                    // 先预留事件名额再持锁，锁内同步发 Up，不跨 await 持锁。
+                    let permit = events_for_up.reserve_owned().await.ok();
+                    let mut guard = inner_clone.write().unwrap();
                     // 重复连接裁决：入站连接的拨号方为 peer。
                     let replaced = if let Some(existing) = guard.connections.get(&device) {
                         let existing_dialer = existing.dialer_device;
@@ -454,7 +473,9 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                     // 仅新登记才发 Up：替换路径上旧连接已发过 Up 且从未离线，
                     // 重复 Up 会破坏外层在线计数（被替换连接退出也不再发 Down）。
                     if !replaced {
-                        let _ = guard.events.send(ConnEvent::Up(peer_info.clone())).await;
+                        if let Some(permit) = permit {
+                            permit.send(ConnEvent::Up(peer_info.clone()));
+                        }
                     }
                     guard.connections.insert(
                         device,
@@ -485,7 +506,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
 mod tests {
     use super::*;
     use std::time::Duration;
-    use tokio::sync::{mpsc, watch, RwLock};
+    use tokio::sync::{mpsc, watch};
 
     use crate::identity::Identity;
     use lanmsg_proto::ids::DeviceId;
@@ -646,6 +667,53 @@ mod tests {
         }
         assert_eq!(up_a, 1, "A 应恰好收到 1 次 Up");
         assert_eq!(up_b, 1, "B 应恰好收到 1 次 Up");
+    }
+
+    /// 回归：有 send 在写队列上挂起（对端事件通道不被消费 → 读循环停滞 → 写队列
+    /// 逐步占满）并持续有写锁请求时，peer()/peers()/is_connected() 仍须返回对端，
+    /// 不得因 try_read 失败而返回空。
+    #[tokio::test]
+    async fn peer_lookup_not_blocked_by_pending_writer() {
+        let (mgr_a, mut events_a, _dev_a) = make_manager().await;
+        let (mgr_b, _events_b, dev_b) = make_manager().await;
+        mgr_a
+            .connect(mgr_b.local_addr(), false)
+            .await
+            .expect("拨号失败");
+        expect_up(&mut events_a, dev_b).await;
+
+        // 持续发送且不消费 B 的事件，直到发送方在写队列上挂起。
+        let sender = mgr_a.clone();
+        let flood = tokio::spawn(async move {
+            loop {
+                if sender
+                    .send(&dev_b, Frame::Presence(lanmsg_proto::types::Status::Online))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        // 同时不断发起需要写锁的操作（update_peer_cert 外的写路径：disconnect 的
+        // 对象不存在时也会取写锁）。
+        let writer = mgr_a.clone();
+        let churn = tokio::spawn(async move {
+            let ghost = DeviceKey::generate().device_id();
+            loop {
+                writer.disconnect(&ghost).await;
+                tokio::task::yield_now().await;
+            }
+        });
+
+        for _ in 0..200 {
+            assert!(mgr_a.is_connected(&dev_b), "is_connected 不应返回 false");
+            assert!(mgr_a.peer(&dev_b).is_some(), "peer 不应返回 None");
+            assert_eq!(mgr_a.peers().len(), 1, "peers 不应返回空");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        flood.abort();
+        churn.abort();
     }
 
     #[tokio::test]

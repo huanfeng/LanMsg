@@ -13,14 +13,14 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Seek, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
 // AsyncRead/AsyncSeek/AsyncWrite 仅被 cfg(test) 的 read_segment 使用。
 #[cfg(test)]
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use lanmsg_api::types::{Event, SettingsDto};
@@ -294,7 +294,7 @@ impl TransferEngine {
         }
         match err.take() {
             None => {
-                let self_device = self.identity.read().await.device_id();
+                let self_device = self.identity.read().unwrap().device_id();
                 if let Some(msg) = self.finalize(&row, &mb.meta, &self_device).await {
                     self.fail(&row, &msg);
                 }
@@ -621,7 +621,7 @@ impl TransferEngine {
     /// 候选为空时：向已连接的自己设备与该会话对端设备发 BlobQuery，
     /// 等待 BLOB_QUERY_WAIT 让持有者应答回填。
     async fn solicit(&self, hash: &BlobHash, conv: &ConvId, token: &CancellationToken) {
-        let self_user = self.identity.read().await.user_id();
+        let self_user = self.identity.read().unwrap().user_id();
         let peer_user = self
             .store
             .get_conversation(conv)
@@ -752,7 +752,7 @@ impl TransferEngine {
             tracing::warn!(error = %e, "记录本机为持有者失败");
         }
         // 向已连接的自己设备发 BlobHave，让其他设备知道本机持有。
-        let self_user = self.identity.read().await.user_id();
+        let self_user = self.identity.read().unwrap().user_id();
         for p in self.conns.peers() {
             if p.cert.as_ref().is_some_and(|c| Some(c.user) == self_user) {
                 if let Err(e) = self

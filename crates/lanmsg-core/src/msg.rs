@@ -3,10 +3,10 @@
 // 注释中文，标识符英文。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use tracing::warn;
 
 use lanmsg_api::types::Event;
@@ -163,17 +163,17 @@ impl Messaging {
         controls_events: bool,
     ) -> Result<MsgId, CoreError> {
         // 1. 未初始化 → NotInitialized。
-        let identity = self.identity.read().await;
-        if !identity.is_initialized() {
-            return Err(CoreError::NotInitialized);
-        }
-        let self_device = identity.device_id();
-        let self_user = match identity.user_id() {
-            Some(u) => u,
-            None => return Err(CoreError::NotInitialized),
+        let (self_device, self_user, device_key_bytes) = {
+            let identity = self.identity.read().unwrap();
+            if !identity.is_initialized() {
+                return Err(CoreError::NotInitialized);
+            }
+            let self_user = match identity.user_id() {
+                Some(u) => u,
+                None => return Err(CoreError::NotInitialized),
+            };
+            (identity.device_id(), self_user, identity.device.to_bytes())
         };
-        let device_key_bytes = identity.device.to_bytes();
-        drop(identity);
 
         // 2. 会话必须存在。
         let conv_row = self
@@ -304,13 +304,14 @@ impl Messaging {
         folder_root: Option<PathBuf>,
     ) -> Result<MsgId, CoreError> {
         // 1. 未初始化 → NotInitialized；会话不存在 → NotFound。
-        let identity = self.identity.read().await;
-        if !identity.is_initialized() {
-            return Err(CoreError::NotInitialized);
-        }
-        let self_device = identity.device_id();
-        let self_user = identity.user_id().ok_or(CoreError::NotInitialized)?;
-        drop(identity);
+        let (self_device, self_user) = {
+            let identity = self.identity.read().unwrap();
+            if !identity.is_initialized() {
+                return Err(CoreError::NotInitialized);
+            }
+            let self_user = identity.user_id().ok_or(CoreError::NotInitialized)?;
+            (identity.device_id(), self_user)
+        };
         self.store
             .get_conversation(conv)?
             .ok_or_else(|| CoreError::NotFound(format!("会话不存在: {conv}")))?;
@@ -386,17 +387,17 @@ impl Messaging {
     /// finish_preparing → MessageUpdated → 按 targets 发 SyncPush。
     /// 任一文件失败 → 删 preparing 行并发 MessageUpdated（state Failed）。
     async fn run_prepare(&self, row: PreparingRow) {
-        let identity = self.identity.read().await;
-        if !identity.is_initialized() {
-            return; // 服务已关闭，静默放弃
-        }
-        let self_device = identity.device_id();
-        let self_user = match identity.user_id() {
-            Some(u) => u,
-            None => return,
+        let (self_device, self_user, device_key_bytes) = {
+            let identity = self.identity.read().unwrap();
+            if !identity.is_initialized() {
+                return; // 服务已关闭，静默放弃
+            }
+            let self_user = match identity.user_id() {
+                Some(u) => u,
+                None => return,
+            };
+            (identity.device_id(), self_user, identity.device.to_bytes())
         };
-        let device_key_bytes = identity.device.to_bytes();
-        drop(identity);
 
         match self.prepare_envelope(&row, &device_key_bytes).await {
             Ok(env) => {
@@ -566,10 +567,10 @@ impl Messaging {
     /// - `Ack`：对自己发的且状态为 Sending/Sent 的消息置 Delivered，发 `MessageUpdated`。
     /// - 其他帧：忽略。
     pub async fn on_frame(&self, from: DeviceId, frame: Frame) -> Result<(), CoreError> {
-        let identity = self.identity.read().await;
-        let self_user = identity.user_id();
-        let self_device = identity.device_id();
-        drop(identity);
+        let (self_user, self_device) = {
+            let identity = self.identity.read().unwrap();
+            (identity.user_id(), identity.device_id())
+        };
 
         match frame {
             Frame::SyncPush(push) => {
@@ -804,10 +805,7 @@ impl Messaging {
 
     /// 打开与指定用户的 DM 会话，返回会话 ID。
     pub fn open_dm(&self, peer_user: &UserId) -> Result<ConvId, CoreError> {
-        let identity = self
-            .identity
-            .try_read()
-            .map_err(|_| CoreError::NotInitialized)?;
+        let identity = self.identity.read().unwrap();
         let self_user = identity.user_id().ok_or(CoreError::NotInitialized)?;
 
         let conv = ConvId::dm(&self_user, peer_user);

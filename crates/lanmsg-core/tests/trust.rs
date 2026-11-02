@@ -7,9 +7,9 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use tokio::sync::{broadcast, mpsc, watch, RwLock};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use lanmsg_api::types::{
     ErrorCode, Event, MessageState, Request, RequestAction, RequestKind, Response,
@@ -203,7 +203,7 @@ async fn raw_node() -> RawNode {
     )
     .await
     .unwrap();
-    if let Some(cert) = identity.read().await.cert.clone() {
+    if let Some(cert) = identity.read().unwrap().cert.clone() {
         let _ = hello_tx.send_replace(HelloInfo {
             display_name: cert.device_name.clone(),
             cert: Some(cert),
@@ -250,7 +250,7 @@ async fn raw_pair() -> (RawNode, RawNode) {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     for (src, dst) in [(&a, &b), (&b, &a)] {
-        let cert = src.identity.read().await.cert.clone().unwrap();
+        let cert = src.identity.read().unwrap().cert.clone().unwrap();
         dst.store
             .upsert_device(&DeviceRow {
                 device: src.device,
@@ -960,7 +960,7 @@ async fn stranger_file_request_kind_is_file() {
         enc: None,
         sig: Signature64([0u8; 64]),
     };
-    let key_bytes = a.identity.read().await.device.to_bytes();
+    let key_bytes = a.identity.read().unwrap().device.to_bytes();
     let key = DeviceKey::from_bytes(&key_bytes);
     sign_with_zeroed_sig(&mut env, |b| key.sign(b));
 

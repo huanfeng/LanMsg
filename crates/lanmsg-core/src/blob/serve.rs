@@ -4,14 +4,13 @@
 // 一律 NotFound），再做 verify_source 确认本地文件仍与记录一致。
 // 注释中文，标识符英文。
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use lanmsg_proto::consts::DATA_IDLE_TIMEOUT;
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{BlobHash, DeviceId};
 use lanmsg_proto::types::{BlobHave, BlobQuery};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::RwLock;
 
 use crate::error::CoreError;
 use crate::identity::Identity;
@@ -70,7 +69,7 @@ impl BlobServer {
             let Some(cert) = peer.cert.clone() else {
                 return Ok(());
             };
-            let Some(self_user) = self.identity.read().await.user_id() else {
+            let Some(self_user) = self.identity.read().unwrap().user_id() else {
                 return Ok(());
             };
             if !self.store.blob_visible_to(&hash, &cert.user, &self_user)? {

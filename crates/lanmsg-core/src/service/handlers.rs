@@ -84,7 +84,7 @@ pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiE
 }
 
 async fn get_self(inner: &Inner) -> Result<Response, ApiError> {
-    let id = inner.identity.read().await;
+    let id = inner.identity.read().unwrap();
     let st = inner.state.read().unwrap();
     let display = inner.store.get_setting("display_name").ok().flatten();
     let device_name = inner.store.get_setting("device_name").ok().flatten();
@@ -112,7 +112,7 @@ async fn init(
     match mode {
         InitMode::JoinExisting => {
             // 已初始化 → AlreadyInitialized；未初始化 → 记录待接入标记。
-            let initialized = inner.identity.read().await.is_initialized();
+            let initialized = inner.identity.read().unwrap().is_initialized();
             if initialized {
                 return Err(ApiError {
                     code: ErrorCode::AlreadyInitialized,
@@ -135,7 +135,7 @@ async fn init(
     let now = now_millis();
 
     {
-        let mut id = inner.identity.write().await;
+        let mut id = inner.identity.write().unwrap();
         id.init_first_device(
             inner.keystore.as_ref(),
             &inner.store,
@@ -145,7 +145,7 @@ async fn init(
         )?;
     }
 
-    let user = inner.identity.read().await.user_id().ok_or(ApiError {
+    let user = inner.identity.read().unwrap().user_id().ok_or(ApiError {
         code: ErrorCode::Internal,
         message: "初始化后缺少用户身份".into(),
     })?;
@@ -170,7 +170,7 @@ async fn init(
         .map_err(crate::error::CoreError::from)?;
 
     // 自己的设备行。
-    let cert = inner.identity.read().await.cert.clone();
+    let cert = inner.identity.read().unwrap().cert.clone();
     if let Some(cert) = &cert {
         inner
             .store
@@ -216,7 +216,7 @@ async fn set_status(inner: &Inner, status: StatusDto) -> Result<Response, ApiErr
     inner.state.write().unwrap().status = status.clone();
 
     // 更新 announce：已初始化且非 Invisible 时为 Some。
-    let initialized = inner.identity.read().await.is_initialized();
+    let initialized = inner.identity.read().unwrap().is_initialized();
     if initialized && !matches!(status, Status::Invisible) {
         let display = inner
             .store
@@ -309,7 +309,7 @@ async fn list_messages(
         .store
         .list_messages(&conv, before.as_ref(), limit)
         .map_err(crate::error::CoreError::from)?;
-    let self_device = inner.identity.read().await.device_id();
+    let self_device = inner.identity.read().unwrap().device_id();
     let peers = inner.conns.peers();
     let mut value: Vec<lanmsg_api::types::MessageView> = msgs
         .iter()
@@ -420,7 +420,7 @@ async fn list_contacts(inner: &Inner) -> Result<Response, ApiError> {
         .list_contacts(Some(crate::store::ContactState::Accepted))
         .map_err(crate::error::CoreError::from)?;
     let peers = inner.conns.peers();
-    let self_device = inner.identity.read().await.device_id();
+    let self_device = inner.identity.read().unwrap().device_id();
     let value = rows
         .iter()
         .map(|row| crate::service::views::contact_view(&inner.store, &peers, row, &self_device))
@@ -506,7 +506,7 @@ async fn list_my_devices(inner: &Inner) -> Result<Response, ApiError> {
         .store
         .devices_of_user(&self_user)
         .map_err(crate::error::CoreError::from)?;
-    let self_device = inner.identity.read().await.device_id();
+    let self_device = inner.identity.read().unwrap().device_id();
     let peers = inner.conns.peers();
     let value = rows
         .iter()
@@ -586,11 +586,11 @@ async fn set_settings(inner: &Inner, settings: SettingsDto) -> Result<Response, 
 
     // 设备名变化且已初始化 → 重签证书并广播。
     let renamed = old.as_deref() != Some(settings.device_name.as_str());
-    let initialized = inner.identity.read().await.is_initialized();
+    let initialized = inner.identity.read().unwrap().is_initialized();
     if renamed && initialized {
         let now = now_millis();
         let new_cert = {
-            let mut id = inner.identity.write().await;
+            let mut id = inner.identity.write().unwrap();
             id.reissue_cert(&inner.store, &settings.device_name, now)?
         };
         apply_cert_and_broadcast(inner, &new_cert).await;
@@ -781,7 +781,7 @@ async fn recall(inner: &Inner, msg: String) -> Result<Response, ApiError> {
         .await?;
     // 存储层已在插入 Recall 信封时把目标置 Recalled；重取并发 MessageUpdated。
     if let Ok(Some(fresh)) = inner.store.get_message(&id) {
-        let self_device = inner.identity.read().await.device_id();
+        let self_device = inner.identity.read().unwrap().device_id();
         let peers = inner.conns.peers();
         let _ = inner.events.send(Event::MessageUpdated {
             msg: message_view(inner.store.as_ref(), &self_device, &peers, &fresh),

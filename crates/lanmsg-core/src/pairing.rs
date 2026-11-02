@@ -13,7 +13,7 @@ use data_encoding::BASE32_NOPAD;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
-use tokio::sync::{broadcast, watch, RwLock};
+use tokio::sync::{broadcast, watch};
 
 use lanmsg_api::types::{Event, PairSessionInfo, PairStateDto, PairTarget};
 use lanmsg_proto::frame::Frame;
@@ -288,7 +288,7 @@ struct Active {
 /// Pairing 依赖集合（Service 组装时一次注入）。
 pub(crate) struct PairingDeps {
     pub(crate) store: Arc<Store>,
-    pub(crate) identity: Arc<RwLock<Identity>>,
+    pub(crate) identity: Arc<StdRwLock<Identity>>,
     pub(crate) keystore: Arc<dyn KeyStore>,
     pub(crate) conns: ConnManager,
     pub(crate) msg: Messaging,
@@ -303,7 +303,7 @@ pub(crate) struct PairingDeps {
 
 struct PairingInner {
     store: Arc<Store>,
-    identity: Arc<RwLock<Identity>>,
+    identity: Arc<StdRwLock<Identity>>,
     keystore: Arc<dyn KeyStore>,
     conns: ConnManager,
     msg: Messaging,
@@ -353,7 +353,7 @@ impl Pairing {
         ttl: Duration,
     ) -> Result<PairSessionInfo, CoreError> {
         let device = {
-            let id = self.inner.identity.read().await;
+            let id = self.inner.identity.read().unwrap();
             if !id.is_initialized() {
                 return Err(CoreError::NotInitialized);
             }
@@ -398,7 +398,7 @@ impl Pairing {
         target: PairTarget,
         discovered: &crate::discovery::DiscoveredTable,
     ) -> Result<PairSessionInfo, CoreError> {
-        if self.inner.identity.read().await.is_initialized() {
+        if self.inner.identity.read().unwrap().is_initialized() {
             return Err(CoreError::AlreadyInitialized);
         }
         if self
@@ -785,7 +785,7 @@ impl Pairing {
 
         let cert = bundle.device_cert.clone();
         {
-            let mut id = self.inner.identity.write().await;
+            let mut id = self.inner.identity.write().unwrap();
             id.adopt_user(
                 self.inner.keystore.as_ref(),
                 &self.inner.store,
@@ -915,7 +915,7 @@ impl Pairing {
 
         // SelfDevices 会话发可见系统消息。
         let self_user = {
-            let id = self.inner.identity.read().await;
+            let id = self.inner.identity.read().unwrap();
             id.user_id()
         };
         if let Some(u) = self_user {
@@ -1015,7 +1015,7 @@ impl Pairing {
             }
         };
         let (user_secret, user) = {
-            let id = self.inner.identity.read().await;
+            let id = self.inner.identity.read().unwrap();
             let key = id.user.as_ref().ok_or(CoreError::NotInitialized)?;
             (key.to_bytes(), key.user_id())
         };
@@ -1129,7 +1129,7 @@ impl Pairing {
 
     /// 本机设备 ID。
     async fn self_device(&self) -> DeviceId {
-        self.inner.identity.read().await.device_id()
+        self.inner.identity.read().unwrap().device_id()
     }
 
     /// 发配对状态事件。

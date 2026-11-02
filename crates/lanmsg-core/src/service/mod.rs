@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::SystemTime;
 
-use tokio::sync::{broadcast, mpsc, watch, RwLock};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use lanmsg_api::types::Event;
 use lanmsg_proto::consts::{PROTO_VERSION, RETRY_MAX, RETRY_MIN};
@@ -59,7 +59,7 @@ pub(crate) struct NodeState {
 /// Service 内部共享状态（C6）。
 pub(crate) struct Inner {
     pub(crate) store: Arc<Store>,
-    pub(crate) identity: Arc<RwLock<Identity>>,
+    pub(crate) identity: Arc<StdRwLock<Identity>>,
     pub(crate) keystore: Arc<dyn KeyStore>,
     pub(crate) conns: ConnManager,
     pub(crate) msg: Messaging,
@@ -135,7 +135,7 @@ impl Service {
         let store = Arc::new(Store::open(&data_dir.join("lanmsg.db"))?);
         // 每次启动记录数据目录（load_settings 的默认下载目录依赖它）。
         store.set_setting("data_dir", &data_dir.to_string_lossy())?;
-        let identity = Arc::new(RwLock::new(Identity::load_or_create(
+        let identity = Arc::new(StdRwLock::new(Identity::load_or_create(
             keystore.as_ref(),
             &store,
         )?));
@@ -149,7 +149,7 @@ impl Service {
         });
         let (announce_tx, announce_rx) = watch::channel(None);
 
-        let self_user = identity.read().await.user_id();
+        let self_user = identity.read().unwrap().user_id();
         let state = Arc::new(StdRwLock::new(NodeState {
             status: Status::Online,
             self_user,
@@ -220,8 +220,8 @@ impl Service {
 
         // 已初始化：立即填充 HelloInfo 与 announce（announce 依赖 bind 后才知道端口）。
         let display = store.get_setting("display_name")?.unwrap_or_default();
-        if identity.read().await.is_initialized() {
-            let cert = identity.read().await.cert.clone();
+        if identity.read().unwrap().is_initialized() {
+            let cert = identity.read().unwrap().cert.clone();
             hello_tx.send_replace(HelloInfo {
                 display_name: display.clone(),
                 cert,
@@ -235,7 +235,7 @@ impl Service {
         }
 
         let (disc_tx, disc_rx) = mpsc::channel::<DiscoveryEvent>(64);
-        let self_device = identity.read().await.device_id();
+        let self_device = identity.read().unwrap().device_id();
         let discovery = Discovery::spawn(discovery, self_device, announce_rx, disc_tx);
 
         // 「我的设备」配对（P2 Task 7）。
@@ -367,12 +367,12 @@ impl Service {
 
 /// 构造已签名的自身通告；未初始化返回 None。
 pub(crate) async fn build_announce(
-    identity: &RwLock<Identity>,
+    identity: &StdRwLock<Identity>,
     display_name: &str,
     status: Status,
     port: u16,
 ) -> Option<Announce> {
-    let id = identity.read().await;
+    let id = identity.read().unwrap();
     let cert = id.cert.clone()?;
     let mut ann = Announce {
         proto: PROTO_VERSION,
@@ -436,7 +436,7 @@ async fn routing_task(
                     // 停止通告并清自身用户（之后按未初始化处理）。
                     Frame::Revocation(r) => {
                         if let Some(pi) = inner.conns.peer(&d) {
-                            let was_self = inner.identity.read().await.device_id() == r.device;
+                            let was_self = inner.identity.read().unwrap().device_id() == r.device;
                             match inner.trust.on_revocation(&pi, r.clone()).await {
                                 Ok(true) if was_self => {
                                     let mut hello = inner.hello_tx.borrow().clone();
@@ -544,7 +544,7 @@ async fn on_discovery(inner: &Inner, de: DiscoveryEvent) {
             return;
         }
     }
-    let self_device = inner.identity.read().await.device_id();
+    let self_device = inner.identity.read().unwrap().device_id();
     if self_device >= peer_device {
         return;
     }

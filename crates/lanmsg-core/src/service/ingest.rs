@@ -146,7 +146,7 @@ async fn on_read(svc: &Inner, m: &StoredMessage, upto: &Hlc) {
     if ids.is_empty() {
         return;
     }
-    let self_device = svc.identity.read().await.device_id();
+    let self_device = svc.identity.read().unwrap().device_id();
     let peers = svc.conns.peers();
     for id in ids {
         if let Ok(Some(sm)) = svc.store.get_message(&id) {
@@ -174,7 +174,7 @@ async fn on_recall(svc: &Inner, m: &StoredMessage, target: &MsgId) {
             && m.env.hlc.millis.saturating_sub(t.env.hlc.millis) <= window_millis);
     match (valid, target_msg) {
         (true, Some(t)) => {
-            let self_device = svc.identity.read().await.device_id();
+            let self_device = svc.identity.read().unwrap().device_id();
             let peers = svc.conns.peers();
             let _ = svc.events.send(Event::MessageUpdated {
                 msg: crate::service::views::message_view(

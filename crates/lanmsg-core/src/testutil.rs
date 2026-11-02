@@ -2,10 +2,10 @@
 // Node / pair_of_nodes / next_event，用于消息收发测试。
 // 注释中文，标识符英文。
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use tokio::sync::{broadcast, mpsc, watch, RwLock};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{ConvId, DeviceId, MsgId};
@@ -75,7 +75,7 @@ pub async fn node() -> Node {
 
     // init_first_device。
     {
-        let mut id = identity.write().await;
+        let mut id = identity.write().unwrap();
         id.init_first_device(
             &ks,
             &store,
@@ -87,11 +87,11 @@ pub async fn node() -> Node {
     }
 
     let user = {
-        let id = identity.read().await;
+        let id = identity.read().unwrap();
         id.user_id().unwrap()
     };
     let device = {
-        let id = identity.read().await;
+        let id = identity.read().unwrap();
         id.device_id()
     };
 
@@ -112,7 +112,7 @@ pub async fn node() -> Node {
 
     // 更新 HelloInfo 中的 cert。
     {
-        let id = identity.read().await;
+        let id = identity.read().unwrap();
         if let Some(cert) = &id.cert {
             let _ = hello_tx.send_replace(HelloInfo {
                 display_name: cert.device_name.clone(),

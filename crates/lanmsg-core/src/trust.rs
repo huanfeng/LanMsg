@@ -4,11 +4,11 @@
 // （自身设备同步与配对包共用）。
 // 注释中文，标识符英文。
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use rand::RngCore;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 
 use lanmsg_api::types::Event;
 use lanmsg_proto::consts::STRANGER_GATE_WINDOW;
@@ -55,7 +55,7 @@ pub(crate) fn accept_rules(
         return false;
     }
     // 规则 3：自己的设备 → 接受。
-    let self_user = identity.try_read().ok().and_then(|id| id.user_id());
+    let self_user = identity.read().unwrap().user_id();
     if self_user.is_some_and(|u| u == cert.user) {
         return true;
     }
@@ -227,7 +227,7 @@ impl Trust {
     async fn self_user(&self) -> Result<UserId, CoreError> {
         self.identity
             .read()
-            .await
+            .unwrap()
             .user_id()
             .ok_or(CoreError::NotInitialized)
     }
@@ -732,7 +732,7 @@ impl Trust {
         let Some(from_cert) = &from.cert else {
             return Ok(());
         };
-        let self_user = self.identity.try_read().ok().and_then(|id| id.user_id());
+        let self_user = self.identity.read().unwrap().user_id();
         let mut forward: Vec<DeviceCert> = Vec::new();
         for cert in certs {
             if cert.verify().is_err() {
@@ -806,7 +806,7 @@ impl Trust {
     /// 在 SelfDevices 会话发可见消息 System{DeviceRemoved} 并发 DevicesChanged。
     pub async fn revoke(&self, msg: &Messaging, device: &DeviceId) -> Result<(), CoreError> {
         let self_user = self.self_user().await?;
-        let self_device = self.identity.read().await.device_id();
+        let self_device = self.identity.read().unwrap().device_id();
         if *device == self_device {
             return Err(CoreError::InvalidArgument("不能移除本机".into()));
         }
@@ -819,7 +819,7 @@ impl Trust {
         }
         // 吊销记录须由用户密钥签发（读锁作用域内取引用，无 await 穿越锁）。
         let rev = {
-            let id = self.identity.read().await;
+            let id = self.identity.read().unwrap();
             let user = id.user.as_ref().ok_or(CoreError::NotInitialized)?;
             Revocation::issue(user, *device, now_millis())
         };
@@ -862,7 +862,7 @@ impl Trust {
         if r.verify().is_err() {
             return Err(CoreError::Rejected("吊销记录验签失败".into()));
         }
-        let self_device = self.identity.read().await.device_id();
+        let self_device = self.identity.read().unwrap().device_id();
         let self_user = self_user_now_sync(&self.identity);
         let is_self_user = self_user.is_some_and(|u| u == r.user);
         if !is_self_user && !self.is_contact(&r.user) {
@@ -879,7 +879,7 @@ impl Trust {
         self.store.revoke_device(&r.device)?;
         if r.device == self_device {
             // 本机被吊销：清空内存身份，无连接可断。
-            self.identity.write().await.mark_revoked_self();
+            self.identity.write().unwrap().mark_revoked_self();
         } else {
             self.conns.disconnect(&r.device).await;
         }
@@ -963,9 +963,9 @@ impl Trust {
 
 // ---- 模块级辅助 ----
 
-/// 当前用户 ID（同步路径；锁被占用时返回 None）。
+/// 当前用户 ID（同步路径；std 锁持有极短，直接阻塞读取）。
 fn self_user_now_sync(identity: &RwLock<Identity>) -> Option<UserId> {
-    identity.try_read().ok().and_then(|id| id.user_id())
+    identity.read().unwrap().user_id()
 }
 
 /// 生成随机会话请求 ID。

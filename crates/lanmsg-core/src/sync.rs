@@ -5,9 +5,7 @@
 // 注释中文，标识符英文。
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
-
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 
 use lanmsg_proto::consts::SYNC_BATCH;
 use lanmsg_proto::frame::Frame;
@@ -58,10 +56,7 @@ impl SyncEngine {
         &self,
         peer: &PeerInfo,
     ) -> Result<Vec<(ConvId, Option<ConvMeta>)>, CoreError> {
-        let id = self
-            .identity
-            .try_read()
-            .map_err(|_| CoreError::NotInitialized)?;
+        let id = self.identity.read().unwrap();
         let self_user = id.user_id().ok_or(CoreError::NotInitialized)?;
         let Some(cert) = &peer.cert else {
             return Ok(Vec::new()); // 未初始化对端无可同步
@@ -112,7 +107,7 @@ impl SyncEngine {
             return Ok(());
         };
         let self_user = {
-            let id = self.identity.read().await;
+            let id = self.identity.read().unwrap();
             id.user_id().ok_or(CoreError::NotInitialized)?
         };
 
@@ -152,7 +147,7 @@ impl SyncEngine {
             return Ok(());
         };
         let self_user = {
-            let id = self.identity.read().await;
+            let id = self.identity.read().unwrap();
             id.user_id().ok_or(CoreError::NotInitialized)?
         };
         let now = now_millis();
