@@ -244,7 +244,9 @@ impl Trust {
         let row = ContactRow {
             user: *user,
             state,
-            auto_accept: prev.as_ref().map(|r| r.auto_accept).unwrap_or(false),
+            // 新建联系人行时默认 true（计划迁移 2：auto_accept DEFAULT 1）；
+            // 已有行保留原值。
+            auto_accept: prev.as_ref().map(|r| r.auto_accept).unwrap_or(true),
             ask_above_bytes: prev.and_then(|r| r.ask_above_bytes),
             updated: self.next_hlc(),
         };

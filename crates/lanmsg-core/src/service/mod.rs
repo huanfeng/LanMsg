@@ -80,6 +80,8 @@ pub(crate) struct Inner {
     pub(crate) blob: Arc<crate::blob::serve::BlobServer>,
     /// 传输引擎：分段并行、多源、断点续传（P2 Task 12）。
     pub(crate) transfer: Arc<crate::blob::transfer::TransferEngine>,
+    /// 平台钩子：自动下载策略查询网络状态（P2 Task 13）。
+    pub(crate) platform: PlatformHooks,
 }
 
 /// 核心服务（C6）。内部状态由 Arc 持有，Clone 廉价。
@@ -274,6 +276,7 @@ impl Service {
             sync,
             blob,
             transfer,
+            platform,
         });
         let svc = Service {
             inner: inner.clone(),

@@ -310,9 +310,10 @@ async fn list_messages(
         .list_messages(&conv, before.as_ref(), limit)
         .map_err(crate::error::CoreError::from)?;
     let self_device = inner.identity.read().await.device_id();
+    let peers = inner.conns.peers();
     let mut value: Vec<lanmsg_api::types::MessageView> = msgs
         .iter()
-        .map(|m| message_view(inner.store.as_ref(), &self_device, m))
+        .map(|m| message_view(inner.store.as_ref(), &self_device, &peers, m))
         .collect();
     // 首页（before == None）时把准备中的文件消息按 hlc 追加在末尾；
     // 视图构造要 stat 文件系统，放 spawn_blocking。
@@ -781,8 +782,9 @@ async fn recall(inner: &Inner, msg: String) -> Result<Response, ApiError> {
     // 存储层已在插入 Recall 信封时把目标置 Recalled；重取并发 MessageUpdated。
     if let Ok(Some(fresh)) = inner.store.get_message(&id) {
         let self_device = inner.identity.read().await.device_id();
+        let peers = inner.conns.peers();
         let _ = inner.events.send(Event::MessageUpdated {
-            msg: message_view(inner.store.as_ref(), &self_device, &fresh),
+            msg: message_view(inner.store.as_ref(), &self_device, &peers, &fresh),
         });
     }
     Ok(Response::Ok)

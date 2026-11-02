@@ -5,7 +5,7 @@
 
 use lanmsg_proto::consts::RECALL_WINDOW;
 use lanmsg_proto::ids::{BlobHash, DeviceId, MsgId, UserId};
-use lanmsg_proto::types::{ContactRecord, MsgBody, SystemEvent};
+use lanmsg_proto::types::{BlobMeta, ContactRecord, MsgBody, SystemEvent};
 
 use crate::identity::{hex_decode, hex_encode};
 use crate::service::{build_announce, now_millis, Inner};
@@ -28,10 +28,16 @@ pub(crate) async fn after_ingest(svc: &Inner, _from: DeviceId, m: &StoredMessage
         MsgBody::Read { upto } => on_read(svc, m, upto).await,
         MsgBody::Recall { target } => on_recall(svc, m, target).await,
         MsgBody::Files { items } => {
-            on_blobs_received(svc, m, items.iter().map(|b| b.hash).collect()).await
+            let hashes = items.iter().map(|b| b.hash).collect();
+            on_blobs_received(svc, m, hashes).await;
+            let metas = items.clone();
+            auto_download_blobs(svc, _from, m, &metas).await;
         }
         MsgBody::Folder { entries, .. } => {
-            on_blobs_received(svc, m, entries.iter().map(|e| e.blob.hash).collect()).await
+            let hashes = entries.iter().map(|e| e.blob.hash).collect();
+            on_blobs_received(svc, m, hashes).await;
+            let metas: Vec<BlobMeta> = entries.iter().map(|e| e.blob.clone()).collect();
+            auto_download_blobs(svc, _from, m, &metas).await;
         }
         _ => {}
     }
@@ -44,6 +50,63 @@ async fn on_blobs_received(svc: &Inner, m: &StoredMessage, hashes: Vec<BlobHash>
     for h in hashes {
         if let Err(e) = svc.store.add_holder(&h, &m.env.id.author, now) {
             tracing::warn!(error = %e, "记录 Blob 持有者失败");
+        }
+    }
+}
+
+/// 收到 Files/Folder 时按策略自动下载（P2 Task 13）：对每个 blob 构造
+/// PolicyCtx（path 取 from 设备当前连接路径，回退 devices.last_path；无路径
+/// 信息则不下载），should_auto_download 为真才调 TransferEngine::download；
+/// 已本地/已在传的错误忽略。
+async fn auto_download_blobs(svc: &Inner, from: DeviceId, m: &StoredMessage, metas: &[BlobMeta]) {
+    let Some(self_user) = svc.state.read().unwrap().self_user else {
+        return;
+    };
+    let author_user = device_user(svc, &m.env.id.author);
+    let from_self = author_user.as_ref() == Some(&self_user);
+    let contact = author_user
+        .as_ref()
+        .and_then(|u| svc.store.get_contact(u).ok().flatten());
+    // from 设备的连接路径：优先当前连接，回退设备行 last_path；两者都无则
+    // 无法判定路径 → 不自动下载（保守方向是禁而不是放）。
+    let path = svc.conns.peer(&from).map(|p| p.path).or_else(|| {
+        svc.store
+            .get_device(&from)
+            .ok()
+            .flatten()
+            .and_then(|r| r.last_path)
+    });
+    let Some(path) = path else {
+        return;
+    };
+    // 会话 gate 对陌生人开放（"接收一次"）的上下文记录（策略规则 1 已把
+    // 陌生人排除，此字段仅作上下文）。
+    let gate_open_stranger = contact.is_none()
+        && matches!(
+            svc.store.get_gate(&m.env.conv).map(|(g, _)| g),
+            Ok(crate::store::Gate::Open)
+        );
+    let net = svc.platform.network();
+    let ctx = crate::blob::policy::PolicyCtx {
+        path,
+        net,
+        from_self,
+        contact,
+        gate_open_stranger,
+    };
+    let settings = match crate::settings::load_settings(&svc.store) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "自动下载读取设置失败");
+            return;
+        }
+    };
+    for meta in metas {
+        if crate::blob::policy::should_auto_download(meta, &settings, &ctx) {
+            if let Err(e) = svc.transfer.clone().download(meta.hash).await {
+                // 已在本地 / 已在传：正常情形，跳过；其余记日志。
+                tracing::debug!(error = %e, "自动下载未发起");
+            }
         }
     }
 }
@@ -84,10 +147,16 @@ async fn on_read(svc: &Inner, m: &StoredMessage, upto: &Hlc) {
         return;
     }
     let self_device = svc.identity.read().await.device_id();
+    let peers = svc.conns.peers();
     for id in ids {
         if let Ok(Some(sm)) = svc.store.get_message(&id) {
             let _ = svc.events.send(Event::MessageUpdated {
-                msg: crate::service::views::message_view(svc.store.as_ref(), &self_device, &sm),
+                msg: crate::service::views::message_view(
+                    svc.store.as_ref(),
+                    &self_device,
+                    &peers,
+                    &sm,
+                ),
             });
         }
     }
@@ -106,8 +175,14 @@ async fn on_recall(svc: &Inner, m: &StoredMessage, target: &MsgId) {
     match (valid, target_msg) {
         (true, Some(t)) => {
             let self_device = svc.identity.read().await.device_id();
+            let peers = svc.conns.peers();
             let _ = svc.events.send(Event::MessageUpdated {
-                msg: crate::service::views::message_view(svc.store.as_ref(), &self_device, &t),
+                msg: crate::service::views::message_view(
+                    svc.store.as_ref(),
+                    &self_device,
+                    &peers,
+                    &t,
+                ),
             });
         }
         _ => {

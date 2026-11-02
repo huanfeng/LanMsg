@@ -11,18 +11,114 @@ use lanmsg_api::types::{
 use lanmsg_proto::ids::{DeviceId, MsgId, UserId};
 use lanmsg_proto::types::{BlobMeta, MsgBody};
 
+use crate::settings::SETTING_DATA_DIR;
 use crate::store::{ConvRow, MsgStateRow, PreparingKind, PreparingRow, Store, StoredMessage};
 
-/// 由 Blob 元数据构造文件项视图：本地有对应文件 → Local，否则 Remote
-/// （自动下载策略在 Task 13 引入）。`source_label` 先给出作者名，
-/// 持有者在线与下载状态的完整描述由 Task 13 完善。
-fn file_item_view(
+/// 由 Blob 元数据构造文件项视图（P2 Task 13 完整公式）。
+///
+/// - `state`：会话内有 preparing 行且条目名匹配 → `Preparing`；本地有 →
+///   `Local`；该 hash 传输活动中（Queued/Running）→ `Downloading`；有已连接
+///   的持有者 → `Remote`；否则 `SourceOffline`。
+/// - `thumb_path`：meta.thumb 存在时写 `<data_dir>/cache/thumbs/<hash>.jpg`
+///   （已存在则跳过写）并返回该路径。
+/// - `source_label`：本地有 → `"来自 {作者} · 已下载"`；否则 `"来自 {作者} ·
+///   存于 {首个在线持有者设备名 | 首个持有者设备名 | 作者设备名}"`。
+///
+/// `peers` 为当前已连接对端（在线持有者判定）；`author_display` 为已按
+/// is_mine 解析的作者显示名（自己显示为"我"）。
+pub(crate) fn file_item_view(
     store: &Store,
+    peers: &[PeerInfo],
+    author_device: &DeviceId,
     meta: &BlobMeta,
-    is_mine: bool,
-    author_name: &str,
+    author_display: &str,
 ) -> FileItemView {
     let local = store.get_local(&meta.hash).ok().flatten();
+    let online_holder = store
+        .holders(&meta.hash)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|d| peers.iter().any(|p| p.device == *d));
+    // 会话内有同名条目的 preparing 行 → 正在准备（发送方重启场景兜底）。
+    let in_preparing = store
+        .list_preparing()
+        .unwrap_or_default()
+        .iter()
+        .any(|row| {
+            row.paths.iter().any(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy() == meta.name.as_str())
+                    .unwrap_or(false)
+            })
+        });
+    let active_transfer = store
+        .transfer_for_hash(&meta.hash)
+        .ok()
+        .flatten()
+        .is_some_and(|t| {
+            matches!(
+                t.state,
+                crate::store::TransferState::Queued | crate::store::TransferState::Running
+            )
+        });
+
+    let state = if in_preparing {
+        BlobState::Preparing
+    } else if local.is_some() {
+        BlobState::Local
+    } else if active_transfer {
+        BlobState::Downloading
+    } else if online_holder.is_some() {
+        BlobState::Remote
+    } else {
+        BlobState::SourceOffline
+    };
+
+    // 缩略图：meta.thumb 有内容时落盘到缓存目录（已存在则跳过写）。
+    let thumb_path = match meta.thumb.as_deref() {
+        Some(bytes) if !bytes.is_empty() => {
+            let data_dir = store
+                .get_setting(SETTING_DATA_DIR)
+                .ok()
+                .flatten()
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            let dir = data_dir.join("cache").join("thumbs");
+            let path = dir.join(format!("{}.jpg", meta.hash.to_hex()));
+            if !path.exists() {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(&path, bytes);
+            }
+            Some(path.to_string_lossy().into_owned())
+        }
+        _ => None,
+    };
+
+    // 来源描述：设备名兜底链（在线持有者 → 首个持有者 → 作者设备）。
+    let device_name_of = |d: &DeviceId| {
+        store
+            .get_device(d)
+            .ok()
+            .flatten()
+            .map(|r| r.name)
+            .unwrap_or_else(|| d.short())
+    };
+    let holders = store.holders(&meta.hash).unwrap_or_default();
+    let source_label = if local.is_some() {
+        format!("来自 {author_display} · 已下载")
+    } else {
+        let holder_name = online_holder
+            .as_ref()
+            .map(device_name_of)
+            .unwrap_or_else(|| {
+                holders
+                    .first()
+                    .map(device_name_of)
+                    .unwrap_or_else(|| device_name_of(author_device))
+            });
+        format!("来自 {author_display} · 存于 {holder_name}")
+    };
+
     FileItemView {
         hash: meta.hash.to_hex(),
         name: meta.name.clone(),
@@ -31,23 +127,12 @@ fn file_item_view(
         width: meta.media.as_ref().map(|m| m.width),
         height: meta.media.as_ref().map(|m| m.height),
         duration_ms: meta.media.as_ref().and_then(|m| m.duration_ms),
-        thumb_path: None,
+        thumb_path,
         local_path: local
             .as_ref()
             .map(|l| l.path.to_string_lossy().into_owned()),
-        state: if local.is_some() {
-            BlobState::Local
-        } else {
-            BlobState::Remote
-        },
-        source_label: format!(
-            "来自 {}",
-            if is_mine {
-                "我".to_string()
-            } else {
-                author_name.to_string()
-            }
-        ),
+        state,
+        source_label,
     }
 }
 
@@ -139,9 +224,15 @@ pub fn preparing_view(
 ///
 /// - `author_device_name` 取 devices 表 name（无则 device short）。
 /// - `is_mine` = 作者用户为自己（通过 devices 表的 user 字段比较）。
-/// - `body`：Text → `Text`，其余 → `Unsupported`。
+/// - `body`：Text → `Text`；Files/Folder 经 file_item_view（Task 13 完整
+///   公式）；其余 → `Unsupported`。
 /// - `state` 由 `MsgStateRow` 一一映射。
-pub fn message_view(store: &Store, self_device: &DeviceId, m: &StoredMessage) -> MessageView {
+pub fn message_view(
+    store: &Store,
+    self_device: &DeviceId,
+    peers: &[PeerInfo],
+    m: &StoredMessage,
+) -> MessageView {
     let env = &m.env;
     let author_device = env.id.author;
 
@@ -161,7 +252,7 @@ pub fn message_view(store: &Store, self_device: &DeviceId, m: &StoredMessage) ->
         None => (author_device.short(), String::new()),
     };
 
-    // 撤回提示用作者显示名（users 表优先，无则设备名）。
+    // 撤回提示与文件来源描述用作者显示名（users 表优先，无则设备名）。
     let author_display_name = author_user
         .and_then(|u| store.get_user(u).ok().flatten())
         .map(|ur| ur.display_name)
@@ -177,14 +268,16 @@ pub fn message_view(store: &Store, self_device: &DeviceId, m: &StoredMessage) ->
         (MsgBody::Files { items }, _) => MessageBodyView::Files {
             items: items
                 .iter()
-                .map(|b| file_item_view(store, b, is_mine, &author_display_name))
+                .map(|b| file_item_view(store, peers, &author_device, b, &author_display_name))
                 .collect(),
         },
         (MsgBody::Folder { name, entries }, _) => MessageBodyView::Folder {
             name: name.clone(),
             items: entries
                 .iter()
-                .map(|e| file_item_view(store, &e.blob, is_mine, &author_display_name))
+                .map(|e| {
+                    file_item_view(store, peers, &author_device, &e.blob, &author_display_name)
+                })
                 .collect(),
         },
         _ => MessageBodyView::Unsupported,

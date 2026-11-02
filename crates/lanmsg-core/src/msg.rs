@@ -218,7 +218,12 @@ impl Messaging {
                 state: MsgStateRow::Sending,
                 received_at,
             };
-            let msg_view = message_view(self.store.as_ref(), &self_device, &stored);
+            let msg_view = message_view(
+                self.store.as_ref(),
+                &self_device,
+                &self.conns.peers(),
+                &stored,
+            );
             let _ = self.events.send(Event::MessageAdded {
                 msg: msg_view.clone(),
             });
@@ -415,7 +420,12 @@ impl Messaging {
                 // MessageUpdated（重取以反映 Sending/Sent 最新状态）。
                 if let Ok(Some(m)) = self.store.get_message(&env.id) {
                     let _ = self.events.send(Event::MessageUpdated {
-                        msg: message_view(self.store.as_ref(), &self_device, &m),
+                        msg: message_view(
+                            self.store.as_ref(),
+                            &self_device,
+                            &self.conns.peers(),
+                            &m,
+                        ),
                     });
                 }
             }
@@ -690,8 +700,12 @@ impl Messaging {
                                     state: MsgStateRow::Delivered,
                                     received_at: wall,
                                 };
-                                let msg_view =
-                                    message_view(self.store.as_ref(), &self_device, &stored);
+                                let msg_view = message_view(
+                                    self.store.as_ref(),
+                                    &self_device,
+                                    &self.conns.peers(),
+                                    &stored,
+                                );
                                 let _ = self.events.send(Event::MessageAdded { msg: msg_view });
 
                                 let conv_row = self.store.get_conversation(&env.conv)?.unwrap();
@@ -772,7 +786,12 @@ impl Messaging {
                     };
                     if delivered {
                         self.store.set_message_state(&id, MsgStateRow::Delivered)?;
-                        let msg_view = message_view(self.store.as_ref(), &self_device, &m);
+                        let msg_view = message_view(
+                            self.store.as_ref(),
+                            &self_device,
+                            &self.conns.peers(),
+                            &m,
+                        );
                         let _ = self.events.send(Event::MessageUpdated { msg: msg_view });
                     }
                 }

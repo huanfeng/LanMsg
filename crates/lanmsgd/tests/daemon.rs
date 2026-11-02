@@ -112,3 +112,232 @@ async fn second_daemon_refuses_to_start() {
 
     first.kill().await.ok();
 }
+
+/// 显式指定子进程的 XDG_RUNTIME_DIR（客户端侧手工构造同一端点，
+/// 避免污染测试进程环境）。
+fn spawn_daemon_env(dir: &tempfile::TempDir, args: &[&str]) -> tokio::process::Child {
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_lanmsgd"))
+        .args(args)
+        .env("XDG_RUNTIME_DIR", dir.path().join("run"))
+        .spawn()
+        .expect("lanmsgd 子进程启动失败")
+}
+
+/// 与 spawn_daemon_env 注入的 XDG_RUNTIME_DIR 对应的 IPC 端点（Unix 分支
+/// 的 endpoint_name 实现为 <XDG_RUNTIME_DIR>/lanmsg/lanmsgd.sock）。
+fn runtime_endpoint(dir: &tempfile::TempDir) -> String {
+    dir.path()
+        .join("run")
+        .join("lanmsg")
+        .join("lanmsgd.sock")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// 轮询连接指定端点，最多 10 秒。
+async fn connect_endpoint_with_retry(endpoint: &str) -> IpcClient {
+    let start = std::time::Instant::now();
+    loop {
+        match IpcClient::connect(endpoint).await {
+            Ok(c) => return c,
+            Err(_) if start.elapsed() < std::time::Duration::from_secs(10) => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("端点 {endpoint} 无法连接: {e}"),
+        }
+    }
+}
+
+/// 两个 lanmsgd 子进程 --peer 互指，走完整 CLI 流程：init → 互加联系人 →
+/// SendFiles 4MB → DownloadBlob → 等 TransferFinished → 比对内容。
+#[tokio::test]
+async fn two_daemons_transfer_file_via_cli_flow() {
+    let _serial = SERIAL.lock().await;
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    // 单向静态拨号（B --peer A）：双向同时 --peer 会触发 simultaneous_dial
+    // 裁决抖动（已知既有问题），单向与 e2e-two-daemons.sh 一致且稳定；
+    // 连接建立后双向对等。
+    let port_a = "53350";
+    let port_b = "53351";
+    let addr_a = format!("127.0.0.1:{port_a}");
+
+    let mut a = spawn_daemon_env(
+        &dir_a,
+        &[
+            "--no-multicast",
+            "--port",
+            port_a,
+            "--data-dir",
+            dir_a.path().to_str().unwrap(),
+        ],
+    );
+    let mut b = spawn_daemon_env(
+        &dir_b,
+        &[
+            "--no-multicast",
+            "--port",
+            port_b,
+            "--data-dir",
+            dir_b.path().to_str().unwrap(),
+            "--peer",
+            &addr_a,
+        ],
+    );
+
+    let client_a = connect_endpoint_with_retry(&runtime_endpoint(&dir_a)).await;
+    let client_b = connect_endpoint_with_retry(&runtime_endpoint(&dir_b)).await;
+
+    // 各自初始化。
+    for (c, name, dev) in [(&client_a, "甲", "甲机"), (&client_b, "乙", "乙机")] {
+        c.call(Request::Init {
+            display_name: name.into(),
+            device_name: dev.into(),
+            mode: InitMode::FirstDevice,
+        })
+        .await
+        .unwrap();
+    }
+    let user_a = match client_a.call(Request::GetSelf).await.unwrap() {
+        Response::SelfInfo { value } => value.user_id.unwrap(),
+        other => panic!("期望 SelfInfo，实际 {other:?}"),
+    };
+
+    // 等 B 的 ListPeers 出现 A（静态拨号建立连接）。
+    let start = std::time::Instant::now();
+    loop {
+        let seen = matches!(
+            client_b.call(Request::ListPeers).await.unwrap(),
+            lanmsg_api::types::Response::Peers { ref value }
+                if value.iter().any(|p| p.display_name == "甲")
+        );
+        if seen {
+            break;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            panic!("10 秒内 B 未发现 A");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // B request-contact A → A respond add。
+    client_b
+        .call(Request::RequestContact {
+            user: user_a.clone(),
+        })
+        .await
+        .unwrap();
+    let mut events_a = client_a.events();
+    let req = loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(10), events_a.recv()).await {
+            Ok(Ok(lanmsg_api::types::Event::IncomingRequest { request })) => {
+                if matches!(request.kind, lanmsg_api::types::RequestKind::Contact) {
+                    break request.request;
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => {}
+            Err(_) => panic!("10 秒内未收到联系人请求"),
+        }
+    };
+    client_a
+        .call(Request::RespondRequest {
+            request: req,
+            action: lanmsg_api::types::RequestAction::AddContact,
+        })
+        .await
+        .unwrap();
+
+    // B 打开 DM 并发 4MB 文件。
+    let conv = match client_b
+        .call(Request::OpenDm { user: user_a })
+        .await
+        .unwrap()
+    {
+        Response::ConvId { value } => value,
+        other => panic!("期望 ConvId，实际 {other:?}"),
+    };
+    let src_dir = tempfile::tempdir().unwrap();
+    let src = src_dir.path().join("吞吐.bin");
+    let payload: Vec<u8> = (0..(4 * 1024 * 1024)).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&src, &payload).unwrap();
+    client_b
+        .call(Request::SendFiles {
+            conv: conv.clone(),
+            paths: vec![src.to_string_lossy().into_owned()],
+        })
+        .await
+        .unwrap();
+
+    // A 等 MessageAdded 拿到 hash。
+    let hash = loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(15), events_a.recv()).await {
+            Ok(Ok(lanmsg_api::types::Event::MessageAdded { msg })) => {
+                if let lanmsg_api::types::MessageBodyView::Files { items } = &msg.body {
+                    if let Some(it) = items.iter().find(|it| !it.hash.is_empty()) {
+                        break it.hash.clone();
+                    }
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => {}
+            Err(_) => panic!("15 秒内未收到文件消息"),
+        }
+    };
+
+    // A 发起下载并等 TransferFinished ok。
+    let transfer = match client_a
+        .call(Request::DownloadBlob { hash: hash.clone() })
+        .await
+        .unwrap()
+    {
+        Response::TransferId { value } => value,
+        other => panic!("期望 TransferId，实际 {other:?}"),
+    };
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), events_a.recv()).await {
+            Ok(Ok(lanmsg_api::types::Event::TransferFinished {
+                transfer: t, ok, ..
+            })) if t == transfer => {
+                assert!(ok, "下载应成功");
+                break;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => {}
+            Err(_) => panic!("30 秒内下载未完成"),
+        }
+    }
+
+    // 比对内容：从 files-of 视角（ListMessages）取 local_path 读文件。
+    let msgs = match client_a
+        .call(Request::ListMessages {
+            conv,
+            before: None,
+            limit: 100,
+        })
+        .await
+        .unwrap()
+    {
+        Response::Messages { value } => value,
+        other => panic!("期望 Messages，实际 {other:?}"),
+    };
+    let mut local_path = None;
+    for m in msgs {
+        if let lanmsg_api::types::MessageBodyView::Files { items } = &m.body {
+            for it in items {
+                if it.hash == hash {
+                    local_path = it.local_path.clone();
+                }
+            }
+        }
+    }
+    let local_path = local_path.expect("下载后应有本地路径");
+    let got = std::fs::read(&local_path).expect("读取下载文件失败");
+    assert_eq!(got, payload, "下载内容应与源文件一致");
+
+    // 收尾：两个 daemon 退出。
+    client_a.call(Request::Shutdown).await.unwrap();
+    client_b.call(Request::Shutdown).await.unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), a.wait()).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), b.wait()).await;
+}

@@ -6,8 +6,10 @@
 mod common;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
-use common::{befriend, link, node, node_offline, node_offline_with, pair, wait_until};
+use common::{befriend, link, node, node_offline, node_offline_with, node_with, pair, wait_until};
 use lanmsg_api::types::{BlobState, Event, InitMode, MessageBodyView, Request, Response};
 use lanmsg_core::blob::transfer::{sanitize_component, unique_path};
 use lanmsg_core::blob::walk_folder;
@@ -91,13 +93,9 @@ async fn send_and_wait(
     let preparing = wait_file_item(a, |it| it.state == BlobState::Preparing, 5).await;
     assert!(preparing.hash.is_empty(), "Preparing 项 hash 应为空");
     let _ = wait_file_item(a, |it| !it.hash.is_empty(), 5).await;
-    // X：收到最终消息，大小一致、state Remote。
-    let item = wait_file_item(
-        x,
-        |it| !it.hash.is_empty() && it.size == size as u64 && it.state == BlobState::Remote,
-        5,
-    )
-    .await;
+    // X：收到最终消息，大小一致（自动下载开启后 state 可能已是 Local，
+    // 不再限定 Remote）。
+    let item = wait_file_item(x, |it| !it.hash.is_empty() && it.size == size as u64, 5).await;
     (conv, item.hash)
 }
 
@@ -313,12 +311,16 @@ fn find_file(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
 }
 
 /// 我的两台设备：a 已初始化，b 以 JoinExisting 加入并配对。
+/// 两侧注入非 wifi 钩子（见 not_wifi_hooks）——from_self 文件不受规则 5
+/// 限制但 wifi_only 检查在规则 5 内先于阈值，非图片文件不会自动下载，
+/// 供手动下载测试隔离自动下载行为。
 async fn self_device_pair(
     bus: &lanmsg_core::discovery::MemoryBus,
 ) -> (common::TestNode, common::TestNode) {
-    let mut a = node(bus).await;
+    let hooks = not_wifi_hooks();
+    let mut a = node_with(bus, tempfile::tempdir().unwrap(), hooks.clone()).await;
     a.init_first("A").await;
-    let mut b = node(bus).await;
+    let mut b = node_with(bus, tempfile::tempdir().unwrap(), hooks).await;
     b.call(Request::Init {
         display_name: "B".into(),
         device_name: "B".into(),
@@ -331,7 +333,7 @@ async fn self_device_pair(
 
 #[tokio::test]
 async fn download_large_file_in_parallel_segments() {
-    let (mut a, mut x) = contact_pair().await;
+    let (mut a, mut x) = contact_pair_no_auto().await;
     let size = 3 * BLOB_SEGMENT_LEN as usize + 123;
     let src = tempfile::tempdir().unwrap();
     let path = make_file(src.path(), "大文件.bin", size);
@@ -583,7 +585,7 @@ async fn final_hash_mismatch_fails_and_cleans_part() {
 
 #[tokio::test]
 async fn download_zero_byte_file() {
-    let (mut a, mut x) = contact_pair().await;
+    let (mut a, mut x) = contact_pair_no_auto().await;
     let src = tempfile::tempdir().unwrap();
     let path = make_file(src.path(), "空.bin", 0);
     let (_, hash_hex) = send_and_wait(&mut a, &mut x, &path, 0).await;
@@ -659,4 +661,205 @@ fn unique_path_and_sanitize() {
     assert_eq!(sanitize_component("正常名字.txt"), "正常名字.txt");
     // 路径穿越成分被替换。
     assert_eq!(sanitize_component(".."), "_");
+}
+
+// ===== P2 Task 13：自动下载策略与文件视图字段 =====
+
+/// 注入计费网络钩子的节点辅助（is_metered=true、非 wifi/有线）。
+fn metered_hooks() -> PlatformHooks {
+    PlatformHooks {
+        network_state: Some(Arc::new(|| lanmsg_core::platform::NetworkState {
+            is_metered: true,
+            is_wifi_or_wired: false,
+        })),
+        thumbnailer: None,
+    }
+}
+
+/// 轮询 ListMessages 直到找到满足条件的文件项，超时 panic。
+async fn poll_file_item(
+    node: &common::TestNode,
+    conv: &str,
+    f: impl Fn(&lanmsg_api::types::FileItemView) -> bool,
+    secs: u64,
+) -> lanmsg_api::types::FileItemView {
+    let start = std::time::Instant::now();
+    loop {
+        let msgs = match node
+            .try_call(Request::ListMessages {
+                conv: conv.into(),
+                before: None,
+                limit: 100,
+            })
+            .await
+        {
+            Ok(Response::Messages { value }) => value,
+            _ => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        for m in msgs {
+            let items: Vec<_> = match &m.body {
+                MessageBodyView::Files { items } => items.clone(),
+                MessageBodyView::Folder { items, .. } => items.clone(),
+                _ => continue,
+            };
+            if let Some(it) = items.iter().find(|it| f(it)) {
+                return it.clone();
+            }
+        }
+        if start.elapsed() > Duration::from_secs(secs) {
+            panic!("轮询超时：未等到满足条件的文件项");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn small_image_from_contact_auto_downloads() {
+    let (mut a, mut x) = contact_pair().await;
+    let dl = tempfile::tempdir().unwrap();
+    set_download_dir(&x, dl.path()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = make_file(dir.path(), "照片.jpg", 1024 * 1024);
+    let (conv, hash) = send_and_wait(&mut a, &mut x, &path, 1024 * 1024).await;
+    // X 未手动 download；联系人小图片应自动下载完成。
+    let item = poll_file_item(
+        &x,
+        &conv,
+        |it| it.hash == hash && it.state == BlobState::Local,
+        10,
+    )
+    .await;
+    assert!(
+        item.source_label.starts_with("来自 A") && item.source_label.ends_with("已下载"),
+        "source_label 应为 来自 A … 已下载，实际 {}",
+        item.source_label
+    );
+    // 落地内容与源文件一致。
+    let local_path = item.local_path.expect("本地路径应存在");
+    assert_eq!(
+        std::fs::read(&local_path).unwrap(),
+        std::fs::read(&path).unwrap(),
+        "自动下载内容应与源文件一致"
+    );
+}
+
+#[tokio::test]
+async fn large_file_requires_click() {
+    let (mut x, mut a) = contact_pair().await;
+    let dir = tempfile::tempdir().unwrap();
+    // 60MB 超过默认 auto_file_max（50MB）→ 不自动下载。
+    let path = make_file(dir.path(), "大文件.bin", 60 * 1024 * 1024);
+    let (conv, hash) = send_and_wait(&mut x, &mut a, &path, 60 * 1024 * 1024).await;
+    // 持有者（发送方 X）在线，但未点下载：state Remote。
+    let item = poll_file_item(&a, &conv, |it| it.hash == hash, 5).await;
+    assert_eq!(item.state, BlobState::Remote, "未点击下载应保持 Remote");
+    // 1.5 秒窗口内不应出现任何 TransferProgress。
+    a.no_event(
+        |e| matches!(e, Event::TransferProgress { hash: h, .. } if h == &hash),
+        1500,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn metered_network_blocks_file_but_not_image() {
+    let bus = lanmsg_core::discovery::MemoryBus::new();
+    let mut x = node(&bus).await;
+    x.init_first("X").await;
+    // A 注入计费网络（非 wifi）：文件不自动下载，图片不受限。
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = node_with(&bus, dir, metered_hooks()).await;
+    a.init_first("A").await;
+    befriend(&mut x, &mut a).await;
+
+    let src = tempfile::tempdir().unwrap();
+    let jpg = make_file(src.path(), "图.jpg", 1024 * 1024);
+    // zip 用不同内容，避免与 jpg 哈希相同（内容寻址下同一 hash 会互相污染状态）。
+    let zip_path = src.path().join("包.zip");
+    std::fs::write(&zip_path, vec![0x5Au8; 1024 * 1024]).unwrap();
+    let zip = zip_path;
+    let conv = match x.call(Request::OpenDm { user: a.user_id() }).await {
+        Response::ConvId { value } => value,
+        other => panic!("期望 ConvId，实际 {other:?}"),
+    };
+    x.call(Request::SendFiles {
+        conv: conv.clone(),
+        paths: vec![
+            jpg.to_string_lossy().into_owned(),
+            zip.to_string_lossy().into_owned(),
+        ],
+    })
+    .await;
+
+    // 等 A 收到最终消息（两项 hash 齐全）。
+    let item = poll_file_item(
+        &a,
+        &conv,
+        |it| it.mime == "image/jpeg" && !it.hash.is_empty(),
+        10,
+    )
+    .await;
+    let jpg_hash = item.hash.clone();
+    let zip_item = poll_file_item(
+        &a,
+        &conv,
+        |it| it.mime == "application/zip" && !it.hash.is_empty(),
+        10,
+    )
+    .await;
+    let zip_hash = zip_item.hash.clone();
+
+    // 图片应自动下载完成。
+    a.wait_event(
+        |e| matches!(e, Event::TransferFinished { hash: h, ok: true, .. } if h == &jpg_hash),
+        10,
+    )
+    .await;
+    let jpg_item = poll_file_item(
+        &a,
+        &conv,
+        |it| it.hash == jpg_hash && it.state == BlobState::Local,
+        5,
+    )
+    .await;
+    assert!(jpg_item.local_path.is_some(), "图片应已落地");
+
+    // zip 不应出现任何进度或完成事件，state 保持 Remote。
+    a.no_event(
+        |e| {
+            matches!(e, Event::TransferProgress { hash: h, .. } if h == &zip_hash)
+                || matches!(e, Event::TransferFinished { hash: h, .. } if h == &zip_hash)
+        },
+        1500,
+    )
+    .await;
+    let zip_now = poll_file_item(&a, &conv, |it| it.hash == zip_hash, 5).await;
+    assert_eq!(zip_now.state, BlobState::Remote, "计费网络下 zip 不应下载");
+}
+
+/// 注入「非 wifi/有线」钩子：配合默认 auto_file_wifi_only=true，非图片文件
+/// 不会自动下载（策略规则 5），供手动下载测试隔离自动下载行为。
+fn not_wifi_hooks() -> PlatformHooks {
+    PlatformHooks {
+        network_state: Some(Arc::new(|| lanmsg_core::platform::NetworkState {
+            is_metered: false,
+            is_wifi_or_wired: false,
+        })),
+        thumbnailer: None,
+    }
+}
+
+/// 与 contact_pair 相同，但两侧均注入非 wifi 钩子（见 not_wifi_hooks）。
+async fn contact_pair_no_auto() -> (common::TestNode, common::TestNode) {
+    let bus = lanmsg_core::discovery::MemoryBus::new();
+    let hooks = not_wifi_hooks();
+    let mut a = node_with(&bus, tempfile::tempdir().unwrap(), hooks.clone()).await;
+    a.init_first("A").await;
+    let mut x = node_with(&bus, tempfile::tempdir().unwrap(), hooks).await;
+    x.init_first("X").await;
+    befriend(&mut a, &mut x).await;
+    (a, x)
 }

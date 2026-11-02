@@ -783,6 +783,7 @@ impl TransferEngine {
             error: None,
         });
         // 对引用该 blob 的每条消息发 MessageUpdated（视图状态随下载完成变化）。
+        let peers = self.conns.peers();
         for mb in self
             .store
             .message_blobs_by_hash(&row.hash)
@@ -790,7 +791,7 @@ impl TransferEngine {
         {
             if let Ok(Some(sm)) = self.store.get_message(&mb.msg) {
                 let _ = self.events.send(Event::MessageUpdated {
-                    msg: message_view(self.store.as_ref(), self_device, &sm),
+                    msg: message_view(self.store.as_ref(), self_device, &peers, &sm),
                 });
             }
         }

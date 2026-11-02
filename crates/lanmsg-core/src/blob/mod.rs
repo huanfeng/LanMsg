@@ -5,6 +5,7 @@
 
 pub mod hash;
 pub mod mime;
+pub mod policy;
 pub mod serve;
 pub mod transfer;
 

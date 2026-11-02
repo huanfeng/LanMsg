@@ -58,6 +58,17 @@ cli_b peers | grep -q "甲" || {
 USER_A="$(cli_a self | grep '^user_id:' | awk '{print $2}')"
 [ -n "$USER_A" ] || { echo "E2E 失败：未取得 A 的 user_id"; exit 1; }
 
+# 互加联系人（P2 起陌生人消息经门控隐藏，先互加再发消息）。
+cli_b request-contact "$USER_A"
+REQ=""
+for _ in $(seq 1 50); do
+    REQ="$(cli_a requests | awk 'NR==1{print $1}')"
+    [ -n "$REQ" ] && break
+    sleep 0.2
+done
+[ -n "$REQ" ] || { echo "E2E 失败：A 未收到联系人请求"; exit 1; }
+cli_a respond "$REQ" add
+
 # B 打开 DM 并发消息。
 CONV="$(cli_b dm "$USER_A")"
 [ -n "$CONV" ] || { echo "E2E 失败：未取得会话 ID"; exit 1; }
