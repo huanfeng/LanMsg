@@ -13,7 +13,7 @@ use crate::net::conn::{
     Accepted, ConnEvent, Connection, DataHandler, DataStream, ExitCleanup, HelloInfo, PeerInfo,
 };
 use crate::net::tls::{make_tls_configs, TLS_SNI};
-use lanmsg_proto::consts::CHANNEL_DATA;
+use lanmsg_proto::consts::{CHANNEL_DATA, DUP_DIAL_GRACE_MS};
 use lanmsg_proto::data::{write_data_frame, DataFrame};
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::DeviceId;
@@ -154,6 +154,20 @@ impl ConnManager {
         let device = peer_info.device;
         let peer_addr = peer_info.addr;
         let self_dev = self.self_device();
+
+        // 同时拨号：裁决保留“拨号方 DeviceId 较小”的连接。本端较大时，本条出站
+        // 连接若遇对端同时拨入，必被对端关闭；若此时先登记并发 Up，读循环随后
+        // 自清理发 Down，对端拨入连接再发 Up，外层看到 Up/Down/Up。故先在宽限窗口内
+        // 等待对端拨入连接登记；到达则下面的裁决会丢弃本条出站连接（不发 Up）。
+        if self_dev > device {
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(DUP_DIAL_GRACE_MS);
+            while tokio::time::Instant::now() < deadline
+                && !self.read_inner().connections.contains_key(&device)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
 
         // 先预留事件通道名额（可能 await），再在锁内同步完成裁决/登记/发 Up：
         // 名额发送是同步的，Up 与读循环自清理后的 Down 仍严格有序，且锁内不 await。
@@ -451,6 +465,23 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
             {
                 Ok(Accepted::Control(peer_info, connection)) => {
                     let device = peer_info.device;
+                    // 同时拨号：拨入方 DeviceId 较大时，本端若也在向其拨号，该拨入连接
+                    // 必被对端关闭；先登记并发 Up 会在随后读循环自清理时产生 Down，
+                    // 本端出站连接再发 Up。故在宽限窗口内等待本端出站连接登记，
+                    // 登记后下面的裁决会丢弃本条拨入连接（不发 Up）。
+                    if device > self_device {
+                        let deadline = tokio::time::Instant::now()
+                            + std::time::Duration::from_millis(DUP_DIAL_GRACE_MS);
+                        while tokio::time::Instant::now() < deadline
+                            && !inner_clone
+                                .read()
+                                .unwrap()
+                                .connections
+                                .contains_key(&device)
+                        {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    }
                     // 先预留事件名额再持锁，锁内同步发 Up，不跨 await 持锁。
                     let permit = events_for_up.reserve_owned().await.ok();
                     let mut guard = inner_clone.write().unwrap();

@@ -103,6 +103,11 @@ pub const MAX_FOLDER_ENTRIES: usize = 10_000;
 /// 同步批次大小。
 pub const SYNC_BATCH: usize = 256;
 
+/// 同时拨号宽限窗口（毫秒）：出站连接建立后若本端 DeviceId 大于对端
+/// （按重复连接裁决该出站连接注定被对端关闭），先等待该时长看对端拨入
+/// 的连接是否到达，避免对必被淘汰的连接先发 Up 再发 Down。
+pub const DUP_DIAL_GRACE_MS: u64 = 300;
+
 /// TLS 握手后拨号方写的首字节：控制通道。
 pub const CHANNEL_CONTROL: u8 = 0x01;
 
