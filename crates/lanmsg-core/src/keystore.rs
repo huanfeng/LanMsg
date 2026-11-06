@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::KeyStoreError;
 
@@ -20,10 +20,53 @@ pub trait KeyStore: Send + Sync {
     fn delete(&self, name: &str) -> Result<(), KeyStoreError>;
 }
 
+/// 原子写文件：同目录临时文件写入并 fsync，rename 覆盖目标，Unix 上再 fsync 父目录。
+///
+/// `mode_0600` 为真时（仅 Unix 生效）创建即指定 0600。任一步失败都会清理临时文件。
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8], mode_0600: bool) -> io::Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "路径缺少文件名"))?;
+    let tmp_path = path.with_file_name(format!(
+        "{name}.tmp.{}.{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    if mode_0600 {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = mode_0600;
+    let result = (|| {
+        let mut f = opts.open(&tmp_path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&tmp_path, path)
+    })();
+    if let Err(e) = result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    // 持久化 rename 本身；部分平台/文件系统不支持打开目录，失败只忽略（数据已落盘）。
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
 /// 基于文件系统的密钥库实现。
 ///
 /// 文件名即 `name`，Unix 下文件权限 0600、目录权限 0700。
-/// `save` 先写 `name.tmp` 再原子 rename 到 `name`。
+/// `save` 经 `atomic_write` 写临时文件、fsync 后原子 rename。
 pub struct FileKeyStore {
     dir: PathBuf,
 }
@@ -57,26 +100,7 @@ impl KeyStore for FileKeyStore {
     }
 
     fn save(&self, name: &str, data: &[u8]) -> Result<(), KeyStoreError> {
-        let path = self.file_path(name);
-        let tmp_path = self.dir.join(format!("{name}.tmp"));
-        // Unix 下创建时即指定 0600，避免先宽权限后 chmod 的窗口。
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        {
-            let mut f = opts.open(&tmp_path)?;
-            f.write_all(data)?;
-            f.sync_all()?;
-        }
-        fs::rename(&tmp_path, &path)?;
-        #[cfg(unix)]
-        {
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-        }
+        atomic_write(&self.file_path(name), data, true)?;
         Ok(())
     }
 
@@ -93,6 +117,17 @@ impl KeyStore for FileKeyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_write_replaces_and_leaves_no_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("m");
+        atomic_write(&p, b"one", false).unwrap();
+        atomic_write(&p, b"two", true).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"two");
+        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(names.len(), 1);
+    }
 
     #[test]
     fn file_keystore_save_load_delete() {

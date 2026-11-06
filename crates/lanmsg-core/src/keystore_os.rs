@@ -13,7 +13,10 @@ use lanmsg_proto::consts::{
 
 use crate::error::KeyStoreError;
 use crate::identity::{KEY_DEVICE, KEY_USER};
-use crate::keystore::{FileKeyStore, KeyStore};
+use crate::keystore::{atomic_write, FileKeyStore, KeyStore};
+
+/// 首次选择用的跨进程锁文件名（位于数据目录）。
+const KEYSTORE_LOCK_NAME: &str = "keystore.lock";
 
 /// 系统密钥库后端抽象（便于测试注入）。
 pub trait SecretBackend: Send + Sync {
@@ -78,7 +81,7 @@ enum Mode {
 /// - 标记 `file`：只用文件库，不再尝试系统库。
 /// - 标记 `os`：只用系统库；系统库出错一律返回 Err，绝不回退文件、绝不把错误当“不存在”
 ///   （否则登录时 Secret Service 尚未解锁会导致身份被重建）。
-/// - 标记不存在：文件库已有密钥（老用户）则尝试迁移（写入后读回比对一致才删文件），
+/// - 标记不存在：持 `keystore.lock` 文件锁重读标记后再选择；文件库已有密钥（老用户）则尝试迁移（写入后读回比对一致才删文件），
 ///   文件库为空则探测系统库；成功选 `os`，否则选 `file`。
 pub struct OsKeyStore {
     primary: Option<Box<dyn SecretBackend>>,
@@ -111,6 +114,22 @@ impl OsKeyStore {
         }
     }
 
+    /// 读标记：不存在 Ok(None)；空/非法内容明确报错（不得当作无标记，否则可能误重建身份）。
+    fn read_marker(&self) -> Result<Option<Mode>, KeyStoreError> {
+        match std::fs::read_to_string(&self.marker) {
+            Ok(text) => match text.trim() {
+                KEYSTORE_BACKEND_OS => Ok(Some(Mode::Os)),
+                KEYSTORE_BACKEND_FILE => Ok(Some(Mode::File)),
+                other => Err(KeyStoreError::Corrupt(format!(
+                    "密钥库后端标记 {} 内容为空或非法（{other:?}），可删除该文件后重试",
+                    self.marker.display()
+                ))),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(KeyStoreError::Io(e)),
+        }
+    }
+
     /// 取得（必要时选定并持久化）后端。
     fn resolve(&self) -> Result<(Mode, &dyn SecretBackend), KeyStoreError> {
         let Some(primary) = self.primary.as_deref() else {
@@ -120,29 +139,58 @@ impl OsKeyStore {
         if let Some(mode) = *guard {
             return Ok((mode, primary));
         }
-        let mode = match std::fs::read_to_string(&self.marker) {
-            Ok(text) => match text.trim() {
-                KEYSTORE_BACKEND_OS => Mode::Os,
-                KEYSTORE_BACKEND_FILE => Mode::File,
-                other => {
-                    return Err(KeyStoreError::Corrupt(format!(
-                        "密钥库后端标记内容非法: {other:?}"
-                    )))
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.select_backend(primary)?,
-            Err(e) => return Err(KeyStoreError::Io(e)),
+        // 已有标记的快路径不加锁；无标记则在跨进程文件锁内重读、选择、写标记。
+        let mode = match self.read_marker()? {
+            Some(mode) => mode,
+            None => self.select_locked(primary)?,
         };
+        if mode == Mode::Os {
+            self.cleanup_legacy(primary);
+        }
         *guard = Some(mode);
         Ok((mode, primary))
     }
 
+    /// 持有 `keystore.lock` 独占锁完成首次选择，避免两进程同时首次启动互相覆盖。
+    fn select_locked(&self, primary: &dyn SecretBackend) -> Result<Mode, KeyStoreError> {
+        let dir = self.marker.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(dir)?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(KEYSTORE_LOCK_NAME))?;
+        lock.lock()?;
+        // 锁内重读：另一进程可能刚选定。锁随 lock 句柄关闭释放。
+        let result = match self.read_marker() {
+            Ok(Some(mode)) => Ok(mode),
+            Ok(None) => self.select_backend(primary),
+            Err(e) => Err(e),
+        };
+        let _ = lock.unlock();
+        result
+    }
+
     fn write_marker(&self, value: &str) -> Result<(), KeyStoreError> {
-        std::fs::write(&self.marker, value)?;
+        atomic_write(&self.marker, value.as_bytes(), false)?;
         Ok(())
     }
 
-    /// 标记不存在时的首次选定。
+    /// os 模式下清理残留的文件库密钥：仅当系统库里同名条目可读且值相同才删。
+    fn cleanup_legacy(&self, primary: &dyn SecretBackend) {
+        for name in [KEY_DEVICE, KEY_USER] {
+            let Ok(Some(file_v)) = self.fallback.load(name) else {
+                continue;
+            };
+            if matches!(primary.get(name), Ok(Some(os_v)) if os_v == file_v) {
+                if let Err(e) = self.fallback.delete(name) {
+                    self.warn_once("密钥已在系统密钥库，但删除旧文件失败", &e);
+                }
+            }
+        }
+    }
+
+    /// 标记不存在时的首次选定（调用方须已持有文件锁）。
     fn select_backend(&self, primary: &dyn SecretBackend) -> Result<Mode, KeyStoreError> {
         let mut legacy = Vec::new();
         for name in [KEY_DEVICE, KEY_USER] {
@@ -163,7 +211,8 @@ impl OsKeyStore {
                 }
             };
         }
-        // 迁移：先全部写入并读回比对，全部一致才写标记、删文件。
+        // 迁移：先全部写入并读回比对，全部一致才写标记（已 fsync）；
+        // 旧文件由 resolve 随后的 cleanup_legacy 在确认系统库值一致后删除。
         let migrated: Result<(), KeyStoreError> = legacy.iter().try_for_each(|(name, v)| {
             primary.set(name, v)?;
             match primary.get(name)? {
@@ -175,19 +224,16 @@ impl OsKeyStore {
         });
         match migrated {
             Ok(()) => {
-                // 标记先于删文件：标记写失败时文件原样保留。
                 self.write_marker(KEYSTORE_BACKEND_OS)?;
-                for (name, _) in &legacy {
-                    if let Err(e) = self.fallback.delete(name) {
-                        self.warn_once("密钥已迁入系统密钥库，但删除旧文件失败", &e);
-                    }
-                }
                 Ok(Mode::Os)
             }
             Err(e) => {
                 tracing::warn!("密钥迁入系统密钥库失败，保留文件密钥库: {e}");
-                for (name, _) in &legacy {
-                    let _ = primary.remove(name);
+                for (name, v) in &legacy {
+                    // 仅当条目值等于本次写入的值才回滚，避免误删他人写入。
+                    if matches!(primary.get(name), Ok(Some(cur)) if cur == *v) {
+                        let _ = primary.remove(name);
+                    }
                 }
                 self.write_marker(KEYSTORE_BACKEND_FILE)?;
                 Ok(Mode::File)
@@ -197,11 +243,19 @@ impl OsKeyStore {
 }
 
 /// 探测系统密钥库：写入、读回比对、删除一个探测条目。
+/// 条目名带进程号与随机数，避免多进程互相干扰；删除失败只告警，不影响“可用”结论。
 fn probe(primary: &dyn SecretBackend) -> Result<(), KeyStoreError> {
     const PROBE_VALUE: &[u8] = b"lanmsg";
-    primary.set(KEYSTORE_PROBE_NAME, PROBE_VALUE)?;
-    let back = primary.get(KEYSTORE_PROBE_NAME)?;
-    primary.remove(KEYSTORE_PROBE_NAME)?;
+    let name = format!(
+        "{KEYSTORE_PROBE_NAME}-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    );
+    primary.set(&name, PROBE_VALUE)?;
+    let back = primary.get(&name)?;
+    if let Err(e) = primary.remove(&name) {
+        tracing::warn!("删除探测条目失败（忽略）: {e}");
+    }
     if back.as_deref() == Some(PROBE_VALUE) {
         Ok(())
     } else {
@@ -286,6 +340,8 @@ mod tests {
         /// set 返回 Ok 但并不真正保存。
         drop_writes: Arc<AtomicBool>,
         sets: Arc<AtomicUsize>,
+        /// 第一次 set 前睡 100ms，制造两实例的时间重叠。
+        delay_first_set: Arc<AtomicBool>,
     }
 
     fn unavailable() -> KeyStoreError {
@@ -311,6 +367,9 @@ mod tests {
         fn set(&self, name: &str, bytes: &[u8]) -> Result<(), KeyStoreError> {
             if self.fail_set.load(Ordering::Relaxed) {
                 return Err(unavailable());
+            }
+            if self.delay_first_set.swap(false, Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
             self.sets.fetch_add(1, Ordering::Relaxed);
             if !self.drop_writes.load(Ordering::Relaxed) {
@@ -366,7 +425,12 @@ mod tests {
         ks.delete(KEY_DEVICE).unwrap();
         assert_eq!(ks.load(KEY_DEVICE).unwrap(), None);
         // 探测条目已清理。
-        assert_eq!(mem.get(KEYSTORE_PROBE_NAME).unwrap(), None);
+        assert!(mem
+            .map
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|k| !k.starts_with(KEYSTORE_PROBE_NAME)));
     }
 
     #[test]
@@ -500,6 +564,129 @@ mod tests {
         std::fs::write(marker(dir.path()), "bogus").unwrap();
         let ks = open(dir.path(), &FakeBackend::default());
         assert!(ks.load(KEY_DEVICE).is_err());
+    }
+
+    #[test]
+    fn empty_marker_is_error_with_path_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(marker(dir.path()), "").unwrap();
+        let ks = open(dir.path(), &FakeBackend::default());
+        let msg = ks.load(KEY_DEVICE).unwrap_err().to_string();
+        assert!(
+            msg.contains(&marker(dir.path()).display().to_string()),
+            "{msg}"
+        );
+        assert!(msg.contains("可删除该文件后重试"), "{msg}");
+        // 不得自动当作无标记：标记原样保留。
+        assert_eq!(marker_text(dir.path()), "");
+    }
+
+    /// 两个独立实例（共享 data_dir 与假后端）同时首次 resolve。
+    fn race_two_instances(legacy: Option<&[u8]>) {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(v) = legacy {
+            FileKeyStore::new(keys_dir(dir.path()))
+                .save(KEY_DEVICE, v)
+                .unwrap();
+        }
+        let mem = FakeBackend::default();
+        mem.delay_first_set.store(true, Ordering::Relaxed);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let (path, mem, barrier) = (dir.path().to_path_buf(), mem.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let ks = open(&path, &mem);
+                    barrier.wait();
+                    ks.resolve().map(|(m, _)| m).unwrap()
+                })
+            })
+            .collect();
+        let modes: Vec<Mode> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(modes[0], modes[1]);
+        assert_eq!(modes[0], Mode::Os);
+        assert_eq!(marker_text(dir.path()), KEYSTORE_BACKEND_OS);
+        let ks = open(dir.path(), &mem);
+        match legacy {
+            Some(v) => {
+                assert_eq!(ks.load(KEY_DEVICE).unwrap().as_deref(), Some(v));
+                assert!(!keys_dir(dir.path()).join(KEY_DEVICE).exists());
+            }
+            None => {
+                ks.save(KEY_DEVICE, b"k").unwrap();
+                assert_eq!(ks.load(KEY_DEVICE).unwrap().as_deref(), Some(&b"k"[..]));
+            }
+        }
+        assert!(mem
+            .map
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|k| !k.starts_with(KEYSTORE_PROBE_NAME)));
+    }
+
+    #[test]
+    fn concurrent_first_resolve_fresh_install_agrees() {
+        race_two_instances(None);
+    }
+
+    #[test]
+    fn concurrent_first_resolve_with_legacy_migrates_once() {
+        race_two_instances(Some(b"old"));
+    }
+
+    /// 一个实例成功迁移、另一个实例的后端报错：无论先后，不丢钥且标记与位置一致。
+    #[test]
+    fn concurrent_migration_with_erroring_peer_never_loses_key() {
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            FileKeyStore::new(keys_dir(dir.path()))
+                .save(KEY_DEVICE, b"old")
+                .unwrap();
+            let good = FakeBackend::default();
+            // 共享同一份存储，但故障开关独立。
+            let bad = FakeBackend::failing();
+            let bad = FakeBackend {
+                map: good.map.clone(),
+                ..bad
+            };
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let spawn = |b: FakeBackend| {
+                let (path, barrier) = (dir.path().to_path_buf(), barrier.clone());
+                std::thread::spawn(move || {
+                    let ks = open(&path, &b);
+                    barrier.wait();
+                    ks.load(KEY_DEVICE)
+                })
+            };
+            let (h1, h2) = (spawn(good.clone()), spawn(bad));
+            let (r1, r2) = (h1.join().unwrap(), h2.join().unwrap());
+            for r in [r1, r2].into_iter().flatten() {
+                assert_eq!(r.as_deref(), Some(&b"old"[..]));
+            }
+            let file_has = keys_dir(dir.path()).join(KEY_DEVICE).exists();
+            let os_has = good.get(KEY_DEVICE).unwrap().as_deref() == Some(&b"old"[..]);
+            match marker_text(dir.path()).as_str() {
+                KEYSTORE_BACKEND_OS => assert!(os_has),
+                KEYSTORE_BACKEND_FILE => assert!(file_has && !os_has),
+                other => panic!("非法标记 {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn os_mode_cleans_stale_legacy_files_only_when_equal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(marker(dir.path()), KEYSTORE_BACKEND_OS).unwrap();
+        let fb = FileKeyStore::new(keys_dir(dir.path()));
+        fb.save(KEY_DEVICE, b"same").unwrap();
+        fb.save(KEY_USER, b"stale").unwrap();
+        let mem = FakeBackend::default();
+        mem.set(KEY_DEVICE, b"same").unwrap();
+        mem.set(KEY_USER, b"different").unwrap();
+        open(dir.path(), &mem).load(KEY_DEVICE).unwrap();
+        assert!(!keys_dir(dir.path()).join(KEY_DEVICE).exists());
+        assert!(keys_dir(dir.path()).join(KEY_USER).exists());
     }
 
     /// 真实系统密钥库读写；检测到不可用（CI 无 Secret Service 等）时跳过。
