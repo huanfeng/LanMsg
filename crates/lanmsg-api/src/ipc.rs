@@ -20,7 +20,6 @@ use tokio_util::codec::{Decoder, Encoder, Framed};
 use crate::types::{
     ApiError, ApiRequest, ApiResponse, ErrorCode, Event, IpcFrame, Request, Response,
 };
-use interprocess::local_socket::traits::Stream as _;
 use lanmsg_proto::consts::MAX_FRAME_LEN;
 
 /// IPC 编解码错误。
@@ -127,6 +126,8 @@ impl IpcListener {
     pub fn bind(endpoint: &str) -> io::Result<IpcListener> {
         #[cfg(unix)]
         {
+            // 同步 connect 需要 Stream trait；仅 Unix 的残留 socket 探测使用。
+            use interprocess::local_socket::traits::Stream as _;
             if Path::new(endpoint).exists() {
                 let name = endpoint.to_fs_name::<GenericFilePath>()?;
                 match interprocess::local_socket::Stream::connect(name) {

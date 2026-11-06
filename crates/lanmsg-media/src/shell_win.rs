@@ -56,14 +56,16 @@ unsafe fn shell_thumbnail_inner(path: &Path, edge: u32) -> Result<Rgba, MediaErr
     let (w, h) = (bm.bmWidth, bm.bmHeight);
     let mut out = Err(MediaError::Decode("位图尺寸无效".into()));
     if w > 0 && h > 0 {
-        let mut info = BITMAPINFO::default();
-        info.bmiHeader = BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: w,
-            biHeight: -h, // 自上而下
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h, // 自上而下
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
@@ -80,7 +82,7 @@ unsafe fn shell_thumbnail_inner(path: &Path, edge: u32) -> Result<Rgba, MediaErr
         ReleaseDC(None, dc);
         if lines > 0 {
             // BGRA → RGBA；Shell 位图的 alpha 不可靠，统一视为不透明
-            for px in pixels.chunks_exact_mut(4) {
+            for px in pixels.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
                 px[3] = 255;
             }

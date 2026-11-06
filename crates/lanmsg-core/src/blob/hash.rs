@@ -74,9 +74,20 @@ pub fn hash_file(path: &Path) -> std::io::Result<HashedFile> {
 }
 
 /// 文件修改时间（Unix 毫秒）。
+///
+/// 使用跨平台的 `Metadata::modified()`：Unix 下与 `mtime*1000 + mtime_nsec/1e6`
+/// 等价（毫秒截断），Windows 下取 NTFS 最后写入时间（100ns 精度，同样截断到毫秒），
+/// 文件内容变化时 mtime 随之变化，故仍可用于判断文件是否被修改。
+/// 早于 Unix 纪元的时间返回负值；平台不支持 mtime 时返回 0。
 pub fn file_mtime(meta: &std::fs::Metadata) -> i64 {
-    use std::os::unix::fs::MetadataExt;
-    meta.mtime() * 1000 + meta.mtime_nsec() / 1_000_000
+    use std::time::UNIX_EPOCH;
+    match meta.modified() {
+        Ok(t) => match t.duration_since(UNIX_EPOCH) {
+            Ok(d) => d.as_millis() as i64,
+            Err(e) => -(e.duration().as_millis() as i64),
+        },
+        Err(_) => 0,
+    }
 }
 
 /// 分段数：size == 0 → 0；否则 ceil(size / BLOB_SEGMENT_LEN)。
@@ -91,6 +102,30 @@ pub fn segment_count(size: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// file_mtime 返回接近当前时间的毫秒值，且显式设置新 mtime 后数值随之变化。
+    #[test]
+    fn file_mtime_tracks_modification() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.txt");
+        std::fs::write(&path, b"a").unwrap();
+        let m1 = file_mtime(&std::fs::metadata(&path).unwrap());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert!(
+            (now - m1).abs() < 60_000,
+            "mtime 应接近当前时间: {m1} vs {now}"
+        );
+
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_234_567))
+            .unwrap();
+        drop(f);
+        let m2 = file_mtime(&std::fs::metadata(&path).unwrap());
+        assert_eq!(m2, 1_234_567);
+    }
 
     /// 写 BLOB_SEGMENT_LEN + 10 字节随机文件 → 整文件哈希 == blake3(全部)；
     /// segment_hashes.len() == 2；第 2 段 == blake3(最后 10 字节)。
