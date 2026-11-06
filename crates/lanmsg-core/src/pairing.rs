@@ -633,7 +633,13 @@ impl Pairing {
                 .await;
             return Ok(());
         };
-        let session = begin_session.unwrap_or_else(random_session);
+        // Sas：加入方的会话 ID 由其本地生成，A 侧一律使用窗口会话 ID，
+        // 使事件与 PairStart 返回值一致（两端会话 ID 各自独立）。
+        let session = if matches!(method, PairMethodWire::Sas) {
+            w.session.clone()
+        } else {
+            begin_session.unwrap_or_else(random_session)
+        };
         {
             let mut g = self.inner.active.lock().unwrap();
             // 并发配对会话：新 Begin 覆盖旧会话。
@@ -801,6 +807,10 @@ impl Pairing {
             is_self: true,
             updated_at: now,
         })?;
+        // 用户显示名来自 Bundle（get_self 读 display_name 设置）。
+        self.inner
+            .store
+            .set_setting("display_name", &bundle.display_name)?;
         let device_name = self
             .inner
             .store

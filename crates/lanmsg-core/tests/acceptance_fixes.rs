@@ -199,3 +199,19 @@ async fn folder_download_preserves_structure() {
     let got = collect_tree(&dl.path().join("A").join("项目目录"));
     assert_eq!(got, collect_tree(&root), "落地结构应与源文件夹一致");
 }
+
+/// 缺陷 3：QR 配对后新设备的 GetSelf.display_name 等于原设备的用户显示名。
+#[tokio::test]
+async fn paired_device_inherits_display_name() {
+    let mut a = node_offline().await;
+    a.init_first("甲").await;
+    let mut b = node_offline().await;
+    join_init(&b).await;
+    pair(&mut a, &mut b).await;
+    match b.call(Request::GetSelf).await {
+        Response::SelfInfo { value } => {
+            assert_eq!(value.display_name.as_deref(), Some("甲"));
+        }
+        other => panic!("期望 SelfInfo，实际 {other:?}"),
+    }
+}

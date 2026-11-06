@@ -244,23 +244,24 @@ async fn sas_pairing_requires_both_confirmations() {
     assert!(started.qr_uri.is_none(), "Sas 配对无二维码");
 
     let a_dev = a.device_id().await;
-    // Sas/Device 目标下 B 本地生成会话 ID，双方事件与确认均以它为准。
+    // Sas：A 的事件/确认用 PairStart 返回的会话，B 用 PairJoin 返回的会话。
+    let session_a = started.session.clone();
     let session = join_device(&b, &a_dev).await;
 
     // 双方 ShowSas 且 code 相同。
-    let code_a = wait_show_sas(&mut a, &session).await;
+    let code_a = wait_show_sas(&mut a, &session_a).await;
     let code_b = wait_show_sas(&mut b, &session).await;
     assert_eq!(code_a, code_b, "两端 SAS 应一致");
     assert_eq!(code_a.len(), 6);
 
     // 只有 A 确认：2 秒内双方无 Done。
     a.try_call(Request::PairConfirm {
-        session: session.clone(),
+        session: session_a.clone(),
         matches: true,
     })
     .await
     .expect("PairConfirm 失败");
-    a.no_event(is_done(&session), 2000).await;
+    a.no_event(is_done(&session_a), 2000).await;
     b.no_event(is_done(&session), 2000).await;
 
     // B 也确认：双方 Done，B 已初始化且用户与 A 一致。
@@ -270,7 +271,7 @@ async fn sas_pairing_requires_both_confirmations() {
     })
     .await
     .expect("PairConfirm 失败");
-    a.wait_event(is_done(&session), 5).await;
+    a.wait_event(is_done(&session_a), 5).await;
     b.wait_event(is_done(&session), 5).await;
     match b.try_call(Request::GetSelf).await.expect("GetSelf 失败") {
         Response::SelfInfo { value } => {
@@ -292,15 +293,20 @@ async fn sas_mismatch_fails_both() {
     init_join(&b).await;
     reannounce(&a).await;
 
-    // A 开 Sas 配对窗口（窗口会话 ID 与 B 侧事件所用 ID 无关）。
-    a.try_call(Request::PairStart {
-        method: PairMethod::Sas,
-    })
-    .await
-    .expect("PairStart 失败");
+    // A 开 Sas 配对窗口；A 的事件用 PairStart 返回的会话，B 用 PairJoin 返回的会话。
+    let session_a = match a
+        .try_call(Request::PairStart {
+            method: PairMethod::Sas,
+        })
+        .await
+        .expect("PairStart 失败")
+    {
+        Response::PairSession { value } => value.session,
+        other => panic!("期望 PairSession，实际 {other:?}"),
+    };
     let a_dev = a.device_id().await;
     let session = join_device(&b, &a_dev).await;
-    let _ = wait_show_sas(&mut a, &session).await;
+    let _ = wait_show_sas(&mut a, &session_a).await;
     let _ = wait_show_sas(&mut b, &session).await;
 
     // B 确认不一致：双方 Failed{"数字不一致"}。
@@ -310,7 +316,7 @@ async fn sas_mismatch_fails_both() {
     })
     .await
     .expect("PairConfirm 失败");
-    let fa = a.wait_event(is_failed(&session), 5).await;
+    let fa = a.wait_event(is_failed(&session_a), 5).await;
     let fb = b.wait_event(is_failed(&session), 5).await;
     assert!(format!("{fa:?}").contains("数字不一致"));
     assert!(format!("{fb:?}").contains("数字不一致"));
