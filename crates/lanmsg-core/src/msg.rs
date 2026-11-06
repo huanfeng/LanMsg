@@ -269,6 +269,45 @@ impl Messaging {
         Ok(env.id)
     }
 
+    /// 把他人发来的消息转交给自己其他在线设备（后台发送，不阻塞事件循环）。
+    /// 排除本机与来源设备；来源本身是自己的设备时视为已是转交，不再转。
+    fn relay_to_my_devices(
+        &self,
+        self_user: UserId,
+        self_device: DeviceId,
+        from: DeviceId,
+        env: Envelope,
+    ) {
+        let peers = self.conns.peers();
+        if peers
+            .iter()
+            .any(|p| p.device == from && p.cert.as_ref().is_some_and(|c| c.user == self_user))
+        {
+            return;
+        }
+        let targets: Vec<DeviceId> = peers
+            .into_iter()
+            .filter(|p| {
+                p.device != self_device
+                    && p.device != from
+                    && p.cert.as_ref().is_some_and(|c| c.user == self_user)
+            })
+            .map(|p| p.device)
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let conns = self.conns.clone();
+        tokio::spawn(async move {
+            for device in targets {
+                let frame = Frame::SyncPush(SyncPush {
+                    envelopes: vec![env.clone()],
+                });
+                let _ = conns.send(&device, frame).await;
+            }
+        });
+    }
+
     // ---- P2 Task 11：文件与文件夹发送 ----
 
     /// 发送文件消息：先校验并插入 preparing 行（发 `MessageAdded`，各项
@@ -611,14 +650,27 @@ impl Messaging {
                             let Some(self_user) = self_user else {
                                 continue; // 未初始化，无法校验
                             };
-                            if conv_id != ConvId::dm(&self_user, &author_user) {
+                            // 对端用户：作者是他人时即作者；作者是自己的设备（转交
+                            // 自己发给第三方的消息）时，在已知联系人中找 dm 匹配者。
+                            let peer_user = if conv_id == ConvId::dm(&self_user, &author_user) {
+                                Some(author_user)
+                            } else if author_user == self_user {
+                                self.store
+                                    .list_contacts(None)?
+                                    .into_iter()
+                                    .map(|c| c.user)
+                                    .find(|u| conv_id == ConvId::dm(&self_user, u))
+                            } else {
+                                None
+                            };
+                            let Some(peer_user) = peer_user else {
                                 warn!(peer = %from, "SyncPush conv 不匹配，丢弃");
                                 continue;
-                            }
+                            };
                             let row = ConvRow {
                                 conv: conv_id,
                                 kind: ConvKindRow::Dm,
-                                peer_user: Some(author_user),
+                                peer_user: Some(peer_user),
                                 title: None,
                                 created_at: wall,
                             };
@@ -696,6 +748,18 @@ impl Messaging {
 
                             // 7a. 仅当新插入时发事件并触发入库回调。
                             if inserted {
+                                // 转交：他人发来的消息实时转给自己其他在线设备
+                                // （发送方是自己设备或 from 本身自己设备时不再转，防回环）。
+                                if let Some(su) = self_user {
+                                    if author_user != su {
+                                        self.relay_to_my_devices(
+                                            su,
+                                            self_device,
+                                            from,
+                                            env.clone(),
+                                        );
+                                    }
+                                }
                                 let stored = StoredMessage {
                                     env: env.clone(),
                                     state: MsgStateRow::Delivered,
