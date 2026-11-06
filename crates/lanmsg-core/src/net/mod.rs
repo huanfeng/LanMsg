@@ -4,6 +4,7 @@
 pub mod conn;
 pub mod manager;
 pub mod path;
+pub mod timing;
 pub mod tls;
 
 pub use conn::{ConnEvent, DataHandler, DataStream, HelloInfo, PeerInfo};

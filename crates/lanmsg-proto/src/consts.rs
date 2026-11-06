@@ -38,6 +38,10 @@ pub const PING_INTERVAL: Duration = Duration::from_secs(15);
 /// 心跳超时，超过即断开连接。
 pub const PING_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// 同设备新连接到达时，旧连接若在此时长内没有收到任何包，视为已死并被新连接替换
+/// （对端无 FIN 消失后重启/换网重连的场景）。须大于 PING_INTERVAL 以免误伤存活连接。
+pub const RECONNECT_REPLACE_IDLE: Duration = Duration::from_secs(20);
+
 /// 网卡变化轮询间隔。
 pub const IFACE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 

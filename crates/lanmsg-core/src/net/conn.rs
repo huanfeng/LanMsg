@@ -1,15 +1,18 @@
 // P1 核心骨架：控制连接（Task 9）。
 // 单条 TCP + TLS 控制连接：出站/入站建立、Hello 握手与校验、帧读写、Ping/Pong 心跳。
+// 保活：写循环在 heartbeat 内无其他出帧时发 Ping，读侧收到 Ping 回 Pong；读循环以
+// idle_timeout 为期限等待任一帧，超时视为对端消失（无 FIN 的断电 / 切网 / 进程被杀），
+// 与写失败一样关闭连接并走自清理 + Down。时序见 net::timing（生产值在 lanmsg-proto consts）。
 // 注释中文，标识符英文。
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
 use futures_util::{SinkExt, StreamExt, TryFutureExt};
-use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
@@ -25,6 +28,7 @@ use lanmsg_proto::types::{DeviceCert, PathClass};
 use rustls::pki_types::ServerName;
 
 use crate::error::CoreError;
+use crate::net::timing;
 use crate::net::tls::{make_tls_configs, peer_device_id, TLS_SNI};
 
 /// 对端连接信息。
@@ -75,6 +79,9 @@ pub(crate) struct Connection {
     shutdown_tx: mpsc::Sender<()>,
     /// 连接实例 ID（同设备重连裁决后区分新旧连接）。
     conn_id: u64,
+    /// 建立时刻与最近一次收包时刻（相对 born 的毫秒），供重连裁决判断旧连接是否已死。
+    born: Instant,
+    last_recv_ms: Arc<AtomicU64>,
 }
 
 impl Connection {
@@ -198,60 +205,14 @@ impl Connection {
             tls_exporter,
         };
 
-        let (write_tx, write_rx) = mpsc::channel(256);
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-        let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
-        let connection = Arc::new(Connection {
-            peer_info: peer_info.clone(),
-            write_tx,
-            up_sent: Arc::new(AtomicBool::new(false)),
-            shutdown_tx,
-            conn_id,
-        });
-
-        let event_tx_for_read = event_tx.clone();
-        let write_tx_for_pong = connection.write_tx.clone();
-        let device_for_events = peer_info.device;
-        let up_sent_flag = connection.up_sent.clone();
-
-        // 读循环：解码帧，Ping 自动回 Pong，其余上报；退出时先自清理管理器表
-        // 条目，再仅当自己仍是登记连接时通知外层 Down（被替换的旧连接不发，
-        // 避免对存活的新连接误报离线）。
-        tokio::spawn(async move {
-            let mut reader = framed_read;
-            let mut shutdown_rx = shutdown_rx;
-            loop {
-                tokio::select! {
-                    result = reader.next() => {
-                        match result {
-                            Some(Ok(Frame::Ping(_n))) => {
-                                let _ = write_tx_for_pong.send(Frame::Pong(0)).await;
-                            }
-                            Some(Ok(frame)) => {
-                                let _ = event_tx_for_read.send(ConnEvent::Frame(device_for_events, frame)).await;
-                            }
-                            Some(Err(_)) | None => break,
-                        }
-                    }
-                    _ = shutdown_rx.recv() => break,
-                }
-            }
-            if up_sent_flag.load(Ordering::SeqCst) && cleanup(conn_id).await {
-                let _ = event_tx.send(ConnEvent::Down(device_for_events)).await;
-            }
-        });
-
-        // 写循环：发送队列中的帧。
-        tokio::spawn(async move {
-            let mut writer = framed_write;
-            let mut write_rx = write_rx;
-            while let Some(frame) = write_rx.recv().await {
-                if writer.send(frame).await.is_err() {
-                    break;
-                }
-            }
-            let _ = writer.flush().await;
-        });
+        let connection = start_io(
+            peer_info.clone(),
+            framed_read,
+            framed_write,
+            event_tx,
+            cleanup,
+            false,
+        );
 
         Ok((peer_info, connection))
     }
@@ -430,32 +391,77 @@ async fn accept_control(
     let _ = framed_write.send(Frame::Ping(0)).await;
     let _ = framed_write.flush().await;
 
+    // cert=None 的连接只放行 Pair/Ping/Pong/Error；其他帧回 Error 403 并丢弃。
+    let uninit_peer = peer_info.cert.is_none();
+    let connection = start_io(
+        peer_info.clone(),
+        framed_read,
+        framed_write,
+        event_tx,
+        cleanup,
+        uninit_peer,
+    );
+
+    Ok(Accepted::Control(peer_info, connection))
+}
+
+/// 启动读写任务并返回连接句柄（出站/入站共用）。
+///
+/// - 读循环：以 idle_timeout 等待任一帧（任何帧都算活跃）；Ping 回 Pong，其余上报；
+///   超时 / 出错 / 被 shutdown 时退出，先自清理管理器表条目，再仅当自己仍是登记
+///   连接时通知外层 Down（被替换的旧连接不发，避免对存活的新连接误报离线）。
+/// - 写循环：发送队列中的帧；heartbeat 内无出帧则发 Ping；写失败调 shutdown 让读循环
+///   一并退出，读循环退出后写循环随之结束。
+fn start_io<R, W>(
+    peer_info: PeerInfo,
+    framed_read: FramedRead<R, FrameCodec>,
+    framed_write: FramedWrite<W, FrameCodec>,
+    event_tx: mpsc::Sender<ConnEvent>,
+    cleanup: ExitCleanup,
+    uninit_peer: bool,
+) -> Arc<Connection>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let timing = timing::current();
     let (write_tx, write_rx) = mpsc::channel(256);
     let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
     let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
+    let born = Instant::now();
+    let last_recv_ms = Arc::new(AtomicU64::new(0));
     let connection = Arc::new(Connection {
-        peer_info: peer_info.clone(),
+        peer_info,
         write_tx,
         up_sent: Arc::new(AtomicBool::new(false)),
         shutdown_tx,
         conn_id,
+        born,
+        last_recv_ms: last_recv_ms.clone(),
     });
 
     let write_tx_for_pong = connection.write_tx.clone();
-    let device_for_events = peer_info.device;
-    let event_tx_for_read = event_tx.clone();
+    let shutdown_tx_for_write = connection.shutdown_tx.clone();
+    let device_for_events = connection.peer_info.device;
     let up_sent_flag = connection.up_sent.clone();
-    // cert=None 的连接只放行 Pair/Ping/Pong/Error；其他帧回 Error 403 并丢弃。
-    let uninit_peer = peer_info.cert.is_none();
+    // 读循环退出信号：写循环据此结束（避免对已死连接继续发心跳）。
+    let (closed_tx, mut closed_rx) = tokio::sync::watch::channel(false);
+
     tokio::spawn(async move {
         let mut reader = framed_read;
         let mut shutdown_rx = shutdown_rx;
         loop {
             tokio::select! {
-                result = reader.next() => {
+                result = tokio::time::timeout(timing.idle_timeout, reader.next()) => {
+                    let Ok(result) = result else {
+                        tracing::debug!(peer = %device_for_events, "对端空闲超时，关闭连接");
+                        break;
+                    };
+                    last_recv_ms.store(born.elapsed().as_millis() as u64, Ordering::Relaxed);
                     match result {
                         Some(Ok(Frame::Ping(_n))) => {
-                            let _ = write_tx_for_pong.send(Frame::Pong(0)).await;
+                            // try_send：写队列满时丢弃 Pong，避免读循环被写侧拖住而失去超时检测。
+                            let _ = write_tx_for_pong.try_send(Frame::Pong(0));
                         }
                         Some(Ok(frame)) => {
                             if uninit_peer
@@ -472,7 +478,9 @@ async fn accept_control(
                                     .await;
                                 continue;
                             }
-                            let _ = event_tx_for_read.send(ConnEvent::Frame(device_for_events, frame)).await;
+                            if !matches!(frame, Frame::Pong(_)) {
+                                let _ = event_tx.send(ConnEvent::Frame(device_for_events, frame)).await;
+                            }
                         }
                         Some(Err(_)) | None => break,
                     }
@@ -480,23 +488,40 @@ async fn accept_control(
                 _ = shutdown_rx.recv() => break,
             }
         }
-        // 退出时先自清理管理器表条目，再仅当自己仍是登记连接时通知外层 Down。
+        let _ = closed_tx.send(true);
         if up_sent_flag.load(Ordering::SeqCst) && cleanup(conn_id).await {
             let _ = event_tx.send(ConnEvent::Down(device_for_events)).await;
         }
     });
+
     tokio::spawn(async move {
         let mut writer = framed_write;
         let mut write_rx = write_rx;
-        while let Some(frame) = write_rx.recv().await {
-            if writer.send(frame).await.is_err() {
-                break;
+        let write_loop = async {
+            loop {
+                let frame = tokio::select! {
+                    f = write_rx.recv() => match f {
+                        Some(f) => f,
+                        None => break,
+                    },
+                    // 每轮重建计时：任何出帧都推迟下一次 Ping。
+                    _ = tokio::time::sleep(timing.heartbeat) => Frame::Ping(0),
+                };
+                if writer.send(frame).await.is_err() {
+                    // 写失败：通知读循环一并退出，连接随即自清理。
+                    let _ = shutdown_tx_for_write.try_send(());
+                    return;
+                }
             }
+            let _ = writer.flush().await;
+        };
+        tokio::select! {
+            _ = write_loop => {}
+            _ = closed_rx.wait_for(|c| *c) => {}
         }
-        let _ = writer.flush().await;
     });
 
-    Ok(Accepted::Control(peer_info, connection))
+    connection
 }
 
 impl Connection {
@@ -519,6 +544,12 @@ impl Connection {
     /// 连接实例 ID（管理器表登记与读循环退出自清理比对用）。
     pub(crate) fn conn_id(&self) -> u64 {
         self.conn_id
+    }
+
+    /// 距最近一次收到对端任意帧的时长（刚建立未收包时从建立时刻算起）。
+    pub(crate) fn idle(&self) -> Duration {
+        let last = Duration::from_millis(self.last_recv_ms.load(Ordering::Relaxed));
+        self.born.elapsed().saturating_sub(last)
     }
 
     /// 关闭连接：通知读循环退出。
@@ -587,6 +618,78 @@ async fn accept_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// 任何写入都失败的写端：模拟对端已 RST 而本端读端仍无动静。
+    struct FailWriter;
+
+    impl AsyncWrite for FailWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(std::io::Error::other("写失败")))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// 写循环 send 失败须关闭连接：读端始终静默（空闲超时是 45 秒），
+    /// 自清理仍应在 2 秒内触发并上报 Down。
+    #[tokio::test]
+    async fn write_failure_shuts_connection_down() {
+        // _quiet_peer 保持存活，读端因此既不 EOF 也不出数据。
+        let (quiet_local, _quiet_peer) = tokio::io::duplex(1024);
+        let info = PeerInfo {
+            device: DeviceId([9u8; 32]),
+            cert: None,
+            display_name: "写失败".into(),
+            addr: "127.0.0.1:1".parse().unwrap(),
+            dial_addr: "127.0.0.1:1".parse().unwrap(),
+            path: lanmsg_proto::types::PathClass::Lan,
+            caps: vec![],
+            outbound: true,
+            tls_exporter: [0u8; 32],
+        };
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (cleaned_tx, mut cleaned_rx) = mpsc::channel(1);
+        let cleanup: ExitCleanup = Arc::new(move |id| {
+            let cleaned_tx = cleaned_tx.clone();
+            Box::pin(async move {
+                let _ = cleaned_tx.send(id).await;
+                true
+            })
+        });
+        let connection = start_io(
+            info,
+            FramedRead::new(quiet_local, FrameCodec),
+            FramedWrite::new(FailWriter, FrameCodec),
+            event_tx,
+            cleanup,
+            false,
+        );
+        connection.set_up_sent();
+        connection
+            .send(&DeviceId([9u8; 32]), Frame::Ping(1))
+            .await
+            .unwrap();
+
+        let id = tokio::time::timeout(Duration::from_secs(2), cleaned_rx.recv())
+            .await
+            .expect("写失败后连接应在 2 秒内自清理")
+            .unwrap();
+        assert_eq!(id, connection.conn_id());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await,
+            Ok(Some(ConnEvent::Down(_)))
+        ));
+    }
 
     #[test]
     fn peer_info_fields() {

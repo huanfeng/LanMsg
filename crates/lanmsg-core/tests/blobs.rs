@@ -393,6 +393,13 @@ async fn download_from_my_other_device_when_sender_offline() {
     let (ok, error) = wait_finished(&mut a, &hash_hex, 30).await;
     assert!(ok, "A 下载应成功，实际错误 {error:?}");
 
+    // 等 B 记下 A 也是持有者（BlobHave 异步到达），否则 X 一关 B 无源可取。
+    let hash = BlobHash::from_hex(&hash_hex).unwrap();
+    wait_until(
+        || async { b.svc.store_for_test().holders(&hash).unwrap().len() >= 2 },
+        5,
+    )
+    .await;
     // X 下线，B 只能从 A 拉取。
     x.svc.shutdown().await;
     let dl_b = tempfile::tempdir().unwrap();

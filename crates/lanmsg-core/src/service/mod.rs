@@ -8,7 +8,7 @@ pub mod handlers;
 pub mod ingest;
 pub mod views;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::SystemTime;
@@ -86,6 +86,8 @@ pub(crate) struct Inner {
     pub(crate) platform: PlatformHooks,
     /// 界面当前正在看的会话（SetUiFocus 设置，只存内存不落库）。
     pub(crate) ui_focus: StdMutex<Option<ConvId>>,
+    /// 已登记的静态对端地址（启动配置 + AddManualPeer；只存内存，每个地址一个重连任务）。
+    pub(crate) static_peers: StdMutex<HashSet<SocketAddr>>,
 }
 
 /// 核心服务（C6）。内部状态由 Arc 持有，Clone 廉价。
@@ -282,6 +284,7 @@ impl Service {
             transfer,
             platform,
             ui_focus: StdMutex::new(None),
+            static_peers: StdMutex::new(HashSet::new()),
         });
         let svc = Service {
             inner: inner.clone(),
@@ -306,7 +309,7 @@ impl Service {
 
         tokio::spawn(routing_task(inner.clone(), conn_rx, disc_rx));
         for addr in static_peers {
-            tokio::spawn(static_peer_task(inner.clone(), addr));
+            register_static_peer(&inner, addr, false);
         }
 
         // 旧库的文件 / 文字搜索索引回填：后台执行，不阻塞启动（完成后写标记，只做一次）。
@@ -618,7 +621,9 @@ async fn sync_worker(sync: crate::sync::SyncEngine, mut rx: mpsc::Receiver<SyncJ
 /// 发现事件：未连接且自身设备 ID 较小时出站拨号；Invisible 不主动外联其他用户。
 async fn on_discovery(inner: &Inner, de: DiscoveryEvent) {
     let peer_device = de.announce.cert.device;
-    if inner.conns.is_connected(&peer_device) {
+    // 连接表里有但已长时间没收包的连接可能已死（对端无 FIN 消失后重启），仍要拨号，
+    // 由连接管理器的裁决用新连接替换。
+    if inner.conns.is_connected_alive(&peer_device) {
         return;
     }
     {
@@ -645,10 +650,22 @@ async fn on_discovery(inner: &Inner, de: DiscoveryEvent) {
     let _ = inner.conns.connect(addr, de.via_multicast).await;
 }
 
+/// 登记静态对端并启动其后台重连任务；同一地址只启动一次。
+///
+/// `connected`：调用方刚连上该地址，任务先等一个周期再拨，避免与刚建立的连接并发重复拨号。
+pub(crate) fn register_static_peer(inner: &Arc<Inner>, addr: SocketAddr, connected: bool) {
+    if inner.static_peers.lock().unwrap().insert(addr) {
+        tokio::spawn(static_peer_task(inner.clone(), addr, connected));
+    }
+}
+
 /// 静态对端后台拨号：失败按 RETRY_MIN..RETRY_MAX 指数退避，连上后断开再重试。
-async fn static_peer_task(inner: Arc<Inner>, addr: SocketAddr) {
+async fn static_peer_task(inner: Arc<Inner>, addr: SocketAddr, connected: bool) {
     let mut delay = RETRY_MIN;
-    loop {
+    if connected {
+        tokio::time::sleep(RETRY_MIN).await;
+    }
+    while !inner.conns.is_shut_down() {
         match inner.conns.connect(addr, false).await {
             Ok(_) => {
                 delay = RETRY_MIN;

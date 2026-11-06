@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, watch};
 use crate::net::conn::{
     Accepted, ConnEvent, Connection, DataHandler, DataStream, ExitCleanup, HelloInfo, PeerInfo,
 };
+use crate::net::timing;
 use crate::net::tls::{make_tls_configs, TLS_SNI};
 use lanmsg_proto::consts::{CHANNEL_DATA, DUP_DIAL_GRACE_MS};
 use lanmsg_proto::data::{write_data_frame, DataFrame};
@@ -43,6 +44,8 @@ struct ConnectionEntry {
 pub struct ConnManager {
     local_addr: SocketAddr,
     inner: Arc<RwLock<Inner>>,
+    /// 接受循环任务句柄：shutdown 时中止，真正关闭监听端口。
+    accept_task: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
 }
 
 struct Inner {
@@ -55,6 +58,8 @@ struct Inner {
     device_key: Arc<DeviceKey>,
     /// 对端证书覆盖（收到 CertUpdate 后刷新；连接重建或断开时清除，以新握手为准）。
     cert_overrides: std::sync::Mutex<HashMap<DeviceId, DeviceCert>>,
+    /// 已 shutdown：握手中的连接此后到达不得再登记（否则成为关不掉的僵尸连接）。
+    closed: bool,
 }
 
 impl ConnManager {
@@ -101,19 +106,22 @@ impl ConnManager {
             self_device,
             device_key: Arc::new(device_key),
             cert_overrides: std::sync::Mutex::new(HashMap::new()),
+            closed: false,
         };
 
         let manager = ConnManager {
             local_addr,
             inner: Arc::new(RwLock::new(inner)),
+            accept_task: Arc::new(std::sync::Mutex::new(None)),
         };
 
         // 启动 accept 循环。
         let listen_port = manager.local_addr.port();
         let inner_clone = manager.inner.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             accept_loop(listener, listen_port, inner_clone).await;
         });
+        *manager.accept_task.lock().unwrap() = Some(task.abort_handle());
 
         Ok(manager)
     }
@@ -132,8 +140,14 @@ impl ConnManager {
         // 快速路径：若已有连接到该地址且已上线，直接返回该设备。
         {
             let inner = self.read_inner();
+            let replace_idle = timing::current().replace_idle;
             for (device, entry) in inner.connections.iter() {
-                if entry.peer_addr == addr && entry.up_sent {
+                // 空闲过久的连接可能已死，不走快速路径，重新拨号交给裁决替换。
+                // 入站连接的 peer_addr 是对端临时端口，用 dial_addr（对端监听地址）一并匹配，
+                // 避免静态对端任务对已存活的入站连接反复重拨。
+                let same_peer =
+                    entry.peer_addr == addr || entry.connection.peer_info().dial_addr == addr;
+                if same_peer && entry.up_sent && entry.connection.idle() < replace_idle {
                     return Ok(*device);
                 }
             }
@@ -174,11 +188,43 @@ impl ConnManager {
         // 先预留事件通道名额（可能 await），再在锁内同步完成裁决/登记/发 Up：
         // 名额发送是同步的，Up 与读循环自清理后的 Down 仍严格有序，且锁内不 await。
         let permit = self.events_clone().reserve_owned().await.ok();
+        // 旧连接已死被替换时需要先 Down 再 Up，多预留一个名额。
+        let down_permit = self.events_clone().reserve_owned().await.ok();
+        let replace_idle = timing::current().replace_idle;
 
-        // 重复连接裁决：同一设备已有连接时，保留"拨号方 DeviceId 较小"的那条。
+        // 重复连接裁决：同一设备已有连接时，保留"拨号方 DeviceId 较小"的那条；
+        // 例外：旧连接已空闲超过 replace_idle（对端无 FIN 消失后重连），无条件被新连接替换。
         let mut inner = self.write_inner();
+        if inner.closed {
+            connection.shutdown();
+            return Err(CoreError::PeerOffline);
+        }
         if let Some(existing) = inner.connections.get(&device) {
             let existing_dialer = existing.dialer_device;
+            let dead = existing.connection.idle() >= replace_idle;
+            if dead {
+                // 旧连接已死：Down 再 Up，让上层重置该对端的同步状态并重新发 SyncOffer。
+                // 旧连接读循环退出时实例 ID 不匹配，不会重复发 Down。
+                existing.connection.shutdown();
+                inner.connections.remove(&device);
+                connection.set_up_sent();
+                if let (Some(down), Some(up)) = (down_permit, permit) {
+                    down.send(ConnEvent::Down(device));
+                    up.send(ConnEvent::Up(peer_info.clone()));
+                }
+                inner.connections.insert(
+                    device,
+                    ConnectionEntry {
+                        conn_id: connection.conn_id(),
+                        connection,
+                        peer_addr,
+                        dialer_device: self_dev,
+                        up_sent: true,
+                    },
+                );
+                let _ = inner.cert_overrides.lock().unwrap().remove(&device);
+                return Ok(device);
+            }
             if existing_dialer <= self_dev {
                 // 保留旧连接，关闭新连接（未登记、未发 Up；其读循环退出时
                 // up_sent 为假，不产生 Up/Down）。
@@ -273,6 +319,24 @@ impl ConnManager {
             .unwrap_or(false)
     }
 
+    /// 是否已 shutdown（监听已停）。
+    pub fn is_shut_down(&self) -> bool {
+        self.read_inner().closed
+    }
+
+    /// 已连接且最近 replace_idle 内收到过对端的包（连接看起来仍然存活）。
+    ///
+    /// 发现层据此判断是否需要拨号：连接表里有但长时间没动静的连接可能已死，
+    /// 此时对端重新出现应拨号，由裁决用新连接替换。
+    pub fn is_connected_alive(&self, device: &DeviceId) -> bool {
+        let replace_idle = timing::current().replace_idle;
+        self.read_inner()
+            .connections
+            .get(device)
+            .map(|e| e.up_sent && e.connection.idle() < replace_idle)
+            .unwrap_or(false)
+    }
+
     /// 断开与指定设备的连接。
     ///
     /// 显式断开时由本函数补发 Down 通知外层（读循环退出自清理时条目已移除，
@@ -292,7 +356,12 @@ impl ConnManager {
 
     /// 关闭所有连接与监听器。
     pub async fn shutdown(&self) {
+        // 先停监听：否则对端的静态重连会立刻把刚关掉的连接又连回来。
+        if let Some(task) = self.accept_task.lock().unwrap().take() {
+            task.abort();
+        }
         let mut inner = self.write_inner();
+        inner.closed = true;
         for (_device, entry) in inner.connections.drain() {
             entry.connection.shutdown();
         }
@@ -485,13 +554,22 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                         }
                     }
                     // 先预留事件名额再持锁，锁内同步发 Up，不跨 await 持锁。
-                    let permit = events_for_up.reserve_owned().await.ok();
+                    let permit = events_for_up.clone().reserve_owned().await.ok();
+                    let down_permit = events_for_up.reserve_owned().await.ok();
+                    let replace_idle = timing::current().replace_idle;
                     let mut guard = inner_clone.write().unwrap();
-                    // 重复连接裁决：入站连接的拨号方为 peer。
+                    if guard.closed {
+                        connection.shutdown();
+                        return;
+                    }
+                    // 重复连接裁决：入站连接的拨号方为 peer；旧连接已空闲超过
+                    // replace_idle（对端重启 / 无 FIN 消失）时无条件替换并 Down+Up。
+                    let mut dead = false;
                     let replaced = if let Some(existing) = guard.connections.get(&device) {
                         let existing_dialer = existing.dialer_device;
                         let new_dialer = peer_info.device;
-                        if existing_dialer <= new_dialer {
+                        dead = existing.connection.idle() >= replace_idle;
+                        if !dead && existing_dialer <= new_dialer {
                             connection.shutdown();
                             return;
                         } else {
@@ -505,7 +583,12 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                     connection.set_up_sent();
                     // 仅新登记才发 Up：替换路径上旧连接已发过 Up 且从未离线，
                     // 重复 Up 会破坏外层在线计数（被替换连接退出也不再发 Down）。
-                    if !replaced {
+                    if !replaced || dead {
+                        if dead {
+                            if let Some(down) = down_permit {
+                                down.send(ConnEvent::Down(device));
+                            }
+                        }
                         if let Some(permit) = permit {
                             permit.send(ConnEvent::Up(peer_info.clone()));
                         }

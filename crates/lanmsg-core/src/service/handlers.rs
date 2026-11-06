@@ -6,6 +6,7 @@
 
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use lanmsg_api::types::{
     ApiError, ErrorCode, Event, InitMode, PairMethod, PairTarget, Request, Response, SelfInfo,
@@ -22,7 +23,7 @@ use crate::service::{build_announce, now_millis, Inner};
 use crate::store::{ConvKindRow, DeviceRow, MsgStateRow, Store, StoredMessage, UserRow};
 
 /// 请求入口。
-pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiError> {
+pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response, ApiError> {
     match req {
         Request::GetSelf => get_self(inner).await,
         Request::Init {
@@ -420,7 +421,7 @@ async fn send_folder(inner: &Inner, conv: String, path: String) -> Result<Respon
 }
 
 /// 解析 `ip:port` 或 `host:port` 并拨号。
-async fn add_manual_peer(inner: &Inner, addr: String) -> Result<Response, ApiError> {
+async fn add_manual_peer(inner: &Arc<Inner>, addr: String) -> Result<Response, ApiError> {
     let addr: SocketAddr = match addr.parse() {
         Ok(a) => a,
         Err(_) => tokio::net::lookup_host(&addr)
@@ -430,6 +431,8 @@ async fn add_manual_peer(inner: &Inner, addr: String) -> Result<Response, ApiErr
             .ok_or_else(|| invalid_arg(format!("无法解析地址: {addr}")))?,
     };
     inner.conns.connect(addr, false).await?;
+    // 连上后登记为静态对端：断线（含对端重启、无 FIN 消失）后按退避自动重连。
+    super::register_static_peer(inner, addr, true);
     Ok(Response::Ok)
 }
 
