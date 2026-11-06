@@ -1,0 +1,8 @@
+/build
+/app/build
+/.gradle
+/local.properties
+/app/src/main/jniLibs/
+/app/src/main/java/uniffi/
+/keystore.properties
+*.jks

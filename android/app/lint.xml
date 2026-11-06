@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- UniFFI 生成代码会先用 Class.forName 探测 java.lang.ref.Cleaner，不存在时回退到 JNA，运行期安全。 -->
+    <issue id="NewApi">
+        <ignore path="**/java/uniffi/**" />
+    </issue>
+</lint>
