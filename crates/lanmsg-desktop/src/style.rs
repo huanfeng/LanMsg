@@ -216,6 +216,20 @@ pub const ICON_EMPTY: &[u8] = include_bytes!("../assets/icons/empty.svg");
 /// 应用标识（自带 signal 底色，不着色）。
 pub const ICON_LOGO: &[u8] = include_bytes!("../assets/icons/logo.svg");
 
+/// 文件类型图标（24px 视口，单色模板）。
+pub const ICON_FILE_GENERIC: &[u8] = include_bytes!("../assets/icons/file_generic.svg");
+pub const ICON_FILE_TEXT: &[u8] = include_bytes!("../assets/icons/file_text.svg");
+pub const ICON_FILE_DOC: &[u8] = include_bytes!("../assets/icons/file_doc.svg");
+pub const ICON_FILE_PDF: &[u8] = include_bytes!("../assets/icons/file_pdf.svg");
+pub const ICON_FILE_SHEET: &[u8] = include_bytes!("../assets/icons/file_sheet.svg");
+pub const ICON_FILE_SLIDE: &[u8] = include_bytes!("../assets/icons/file_slide.svg");
+pub const ICON_FILE_ARCHIVE: &[u8] = include_bytes!("../assets/icons/file_archive.svg");
+pub const ICON_FILE_IMAGE: &[u8] = include_bytes!("../assets/icons/file_image.svg");
+pub const ICON_FILE_VIDEO: &[u8] = include_bytes!("../assets/icons/file_video.svg");
+pub const ICON_FILE_AUDIO: &[u8] = include_bytes!("../assets/icons/file_audio.svg");
+pub const ICON_DOWNLOAD: &[u8] = include_bytes!("../assets/icons/download.svg");
+pub const ICON_PLAY: &[u8] = include_bytes!("../assets/icons/play.svg");
+
 /// 线性图标：SVG 按 `size` 逻辑像素光栅化，并按主题角色着色（换主题自动跟随）。
 pub fn icon(svg: &'static [u8], size: i32, role: Role) -> Element {
     Element::image_svg(svg, None)

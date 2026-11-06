@@ -80,6 +80,10 @@ pub struct Model {
     pub file_filter: FileFilter,
     pub settings: Option<SettingsDto>,
     pub transfers: BTreeMap<String, TransferInfo>,
+    /// 哈希 -> 传输 id：取消传输要用；下载回复与进度事件都会登记，结束时清除。
+    pub transfer_ids: BTreeMap<String, String>,
+    /// 加载更早消息的请求已发出、尚未得到回复（防止到顶回调连发造成重复合并）。
+    pub older_in_flight: bool,
     pub pair: Option<PairUi>,
     pub toast: Option<String>,
     pub window_focused: bool,
@@ -125,6 +129,8 @@ impl Model {
             },
             settings: None,
             transfers: BTreeMap::new(),
+            transfer_ids: BTreeMap::new(),
+            older_in_flight: false,
             pair: None,
             toast: None,
             window_focused: true,
@@ -154,6 +160,9 @@ impl Model {
                     if !offline_io {
                         self.toast = Some(e.message);
                     }
+                    if matches!(tag, ReplyTag::Messages { older: true, .. }) {
+                        self.older_in_flight = false;
+                    }
                     if tag == ReplyTag::Init {
                         // Init 失败：回到可重新提交的状态
                         self.init_mode = None;
@@ -174,6 +183,7 @@ impl Model {
             call(Request::ListConversations, ReplyTag::Conversations),
             call(Request::ListRequests, ReplyTag::Requests),
             call(Request::GetSettings, ReplyTag::Settings),
+            call(Request::ListPeers, ReplyTag::Peers),
         ];
         if let Some(c) = self.current_conv.clone() {
             // 后台服务可能重启过，界面焦点需重新告知
@@ -242,6 +252,7 @@ impl Model {
                 }
                 self.has_older = value.len() == MESSAGE_PAGE as usize;
                 if older {
+                    self.older_in_flight = false;
                     let mut merged = value;
                     merged.append(&mut self.messages);
                     merged.truncate(MESSAGE_WINDOW_MAX);
@@ -310,6 +321,14 @@ impl Model {
                 fx.push(call(Request::GetSelf, ReplyTag::SelfInfo));
                 fx
             }
+            (ReplyTag::Transfer { hash }, Response::TransferId { value }) => {
+                self.transfer_ids.insert(hash, value);
+                Vec::new()
+            }
+            (ReplyTag::Deleted { msg }, Response::Ok) => {
+                self.messages.retain(|m| m.id != msg);
+                Vec::new()
+            }
             (ReplyTag::Forwarded, _) => {
                 self.toast = Some(strings::FORWARDED.to_string());
                 Vec::new()
@@ -359,12 +378,13 @@ impl Model {
                 Vec::new()
             }
             Event::TransferProgress {
+                transfer,
                 hash,
                 done,
                 total,
                 bytes_per_sec,
-                ..
             } => {
+                self.transfer_ids.insert(hash.clone(), transfer);
                 self.transfers.insert(
                     hash.clone(),
                     TransferInfo {
@@ -380,6 +400,7 @@ impl Model {
                 hash, ok, error, ..
             } => {
                 self.transfers.remove(&hash);
+                self.transfer_ids.remove(&hash);
                 if !ok {
                     let why = error.unwrap_or_else(|| strings::UNKNOWN_ERROR.to_string());
                     self.toast = Some(format!("{}{}", strings::DOWNLOAD_FAILED_PREFIX, why));
@@ -390,6 +411,21 @@ impl Model {
                 if !self.requests.iter().any(|r| r.request == request.request) {
                     self.requests.push(request);
                 }
+                Vec::new()
+            }
+            Event::PeerOnline { peer } => {
+                match self
+                    .peers
+                    .iter_mut()
+                    .find(|p| p.device_id == peer.device_id)
+                {
+                    Some(slot) => *slot = peer,
+                    None => self.peers.push(peer),
+                }
+                Vec::new()
+            }
+            Event::PeerOffline { device } => {
+                self.peers.retain(|p| p.device_id != device);
                 Vec::new()
             }
             Event::ContactsChanged => vec![call(Request::ListContacts, ReplyTag::Contacts)],
@@ -416,6 +452,7 @@ impl Model {
         self.current_conv = Some(conv.clone());
         self.messages.clear();
         self.has_older = false;
+        self.older_in_flight = false;
         let mut fx = Vec::new();
         if self.window_focused {
             fx.push(call(
@@ -434,9 +471,10 @@ impl Model {
         let (Some(conv), Some(first)) = (self.current_conv.clone(), self.messages.first()) else {
             return Vec::new();
         };
-        if !self.has_older {
+        if !self.has_older || self.older_in_flight {
             return Vec::new();
         }
+        self.older_in_flight = true;
         vec![self.list_messages_call(conv, Some(first.id.clone()), true)]
     }
 
@@ -558,6 +596,48 @@ impl Model {
         self.search_query.clear();
         self.search_results.clear();
         self.open_conv(conv)
+    }
+
+    /// 下载一个文件；回复里的传输 id 用于取消。
+    pub fn download(&mut self, hash: String) -> Vec<Effect> {
+        vec![call(
+            Request::DownloadBlob { hash: hash.clone() },
+            ReplyTag::Transfer { hash },
+        )]
+    }
+
+    /// 下载一组文件（文件夹消息）。
+    pub fn download_all(&mut self, hashes: Vec<String>) -> Vec<Effect> {
+        hashes.into_iter().flat_map(|h| self.download(h)).collect()
+    }
+
+    /// 取消某个文件的传输；还不知道传输 id（请求尚未回复）时不发请求。
+    pub fn cancel_transfer(&mut self, hash: &str) -> Vec<Effect> {
+        match self.transfer_ids.get(hash) {
+            Some(t) => vec![call(
+                Request::CancelTransfer {
+                    transfer: t.clone(),
+                },
+                ReplyTag::Generic,
+            )],
+            None => Vec::new(),
+        }
+    }
+
+    /// 撤回自己发的消息；结果经 MessageUpdated 事件到达。
+    pub fn recall(&mut self, msg: String) -> Vec<Effect> {
+        vec![call(Request::Recall { msg }, ReplyTag::Generic)]
+    }
+
+    /// 删除本地副本；成功回复后才从窗口移除。
+    pub fn delete_local(&mut self, msg: String) -> Vec<Effect> {
+        vec![call(
+            Request::DeleteLocal {
+                msgs: vec![msg.clone()],
+                also_my_devices: false,
+            },
+            ReplyTag::Deleted { msg },
+        )]
     }
 
     /// 把已有文件转发到会话。
@@ -1267,5 +1347,194 @@ mod tests {
             &fx,
             |r| matches!(r, Request::ListMessages { conv, .. } if conv == "c9")
         ));
+    }
+
+    // ---- Task 12：下载、取消、撤回、删除、加载更早、对端列表 ----
+
+    fn progress_event(transfer: &str, hash: &str) -> UiMsg {
+        UiMsg::Event(Event::TransferProgress {
+            transfer: transfer.into(),
+            hash: hash.into(),
+            done: 1,
+            total: 10,
+            bytes_per_sec: 1,
+        })
+    }
+
+    #[test]
+    fn download_requests_blob_with_hash_tag() {
+        let mut m = Model::new();
+        let fx = m.download("h1".into());
+        assert_eq!(
+            fx,
+            vec![Effect::Call(
+                Request::DownloadBlob { hash: "h1".into() },
+                ReplyTag::Transfer { hash: "h1".into() }
+            )]
+        );
+    }
+
+    #[test]
+    fn download_reply_records_transfer_id_and_cancel_uses_it() {
+        let mut m = Model::new();
+        m.apply(reply(
+            ReplyTag::Transfer { hash: "h1".into() },
+            Response::TransferId { value: "t9".into() },
+        ));
+        let fx = m.cancel_transfer("h1");
+        assert!(has(
+            &fx,
+            |r| matches!(r, Request::CancelTransfer { transfer } if transfer == "t9")
+        ));
+    }
+
+    #[test]
+    fn cancel_uses_id_from_progress_event_and_unknown_is_noop() {
+        let mut m = Model::new();
+        assert!(m.cancel_transfer("h1").is_empty(), "未知传输不发请求");
+        m.apply(progress_event("t3", "h1"));
+        let fx = m.cancel_transfer("h1");
+        assert!(has(
+            &fx,
+            |r| matches!(r, Request::CancelTransfer { transfer } if transfer == "t3")
+        ));
+    }
+
+    #[test]
+    fn transfer_finished_forgets_transfer_id() {
+        let mut m = Model::new();
+        m.apply(progress_event("t3", "h1"));
+        m.apply(UiMsg::Event(Event::TransferFinished {
+            transfer: "t3".into(),
+            hash: "h1".into(),
+            ok: true,
+            error: None,
+        }));
+        assert!(m.cancel_transfer("h1").is_empty());
+    }
+
+    #[test]
+    fn download_all_emits_one_call_per_hash() {
+        let mut m = Model::new();
+        let fx = m.download_all(vec!["a".into(), "b".into()]);
+        assert_eq!(calls(&fx).len(), 2);
+    }
+
+    #[test]
+    fn recall_requests_core_recall() {
+        let mut m = Model::new();
+        let fx = m.recall("m1".into());
+        assert!(has(
+            &fx,
+            |r| matches!(r, Request::Recall { msg } if msg == "m1")
+        ));
+    }
+
+    #[test]
+    fn delete_local_removes_message_only_after_ok_reply() {
+        let mut m = model_in_conv("c1", 3);
+        let fx = m.delete_local("m1".into());
+        assert!(has(&fx, |r| matches!(
+            r,
+            Request::DeleteLocal { msgs, also_my_devices: false } if msgs == &["m1".to_string()]
+        )));
+        assert_eq!(m.messages.len(), 3, "回复前不动");
+        m.apply(reply(ReplyTag::Deleted { msg: "m1".into() }, Response::Ok));
+        let ids: Vec<_> = m.messages.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, ["m0", "m2"]);
+    }
+
+    #[test]
+    fn load_older_not_repeated_while_in_flight() {
+        let mut m = model_in_conv("c1", MESSAGE_PAGE as usize);
+        assert!(m.has_older);
+        assert_eq!(m.load_older().len(), 1);
+        assert!(m.load_older().is_empty(), "上一页未返回时不重复请求");
+        m.apply(reply(
+            ReplyTag::Messages {
+                conv: "c1".into(),
+                older: true,
+            },
+            Response::Messages {
+                value: vec![msg("old", "c1", "x")],
+            },
+        ));
+        assert_eq!(m.messages.first().map(|x| x.id.as_str()), Some("old"));
+        assert!(!m.has_older, "不满一页说明已到头");
+        assert!(m.load_older().is_empty());
+    }
+
+    #[test]
+    fn load_older_error_releases_in_flight_flag() {
+        let mut m = model_in_conv("c1", MESSAGE_PAGE as usize);
+        m.load_older();
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::Messages {
+                conv: "c1".into(),
+                older: true,
+            },
+            result: Err(ApiError {
+                code: ErrorCode::Internal,
+                message: "x".into(),
+            }),
+        });
+        assert_eq!(m.load_older().len(), 1);
+    }
+
+    #[test]
+    fn switching_conv_releases_in_flight_flag() {
+        let mut m = model_in_conv("c1", MESSAGE_PAGE as usize);
+        m.load_older();
+        m.open_conv("c2".into());
+        m.apply(reply(
+            ReplyTag::Messages {
+                conv: "c2".into(),
+                older: false,
+            },
+            Response::Messages {
+                value: (0..MESSAGE_PAGE)
+                    .map(|i| msg(&format!("n{i}"), "c2", "x"))
+                    .collect(),
+            },
+        ));
+        assert_eq!(m.load_older().len(), 1);
+    }
+
+    fn peer(device: &str, user: &str, name: &str) -> PeerView {
+        PeerView {
+            device_id: device.into(),
+            device_short: "ab".into(),
+            user_id: user.into(),
+            display_name: name.into(),
+            device_name: format!("{name}的电脑"),
+            device_type: "laptop".into(),
+            addr: "1.2.3.4:5".into(),
+            path: PathClassDto::Lan,
+            is_contact: true,
+            is_mine: false,
+        }
+    }
+
+    #[test]
+    fn peer_events_upsert_and_remove() {
+        let mut m = Model::new();
+        m.apply(UiMsg::Event(Event::PeerOnline {
+            peer: peer("d1", "u1", "小王"),
+        }));
+        m.apply(UiMsg::Event(Event::PeerOnline {
+            peer: peer("d1", "u1", "小王"),
+        }));
+        assert_eq!(m.peers.len(), 1, "同一设备不重复");
+        m.apply(UiMsg::Event(Event::PeerOffline {
+            device: "d1".into(),
+        }));
+        assert!(m.peers.is_empty());
+    }
+
+    #[test]
+    fn connected_refresh_also_lists_peers() {
+        let mut m = Model::new();
+        let fx = m.apply(UiMsg::Connected);
+        assert!(has(&fx, |r| matches!(r, Request::ListPeers)));
     }
 }

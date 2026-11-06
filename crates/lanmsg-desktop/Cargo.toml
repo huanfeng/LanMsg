@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 blake3 = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
 lanmsg-api = { version = "0.1.0", path = "../lanmsg-api" }
 lanmsg-core = { version = "0.1.0", path = "../lanmsg-core" }
 lanmsg-media = { version = "0.1.0", path = "../lanmsg-media" }
@@ -21,7 +22,6 @@ tracing-subscriber = "0.3"
 windui = { path = "../../../../windinput/wind-ui-rust" }
 
 [dev-dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3"
 
 [target."cfg(windows)".dependencies]

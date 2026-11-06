@@ -4,11 +4,11 @@
 use lanmsg_api::types::{ConversationSummary, MessageBodyView, MessageView};
 use windui::prelude::*;
 
-use crate::model::Page;
 use crate::strings;
 use crate::style;
 use crate::tz;
 use crate::ui_state::UiState;
+use crate::views::chat;
 
 const SECS_PER_DAY: i64 = 86_400;
 
@@ -110,14 +110,14 @@ pub fn snippet(text: &str, query: &str, radius: usize) -> String {
     out
 }
 
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
-fn avatar(id: &str, name: &str, online: bool) -> Element {
+pub(crate) fn avatar(id: &str, name: &str, online: bool) -> Element {
     let circle = Element::stack()
         .size(style::AVATAR_SIZE, style::AVATAR_SIZE)
         .corner(style::AVATAR_SIZE as f32 / 2.0)
@@ -423,24 +423,12 @@ pub fn chat_list(ui: &UiState) -> Element {
     list
 }
 
-/// 右侧聊天区。Task 12 起接入真实消息视图，本任务只放空状态。
-fn chat_pane(ui: &UiState) -> Element {
-    let ui_go = ui.clone();
-    let go = Element::link(strings::CHAT_PANE_EMPTY_ACTION)
-        .on_click(move |_| ui_go.act(|m| m.set_page(Page::Contacts)));
-    style::empty_state(
-        strings::CHAT_PANE_EMPTY,
-        strings::CHAT_PANE_EMPTY_HINT,
-        Some(go),
-    )
-}
-
 /// 会话页：左列表 + 右聊天区，可拖动分栏。
 pub fn chats_page(ui: &UiState) -> Element {
     Element::split(
         Axis::Horizontal,
         chat_list(ui),
-        chat_pane(ui),
+        chat::chat_pane(ui),
         signal(0.3f32),
     )
     .fill()

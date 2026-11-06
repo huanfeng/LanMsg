@@ -55,3 +55,35 @@ pub const CHAT_PANE_EMPTY_HINT: &str = "从左侧选择一个会话，或在“�
 pub const CHAT_PANE_EMPTY_ACTION: &str = "去添加设备";
 pub const YESTERDAY: &str = "昨天";
 pub const UNKNOWN_CONV: &str = "未知会话";
+
+/// 聊天区。
+pub const CHAT_ONLINE: &str = "在线";
+pub const CHAT_OFFLINE: &str = "离线";
+pub const PATH_VPN: &str = "VPN";
+pub const PATH_INTERNET: &str = "公网";
+pub const PATH_RELAY: &str = "中继";
+pub const MSG_RECALLED: &str = "消息已撤回";
+pub const MSG_UNSUPPORTED: &str = "不支持的消息类型，请升级";
+pub const MSG_SENDING: &str = "发送中";
+pub const MSG_FAILED: &str = "发送失败";
+pub const MENU_COPY: &str = "复制";
+pub const MENU_RECALL: &str = "撤回";
+pub const MENU_DELETE: &str = "删除";
+pub const MENU_FORWARD: &str = "转发…";
+pub const FILE_DOWNLOAD: &str = "下载";
+pub const FILE_CANCEL: &str = "取消";
+pub const FILE_OPEN: &str = "打开";
+pub const FILE_OPEN_FOLDER: &str = "打开所在文件夹";
+pub const FILE_CLICK_TO_DOWNLOAD: &str = "点击下载";
+pub const FILE_SOURCE_OFFLINE: &str = "源设备离线";
+pub const FILE_PREPARING: &str = "准备中…";
+pub const FILE_DOWNLOADING: &str = "下载中";
+pub const FILE_COUNT_UNIT: &str = "个文件";
+pub const COMPOSER_PLACEHOLDER: &str = "消息输入区稍后提供";
+
+/// 转发对话框。
+pub const FORWARD_TITLE: &str = "转发到";
+pub const FORWARD_SEND: &str = "发送";
+pub const FORWARD_CANCEL: &str = "取消";
+pub const FORWARD_PICK_HINT: &str = "选择一个会话后才能发送";
+pub const FORWARD_EMPTY: &str = "还没有可转发的会话";

@@ -3,7 +3,7 @@
 
 use lanmsg_api::types::*;
 
-use crate::model::{ConnState, Model, Page, PairUi};
+use crate::model::{ConnState, Model, Page, PairUi, TransferInfo};
 
 /// 演示页面。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +65,26 @@ fn conv(
     }
 }
 
+/// 现场生成一张渐变小图作为演示缩略图（不提交二进制夹具）；失败返回 None。
+fn demo_thumb(name: &str, w: u32, h: u32, hue: u8) -> Option<String> {
+    let dir = std::env::temp_dir().join("lanmsg-demo-thumbs");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{name}.png"));
+    let img = image::RgbaImage::from_fn(w, h, |x, y| {
+        let t = (x + y) as f32 / (w + h) as f32;
+        let base = [70u8, 130, 150];
+        let shift = |c: u8, k: f32| (c as f32 * (0.6 + 0.8 * t) + k) as u8;
+        image::Rgba([
+            shift(base[0].wrapping_add(hue), 0.0),
+            shift(base[1], 20.0 * t),
+            shift(base[2].wrapping_sub(hue / 2), 0.0),
+            255,
+        ])
+    });
+    img.save(&path).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
 fn file_item(name: &str, mime: &str, size: u64, state: BlobState) -> FileItemView {
     let image = mime.starts_with("image/");
     let video = mime.starts_with("video/");
@@ -76,7 +96,12 @@ fn file_item(name: &str, mime: &str, size: u64, state: BlobState) -> FileItemVie
         width: (image || video).then_some(1920),
         height: (image || video).then_some(1080),
         duration_ms: video.then_some(83_000),
-        thumb_path: None,
+        thumb_path: if image || video {
+            let hue = name.bytes().fold(0u8, |a, b| a.wrapping_add(b)) % 160;
+            demo_thumb(name, 320, 180, hue)
+        } else {
+            None
+        },
         local_path: (state == BlobState::Local).then(|| format!("/tmp/{name}")),
         state,
         source_label: "小王的笔记本".into(),
@@ -96,7 +121,12 @@ fn message(i: usize, mine: bool, body: MessageBodyView) -> MessageView {
         }
         .into(),
         is_mine: mine,
-        hlc_millis: NOW - (30 - i as i64) * MIN,
+        // 前 9 条与后面隔开 11 分钟，演示时间分隔行
+        hlc_millis: if i < 9 {
+            NOW - (41 - i as i64) * MIN
+        } else {
+            NOW - (30 - i as i64) * MIN
+        },
         body,
         state: if mine {
             MessageState::Delivered
@@ -216,7 +246,49 @@ fn demo_messages() -> Vec<MessageView> {
     let mut failed = text(19, true, "最后一条发送失败的消息");
     failed.state = MessageState::Failed;
     v.push(failed);
+    // 补充两种状态：待下载的图片、自己这边仍在准备的文件
+    v.push(files(
+        20,
+        false,
+        vec![file_item(
+            "活动海报.png",
+            "image/png",
+            5_400_000,
+            BlobState::Remote,
+        )],
+    ));
+    v.push(files(
+        21,
+        true,
+        vec![file_item(
+            "素材包.zip",
+            "application/zip",
+            230_000_000,
+            BlobState::Preparing,
+        )],
+    ));
     v
+}
+
+/// “我的设备”会话里来自不同设备的几条消息。
+fn self_messages() -> Vec<MessageView> {
+    [
+        ("手机", false, "备忘已同步"),
+        ("我的电脑", true, "发一份 PDF 到手机上看"),
+        ("平板", false, "收到了，字有点小"),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, (dev, mine, t))| {
+        let mut m = text(i, *mine, t);
+        m.conv = "c-self".into();
+        m.id = format!("s{i}");
+        m.author_device_name = (*dev).into();
+        m.author_device = format!("dev-{dev}");
+        m.hlc_millis = NOW - (10 - i as i64) * MIN;
+        m
+    })
+    .collect()
 }
 
 fn device(id: &str, name: &str, ty: &str, online: bool, is_self: bool) -> DeviceView {
@@ -313,6 +385,32 @@ pub fn demo_model(p: DemoPage) -> Model {
         preview: "你好，我是隔壁组的".into(),
         created_at: NOW - 5 * MIN,
     }];
+    m.peers = vec![
+        PeerView {
+            device_id: "dev-w1".into(),
+            device_short: "w1".into(),
+            user_id: "u-wang".into(),
+            display_name: "小王".into(),
+            device_name: "小王的笔记本".into(),
+            device_type: "laptop".into(),
+            addr: "10.8.0.5:7000".into(),
+            path: PathClassDto::Vpn,
+            is_contact: true,
+            is_mine: false,
+        },
+        PeerView {
+            device_id: "dev-a2".into(),
+            device_short: "a2".into(),
+            user_id: "user-me".into(),
+            display_name: "小李".into(),
+            device_name: "我的手机".into(),
+            device_type: "phone".into(),
+            addr: "192.168.1.30:7000".into(),
+            path: PathClassDto::Lan,
+            is_contact: false,
+            is_mine: true,
+        },
+    ];
     m.devices = vec![
         device("a1", "我的电脑", "desktop", true, true),
         device("a2", "我的手机", "phone", true, false),
@@ -337,11 +435,22 @@ pub fn demo_model(p: DemoPage) -> Model {
             m.page = Page::Chats;
             // 选中一个已读会话（无徽章），同时保留两个未读会话，截图里能对比选中/未读/已读
             m.current_conv = Some("c-self".into());
+            m.messages = self_messages();
         }
         DemoPage::Chat => {
             m.page = Page::Chats;
             m.current_conv = Some("c-dm".into());
             m.messages = demo_messages();
+            // 下载中的文件：约 42%，3.1 MB/s
+            m.transfers.insert(
+                "hash-设计稿.zip".into(),
+                TransferInfo {
+                    hash: "hash-设计稿.zip".into(),
+                    done: 40_300_000,
+                    total: 96_000_000,
+                    bytes_per_sec: 3_250_000,
+                },
+            );
         }
         DemoPage::Contacts | DemoPage::Devices => {
             m.page = Page::Contacts;
@@ -369,9 +478,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn demo_chat_has_twenty_mixed_messages() {
+    fn demo_chat_has_mixed_messages() {
         let m = demo_model(DemoPage::Chat);
-        assert_eq!(m.messages.len(), 20);
+        assert_eq!(m.messages.len(), 22);
         assert_eq!(m.convs.len(), 3);
         assert_eq!(m.files.len(), 15);
         assert_eq!(m.contacts.len(), 2);

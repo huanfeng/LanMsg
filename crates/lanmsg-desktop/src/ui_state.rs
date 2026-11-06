@@ -27,6 +27,9 @@ pub struct UiState {
     pending_open: Rc<RefCell<Option<String>>>,
     /// 会话列表搜索框的文本；停止输入后由 `tick_search` 防抖触发搜索。
     pub search_text: Signal<String>,
+    /// 转发对话框请求：(第几次打开, 要转发的文件哈希)，哈希为空表示关闭。
+    /// 带序号是为了让对话框被 ESC 隐藏后，对同一批文件再次转发也能重建。
+    pub forward: Signal<(u64, Vec<String>)>,
     debouncer: Rc<RefCell<Debouncer>>,
     started: Instant,
     /// 数据目录：登记开机自启时决定是否带 `--data-dir`。
@@ -44,6 +47,7 @@ impl UiState {
             bridge,
             pending_open: Rc::new(RefCell::new(None)),
             search_text: signal(String::new()),
+            forward: signal((0u64, Vec::new())),
             debouncer: Rc::new(RefCell::new(Debouncer::new(SEARCH_DEBOUNCE_MS))),
             started: Instant::now(),
             data_dir: lanmsg_core::paths::default_data_dir(),
@@ -158,6 +162,16 @@ impl UiState {
         self.debouncer.borrow_mut().reset_to("", now);
         self.search_text.set(String::new());
         self.act(|m| m.open_from_search(conv));
+    }
+
+    /// 打开“转发到”对话框。
+    pub fn open_forward(&self, hashes: Vec<String>) {
+        self.forward.update(|f| *f = (f.0 + 1, hashes));
+    }
+
+    /// 关闭“转发到”对话框。
+    pub fn close_forward(&self) {
+        self.forward.update(|f| f.1.clear());
     }
 
     /// 连接状态是否为断开（顶部提示条用）。
