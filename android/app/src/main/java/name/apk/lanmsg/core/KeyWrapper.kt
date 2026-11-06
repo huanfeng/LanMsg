@@ -16,7 +16,19 @@ interface KeyWrapper {
 
 /** AES/GCM/NoPadding，主密钥存 AndroidKeyStore。格式：[12 字节 IV][密文+tag]。 */
 class AndroidKeystoreWrapper : KeyWrapper {
+    // 缓存已取到的主密钥；加锁防止两个线程同时首次生成，后者覆盖前者导致旧密钥文件永久解不开
+    @Volatile
+    private var cachedKey: SecretKey? = null
+
+    @Synchronized
     private fun masterKey(): SecretKey {
+        cachedKey?.let { return it }
+        val key = loadOrCreateKey()
+        cachedKey = key
+        return key
+    }
+
+    private fun loadOrCreateKey(): SecretKey {
         val ks = KeyStore.getInstance(PROVIDER).apply { load(null) }
         (ks.getKey(ALIAS, null) as? SecretKey)?.let { return it }
         val gen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)

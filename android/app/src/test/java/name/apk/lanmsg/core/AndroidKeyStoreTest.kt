@@ -1,5 +1,6 @@
 package name.apk.lanmsg.core
 
+import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -7,9 +8,11 @@ import org.junit.Assert.assertThrows
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
 import uniffi.lanmsg_ffi.FfiException
 import java.io.File
 
+@RunWith(AndroidJUnit4::class)
 class AndroidKeyStoreTest {
     private val xorWrapper = object : KeyWrapper { // 测试用可逆包装，验证文件流程
         override fun encrypt(plain: ByteArray) = plain.map { (it.toInt() xor 0x5a).toByte() }.toByteArray()

@@ -3,6 +3,8 @@ package name.apk.lanmsg.core
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.media.MediaMetadataRetriever
 import android.os.Build
@@ -72,18 +74,24 @@ class Thumbnailer(@Suppress("unused") private val ctx: Context) {
         val longest = max(bmp.width, bmp.height)
         if (longest <= maxEdge) return bmp
         val scale = maxEdge.toFloat() / longest
-        return Bitmap.createScaledBitmap(
+        val scaled = Bitmap.createScaledBitmap(
             bmp,
             max(1, (bmp.width * scale).toInt()),
             max(1, (bmp.height * scale).toInt()),
             true,
         )
+        if (scaled !== bmp) bmp.recycle() // 原图不再使用
+        return scaled
     }
 
     private fun toResult(bmp: Bitmap?, durationMs: ULong?): ThumbnailResult? {
         if (bmp == null) return null
-        val jpeg = compressToLimit(bmp, THUMB_MAX_BYTES) ?: return null
-        return ThumbnailResult(jpeg, bmp.width.toUInt(), bmp.height.toUInt(), durationMs)
+        try {
+            val jpeg = compressToLimit(bmp, THUMB_MAX_BYTES) ?: return null
+            return ThumbnailResult(jpeg, bmp.width.toUInt(), bmp.height.toUInt(), durationMs)
+        } finally {
+            bmp.recycle() // 调用方交出所有权，此后不再使用
+        }
     }
 
     companion object {
@@ -94,6 +102,24 @@ class Thumbnailer(@Suppress("unused") private val ctx: Context) {
 
         /** JPEG 质量 85→75→…→35 依次尝试，仍超限返回 null。 */
         fun compressToLimit(bitmap: Bitmap, maxBytes: Int): ByteArray? {
+            // JPEG 无透明通道，带 alpha 的图直接压会变黑底，先铺白底
+            val src = if (bitmap.hasAlpha()) flattenOnWhite(bitmap) else bitmap
+            try {
+                return compressLoop(src, maxBytes)
+            } finally {
+                if (src !== bitmap) src.recycle()
+            }
+        }
+
+        private fun flattenOnWhite(bitmap: Bitmap): Bitmap {
+            val out = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(out)
+            canvas.drawColor(Color.WHITE)
+            canvas.drawBitmap(bitmap, 0f, 0f, null)
+            return out
+        }
+
+        private fun compressLoop(bitmap: Bitmap, maxBytes: Int): ByteArray? {
             var quality = 85
             while (quality >= 35) {
                 val out = ByteArrayOutputStream()
