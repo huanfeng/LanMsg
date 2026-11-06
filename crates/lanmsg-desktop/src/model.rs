@@ -180,6 +180,9 @@ pub struct Model {
     /// 事件触发的静默刷新不自增，滚动位置得以保留。
     pub files_view_epoch: u64,
     pub settings: Option<SettingsDto>,
+    /// 已发出、尚未收到回复的设置保存数；>0 时设置页各组“保存”置灰，
+    /// 避免连续保存时用尚未刷新的旧值把另一组写回。
+    pub settings_saving: u32,
     pub transfers: BTreeMap<String, TransferInfo>,
     /// 哈希 -> 传输 id：取消传输要用；下载回复与进度事件都会登记，结束时清除。
     pub transfer_ids: BTreeMap<String, String>,
@@ -208,8 +211,8 @@ pub struct Model {
     /// 已发出联系人请求、尚未回复的用户 id（防重复点击）。
     pub pending_contact_requests: BTreeSet<String>,
     pub toast: Option<String>,
-    /// 发送失败待回填输入框的草稿 `(会话, 文字)`；由 UiState 在输入框存在时取走。
-    pub draft_restore: Option<(String, String)>,
+    /// 发送失败待回填输入框的草稿，按会话保存；由 UiState 在该会话输入框存在时取走。
+    pub draft_restore: BTreeMap<String, String>,
     pub window_focused: bool,
     pub search_query: String,
     pub search_results: Vec<MessageView>,
@@ -258,6 +261,7 @@ impl Model {
             files_loaded: false,
             files_view_epoch: 0,
             settings: None,
+            settings_saving: 0,
             transfers: BTreeMap::new(),
             transfer_ids: BTreeMap::new(),
             older_in_flight: false,
@@ -273,7 +277,7 @@ impl Model {
             pending_requests: BTreeSet::new(),
             pending_contact_requests: BTreeSet::new(),
             toast: None,
-            draft_restore: None,
+            draft_restore: BTreeMap::new(),
             window_focused: true,
             search_query: String::new(),
             search_results: Vec::new(),
@@ -290,6 +294,8 @@ impl Model {
             UiMsg::Disconnected(reason) => {
                 // 断开期间保留已有数据，只更新连接状态
                 self.conn = ConnState::Disconnected(reason);
+                // 断线后在途请求的回复可能不会再来，别让保存按钮一直停在“正在保存”
+                self.settings_saving = 0;
                 Vec::new()
             }
             UiMsg::Reply { tag, result } => match result {
@@ -306,7 +312,14 @@ impl Model {
                         ReplyTag::Sent {
                             conv,
                             draft: Some(d),
-                        } => self.draft_restore = Some((conv.clone(), d.clone())),
+                        } => {
+                            // 同一会话连续失败：先失败的排在前面，保持时间顺序
+                            let merged = match self.draft_restore.remove(conv) {
+                                Some(earlier) => format!("{earlier}\n{d}"),
+                                None => d.clone(),
+                            };
+                            self.draft_restore.insert(conv.clone(), merged);
+                        }
                         ReplyTag::Messages { older: true, .. } => self.older_in_flight = false,
                         ReplyTag::Messages { older: false, .. } => self.reload_in_flight = false,
                         ReplyTag::Files {
@@ -326,6 +339,9 @@ impl Model {
                     }
                     let mut fx = Vec::new();
                     match &tag {
+                        ReplyTag::SettingsSaved => {
+                            self.settings_saving = self.settings_saving.saturating_sub(1)
+                        }
                         ReplyTag::Responded { request } => {
                             self.pending_requests.remove(request);
                         }
@@ -477,6 +493,7 @@ impl Model {
                 self.files_more = value.len() as u32 >= self.file_filter.limit;
                 if append {
                     self.files_loading = false;
+                    // 回复条数可能多于 limit（状态筛选凑满页），不截断；翻页游标取 `files` 最后一项
                     self.files.extend(value);
                 } else {
                     self.files = value;
@@ -495,6 +512,8 @@ impl Model {
                     return Vec::new();
                 }
                 let got = value.len() as u32;
+                // 带状态筛选时 core 会凑满页，回复条数可能多于 limit：客户端不截断，
+                // 游标取累积列表的最后一项，才不会丢项；`got >= asked` 对多于 limit 的回复同样成立
                 self.files_refresh_acc.extend(value);
                 let have = self.files_refresh_acc.len() as u32;
                 // 本批满了且还没凑够：以已取回的最后一项为游标继续取
@@ -526,6 +545,7 @@ impl Model {
                 Vec::new()
             }
             (ReplyTag::SettingsSaved, Response::Ok) => {
+                self.settings_saving = self.settings_saving.saturating_sub(1);
                 self.toast = Some(strings::SETTINGS_SAVED.to_string());
                 vec![call(Request::GetSettings, ReplyTag::Settings)]
             }
@@ -1244,6 +1264,7 @@ impl Model {
 
     /// 保存设置页：`SetSettings`；显示名变了（去空白后）再发 `SetProfile`。
     pub fn save_settings(&mut self, settings: SettingsDto, display_name: &str) -> Vec<Effect> {
+        self.settings_saving += 1;
         let mut fx = vec![call(
             Request::SetSettings { settings },
             ReplyTag::SettingsSaved,
@@ -1920,9 +1941,33 @@ mod tests {
             }),
         });
         assert_eq!(
-            m.draft_restore,
-            Some(("c1".to_string(), "你好\n世界".to_string()))
+            m.draft_restore.get("c1").map(String::as_str),
+            Some("你好\n世界")
         );
+    }
+
+    fn fail_send(m: &mut Model, conv: &str, text: &str) {
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::Sent {
+                conv: conv.into(),
+                draft: Some(text.into()),
+            },
+            result: Err(ApiError {
+                code: ErrorCode::PeerOffline,
+                message: "对方离线".into(),
+            }),
+        });
+    }
+
+    #[test]
+    fn send_failures_keep_drafts_per_conv_in_time_order() {
+        let mut m = Model::new();
+        fail_send(&mut m, "c1", "第一条");
+        fail_send(&mut m, "c2", "另一会话");
+        fail_send(&mut m, "c1", "第二条");
+        assert_eq!(m.draft_restore.len(), 2);
+        assert_eq!(m.draft_restore["c1"], "第一条\n第二条");
+        assert_eq!(m.draft_restore["c2"], "另一会话");
     }
 
     #[test]
@@ -1935,7 +1980,7 @@ mod tests {
             },
             result: Ok(Response::Ok),
         });
-        assert_eq!(m.draft_restore, None);
+        assert!(m.draft_restore.is_empty());
     }
 
     #[test]
@@ -3434,5 +3479,20 @@ mod tests {
         let mut m = Model::new();
         m.apply(err_reply(ReplyTag::SettingsSaved, "下载目录不能为空"));
         assert_eq!(m.toast.as_deref(), Some("下载目录不能为空"));
+    }
+
+    #[test]
+    fn settings_saving_spans_request_until_reply() {
+        let mut m = Model::new();
+        m.save_settings(settings_dto(), "");
+        assert_eq!(m.settings_saving, 1);
+        m.apply(reply(ReplyTag::SettingsSaved, Response::Ok));
+        assert_eq!(m.settings_saving, 0);
+        m.save_settings(settings_dto(), "");
+        m.apply(err_reply(ReplyTag::SettingsSaved, "失败"));
+        assert_eq!(m.settings_saving, 0, "失败回复也要放开按钮");
+        m.save_settings(settings_dto(), "");
+        m.apply(UiMsg::Disconnected("断开".into()));
+        assert_eq!(m.settings_saving, 0, "断线后回复不会再来");
     }
 }

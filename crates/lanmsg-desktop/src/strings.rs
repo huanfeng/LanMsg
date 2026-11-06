@@ -222,6 +222,9 @@ pub const FILES_DELETE_ACTION: &str = "删除";
 pub const SETTINGS_SAVED: &str = "设置已保存";
 pub const SETTINGS_SAVE: &str = "保存";
 pub const SETTINGS_SAVE_BLOCKED: &str = "有内容不符合要求，改正后才能保存";
+pub const SETTINGS_SAVING: &str = "正在保存";
+/// 自动下载上限超出可填范围（如 Android 写入的“不限”）时输入框里显示的文字。
+pub const SETTINGS_MB_UNLIMITED: &str = "不限";
 pub const SETTINGS_SAVE_CLEAN: &str = "没有修改";
 pub const SETTINGS_LOADING: &str = "正在读取设置…";
 pub const SETTINGS_GROUP_PERSONAL: &str = "个人";

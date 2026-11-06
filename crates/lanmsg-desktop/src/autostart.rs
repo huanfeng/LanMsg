@@ -25,17 +25,19 @@ pub fn set_enabled(on: bool, data_dir: &Path) -> io::Result<()> {
     imp::set_enabled(on, &daemon_exe()?, extra)
 }
 
-/// desktop entry 的 Exec 参数转义：加双引号，引号内 `"`、`` ` ``、`$`、`\` 前加反斜杠，
-/// `%` 写作 `%%`（否则会被当作字段代码）。
+/// desktop entry 的 Exec 参数转义。规范里 Exec 值先受通用字符串转义（`\\`→`\`），
+/// 再受 Exec 引号内转义，所以字面 `"`、`` ` ``、`$`、`\` 在文件里要写成「两个反斜杠 + 字符」
+/// （字面反斜杠即四个反斜杠）；`%` 写作 `%%`（否则会被当作字段代码）。
 #[cfg(any(target_os = "linux", test))]
 fn escape_exec_arg(arg: &str) -> String {
     let mut out = String::from("\"");
     for ch in arg.chars() {
         match ch {
-            '"' | '`' | '$' | '\\' => {
-                out.push('\\');
+            '"' | '`' | '$' => {
+                out.push_str("\\\\");
                 out.push(ch);
             }
+            '\\' => out.push_str("\\\\\\\\"),
             '%' => out.push_str("%%"),
             _ => out.push(ch),
         }
@@ -283,13 +285,57 @@ mod imp {
 mod tests {
     use super::*;
 
+    /// 按 desktop entry 规范反向解析：先通用字符串转义（`\\`→`\`），
+    /// 再去掉引号并还原 Exec 引号内转义（`\"` `\`` `\$` `\\`）与 `%%`。
+    fn unescape_exec_arg(text: &str) -> String {
+        let mut stage1 = String::new();
+        let mut it = text.chars();
+        while let Some(c) = it.next() {
+            if c == '\\' {
+                stage1.push(it.next().expect("悬空反斜杠"));
+            } else {
+                stage1.push(c);
+            }
+        }
+        let inner = stage1
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .expect("应被双引号包裹");
+        let mut out = String::new();
+        let mut it = inner.chars();
+        while let Some(c) = it.next() {
+            match c {
+                '\\' => out.push(it.next().expect("悬空反斜杠")),
+                '%' => {
+                    assert_eq!(it.next(), Some('%'), "% 必须写作 %%");
+                    out.push('%');
+                }
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
     #[test]
     fn escape_exec_arg_handles_special_chars() {
         assert_eq!(escape_exec_arg("/opt/a b/x"), "\"/opt/a b/x\"");
-        assert_eq!(escape_exec_arg(r#"a"b"#), r#""a\"b""#);
-        assert_eq!(escape_exec_arg("a$b`c"), r#""a\$b\`c""#);
-        assert_eq!(escape_exec_arg(r"a\b"), r#""a\\b""#);
+        assert_eq!(escape_exec_arg(r#"a"b"#), r#""a\\"b""#);
+        assert_eq!(escape_exec_arg("a$b`c"), r#""a\\$b\\`c""#);
+        assert_eq!(escape_exec_arg(r"a\b"), r#""a\\\\b""#);
         assert_eq!(escape_exec_arg("100%"), "\"100%%\"");
+    }
+
+    #[test]
+    fn escape_exec_arg_roundtrips_through_spec_unescape() {
+        for path in [
+            "/opt/a b/x",
+            r"/we\ird/pa th",
+            r#"/q"uote/x"#,
+            "/d$ollar/`tick`/100%/x y",
+            r#"\"$`% mix"#,
+        ] {
+            assert_eq!(unescape_exec_arg(&escape_exec_arg(path)), path);
+        }
     }
 
     #[test]

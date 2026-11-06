@@ -190,6 +190,7 @@ impl UiState {
                 }
             }
         }
+        self.prune_composer();
         self.rev.update(|v| *v += 1);
     }
 
@@ -199,21 +200,26 @@ impl UiState {
         self.restore_draft();
     }
 
+    /// 输入框所属会话已不在前台（离开会话页或切换了会话）时注销登记，
+    /// 避免往已失效的 Signal 写入并白白消费草稿。
+    fn prune_composer(&self) {
+        let stale = match self.composer.borrow().as_ref() {
+            Some((conv, _)) => self.read(|m| {
+                m.page != Page::Chats || m.current_conv.as_deref() != Some(conv.as_str())
+            }),
+            None => false,
+        };
+        if stale {
+            self.composer.borrow_mut().take();
+        }
+    }
+
     /// 发送失败的草稿属于当前输入框所在会话时回填并清除；输入框已有新内容则草稿放前面。
     fn restore_draft(&self) {
         let Some((conv, text)) = self.composer.borrow().clone() else {
             return;
         };
-        let draft = {
-            let mut m = self.model.borrow_mut();
-            match m.draft_restore.take() {
-                Some((c, d)) if c == conv => Some(d),
-                other => {
-                    m.draft_restore = other;
-                    None
-                }
-            }
-        };
+        let draft = self.model.borrow_mut().draft_restore.remove(&conv);
         if let Some(d) = draft {
             text.set(crate::views::composer::merge_draft(&d, &text.get()));
         }
@@ -388,5 +394,57 @@ mod tests {
         // 之后新出现同名会话也不会被追溯打开
         ui.dispatch(convs_reply(&["c1", "ghost"]));
         assert_eq!(ui.read(|m| m.current_conv.clone()), None);
+    }
+
+    fn send_failed(conv: &str, draft: &str) -> UiMsg {
+        UiMsg::Reply {
+            tag: ReplyTag::Sent {
+                conv: conv.into(),
+                draft: Some(draft.into()),
+            },
+            result: Err(lanmsg_api::types::ApiError {
+                code: lanmsg_api::types::ErrorCode::PeerOffline,
+                message: "对方离线".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn failed_draft_is_restored_into_live_composer() {
+        let ui = UiState::new(Model::new(), Bridge::detached());
+        ui.act(|m| m.open_conv("c1".into()));
+        let text = signal(String::new());
+        ui.register_composer("c1".into(), text);
+        ui.dispatch(send_failed("c1", "草稿"));
+        assert_eq!(text.get(), "草稿");
+        assert!(ui.read(|m| m.draft_restore.is_empty()));
+    }
+
+    #[test]
+    fn composer_is_unregistered_when_leaving_page_or_switching_conv() {
+        let ui = UiState::new(Model::new(), Bridge::detached());
+        ui.act(|m| m.open_conv("c1".into()));
+        let text = signal(String::new());
+        ui.register_composer("c1".into(), text);
+        ui.act(|m| m.set_page(Page::Files));
+        ui.dispatch(send_failed("c1", "草稿"));
+        assert_eq!(text.get(), "", "已离开会话页，不应写入失效的输入框");
+        assert_eq!(
+            ui.read(|m| m.draft_restore.get("c1").cloned()).as_deref(),
+            Some("草稿")
+        );
+
+        // 切换会话同样注销；回到 c1 重建输入框时补回草稿
+        let ui = UiState::new(Model::new(), Bridge::detached());
+        ui.act(|m| m.open_conv("c1".into()));
+        let old = signal(String::new());
+        ui.register_composer("c1".into(), old);
+        ui.act(|m| m.open_conv("c2".into()));
+        ui.dispatch(send_failed("c1", "草稿"));
+        assert_eq!(old.get(), "");
+        ui.act(|m| m.open_conv("c1".into()));
+        let new = signal(String::new());
+        ui.register_composer("c1".into(), new);
+        assert_eq!(new.get(), "草稿");
     }
 }

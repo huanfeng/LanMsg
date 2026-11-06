@@ -95,6 +95,7 @@ pub fn is_grid(kind: &FileKindFilter) -> bool {
 }
 
 /// 把“来自 张三 · 存于 我的台式机”拆成独立的几段：界面上各段分开摆放，不用中点拼接。
+/// 依赖 core 返回的 `source_label` 以 `" · "`（中点两侧各一个空格）分段；core 改了分隔符这里要同步。
 pub fn split_source(label: &str) -> Vec<String> {
     label
         .split(" · ")
@@ -846,6 +847,24 @@ mod tests {
             vec!["来自 张三", "已下载"]
         );
         assert!(split_source("").is_empty());
+    }
+
+    #[test]
+    fn split_source_handles_missing_and_repeated_separators() {
+        // 无分隔：整段作为一项
+        assert_eq!(split_source("来自 张三"), vec!["来自 张三"]);
+        // 多个分隔：每段各成一项
+        assert_eq!(
+            split_source("来自 张三 · 存于 台式机 · 已下载"),
+            vec!["来自 张三", "存于 台式机", "已下载"]
+        );
+        // 首尾 / 连续分隔产生的空段被丢弃
+        assert_eq!(
+            split_source(" · 来自 张三 ·  · 已下载 · "),
+            vec!["来自 张三", "已下载"]
+        );
+        // 没有空格的中点不是分隔符
+        assert_eq!(split_source("甲·乙"), vec!["甲·乙"]);
     }
 
     #[test]

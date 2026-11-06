@@ -60,6 +60,17 @@ pub enum GroupState {
     Invalid,
     /// 有可保存的修改。
     Dirty,
+    /// 有一次保存还没收到回复，暂不能再保存。
+    Saving,
+}
+
+/// 在途保存期间所有组一律按 `Saving` 显示（保存按钮置灰，说明“正在保存”）。
+pub fn with_saving(state: GroupState, saving: bool) -> GroupState {
+    if saving {
+        GroupState::Saving
+    } else {
+        state
+    }
 }
 
 /// 个人组：在已保存设置上只替换设备名。
@@ -108,8 +119,14 @@ pub fn group_state(dto: Option<&SettingsDto>, base: &SettingsDto, extra_dirty: b
 }
 
 /// 字节数换成输入框里的 MB 文字（向下取整；非整 MB 的旧值保存时会按整 MB 写回）。
+/// 超出可填范围（如 Android 的“不限”）显示占位“不限”，`resolve_mb` 见到它视为没改、保留原值。
 fn mb_text(bytes: u64) -> String {
-    (bytes / MIB).to_string()
+    let mb = bytes / MIB;
+    if MB_RANGE.contains(&mb) {
+        mb.to_string()
+    } else {
+        strings::SETTINGS_MB_UNLIMITED.to_string()
+    }
 }
 
 /// 解析单播通告目标：每行一个，去首尾空白、忽略空行；每行必须是 IP、`IP:端口` 或网段（CIDR）。
@@ -288,6 +305,11 @@ fn group_footer(
             Role::Danger,
             GroupState::Invalid,
         ))
+        .child(hint(
+            strings::SETTINGS_SAVING,
+            Role::TextSubtle,
+            GroupState::Saving,
+        ))
         .child(
             Element::button(strings::SETTINGS_SAVE)
                 .enabled_when(move || state() == GroupState::Dirty)
@@ -331,40 +353,56 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
     let targets_err = targets.map(|v| parse_targets(v).err().unwrap_or_default());
     let targets_ok = targets_err.map(|e| e.is_empty());
     let not = |ok: Signal<bool>| ok.map(|v| !*v);
+    let saving = ui.derive(|m| m.settings_saving > 0);
 
     // 各组按钮状态
-    let personal_state = move || match saved.get() {
-        None => GroupState::Clean,
-        Some(b) => {
-            if !display_ok.get() || !device_ok.get() {
-                return GroupState::Invalid;
-            }
-            let name_changed = display.get().trim() != saved_name.get();
-            group_state(Some(&personal_dto(&b, &device.get())), &b, name_changed)
-        }
+    let personal_state = move || {
+        with_saving(
+            match saved.get() {
+                None => GroupState::Clean,
+                Some(b) => {
+                    if !display_ok.get() || !device_ok.get() {
+                        return GroupState::Invalid;
+                    }
+                    let name_changed = display.get().trim() != saved_name.get();
+                    group_state(Some(&personal_dto(&b, &device.get())), &b, name_changed)
+                }
+            },
+            saving.get(),
+        )
     };
-    let storage_state = move || match saved.get() {
-        None => GroupState::Clean,
-        Some(b) => group_state(
-            storage_dto(
-                &b,
-                &dir.get(),
-                &image_mb.get(),
-                &file_mb.get(),
-                wifi_only.get(),
-            )
-            .as_ref(),
-            &b,
-            false,
-        ),
+    let storage_state = move || {
+        with_saving(
+            match saved.get() {
+                None => GroupState::Clean,
+                Some(b) => group_state(
+                    storage_dto(
+                        &b,
+                        &dir.get(),
+                        &image_mb.get(),
+                        &file_mb.get(),
+                        wifi_only.get(),
+                    )
+                    .as_ref(),
+                    &b,
+                    false,
+                ),
+            },
+            saving.get(),
+        )
     };
-    let network_state = move || match saved.get() {
-        None => GroupState::Clean,
-        Some(b) => group_state(
-            network_dto(&b, localsend.get(), &targets.get()).as_ref(),
-            &b,
-            false,
-        ),
+    let network_state = move || {
+        with_saving(
+            match saved.get() {
+                None => GroupState::Clean,
+                Some(b) => group_state(
+                    network_dto(&b, localsend.get(), &targets.get()).as_ref(),
+                    &b,
+                    false,
+                ),
+            },
+            saving.get(),
+        )
     };
 
     let ui_personal = ui.clone();
@@ -635,6 +673,33 @@ mod tests {
         assert_eq!(resolve_mb("100", unlimited), Some(100 * MIB));
         // 非整 MB 的旧值，文字没变时字节数原样保留
         assert_eq!(resolve_mb("1", MIB + 5), Some(MIB + 5));
+    }
+
+    #[test]
+    fn mb_text_shows_unlimited_placeholder_beyond_range() {
+        assert_eq!(mb_text(50 * MIB), "50");
+        assert_eq!(mb_text(10_240 * MIB), "10240");
+        assert_eq!(mb_text(10_241 * MIB), strings::SETTINGS_MB_UNLIMITED);
+        assert_eq!(mb_text(u64::MAX), strings::SETTINGS_MB_UNLIMITED);
+        // 文字等于占位视为没改，原值（含超大值）保留
+        let ph = strings::SETTINGS_MB_UNLIMITED;
+        assert_eq!(resolve_mb(ph, u64::MAX), Some(u64::MAX));
+        assert_eq!(
+            resolve_mb(&format!(" {ph} "), 10_241 * MIB),
+            Some(10_241 * MIB)
+        );
+        // 已保存值在范围内时，占位文字不是合法输入
+        assert_eq!(resolve_mb(ph, 5 * MIB), None);
+        // 改成数字才按范围校验
+        assert_eq!(resolve_mb("20000", u64::MAX), None);
+    }
+
+    #[test]
+    fn saving_overrides_group_state() {
+        for s in [GroupState::Clean, GroupState::Invalid, GroupState::Dirty] {
+            assert_eq!(with_saving(s, true), GroupState::Saving);
+            assert_eq!(with_saving(s, false), s);
+        }
     }
 
     #[test]
