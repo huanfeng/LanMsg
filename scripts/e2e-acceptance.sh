@@ -255,23 +255,18 @@ sas_pair() {
         [ "$tries" -lt 25 ] || fail "$n 始终发现不了 $a（组播发现表为空？）：$(cat "$pj")"
         sleep 1
     done
-    # 数字与会话 ID 一律取自 watch 事件流：
-    #  - 响应方 A 的 PairStatus 事件会话 ID 与 pair-start 返回的不同（缺陷，见报告），
-    #    pair-start 的输出因按返回的会话过滤而永远等不到数字；
-    #  - pair-join 在 PairJoin 调用之后才订阅事件，可能错过 ShowSas。
-    wait_for 30 "$a 的事件流出现 ShowSas" grep -q 'ShowSas' "$SC/watch_$a.out"
-    wait_for 30 "$n 的事件流出现 ShowSas" grep -q 'ShowSas' "$wn"
-    local code_a code_n sess_a sess_n
-    code_a="$(grep -o '"ShowSas":{"code":"[0-9]*"' "$SC/watch_$a.out" | head -1 | sed -E 's/.*"code":"([0-9]*)"/\1/')"
-    code_n="$(grep -o '"ShowSas":{"code":"[0-9]*"' "$wn" | head -1 | sed -E 's/.*"code":"([0-9]*)"/\1/')"
+    # 数字与会话 ID 直接取自 pair-start / pair-join 的输出（CLI 先订阅事件再发请求，
+    # 响应方事件会话与 pair-start 返回值一致）。
+    wait_for 30 "$a 打印比对数字" grep -q '比对数字：' "$ps"
+    wait_for 30 "$n 打印比对数字" grep -q '比对数字：' "$pj"
+    local code_a code_n sess_n
+    code_a="$(grep -o '比对数字：[0-9]*' "$ps" | head -1 | sed -E 's/.*：//')"
+    code_n="$(grep -o '比对数字：[0-9]*' "$pj" | head -1 | sed -E 's/.*：//')"
     [ "${#code_a}" = 6 ] || fail "A 端数字不是 6 位：'$code_a'"
     [ "$code_a" = "$code_n" ] || fail "两端数字不同：A=$code_a N=$code_n"
-    sess_a="$(grep 'ShowSas' "$SC/watch_$a.out" | head -1 | sed -E 's/.*"session":"([0-9a-f]*)".*/\1/')"
-    sess_n="$(grep 'ShowSas' "$wn" | head -1 | sed -E 's/.*"session":"([0-9a-f]*)".*/\1/')"
-    if [ "$sess_a" != "$sess_start" ]; then
-        echo "NOTE[缺陷]：pair-start 返回的会话 $sess_start 与事件流里的会话 $sess_a 不一致"
-    fi
-    c "$a" pair-confirm "$sess_a" "$ans_a" >/dev/null
+    sess_n="$(awk '/^session:/{print $2}' "$pj" | head -1)"
+    [ -n "$sess_n" ] || fail "pair-join 未打印 session：$(cat "$pj")"
+    c "$a" pair-confirm "$sess_start" "$ans_a" >/dev/null
     c "$n" pair-confirm "$sess_n" "$ans_n" >/dev/null
     SAS_CODE="$code_a"
 }
@@ -282,7 +277,6 @@ sc_pair_sas() {
     new_node b
     start_node b a
     sas_pair a b yes yes
-    # Done 以事件流为准（pair-start/pair-join 的输出受上述会话 ID/订阅时序问题影响）。
     wait_for 30 "A 端 Done" grep -q '"PairStatus".*"Done"' "$SC/watch_a.out"
     wait_for 30 "B 端 Done" grep -q '"PairStatus".*"Done"' "$SC/watch_b.out"
     [ "$(uid b)" = "$(uid a)" ] || fail "SAS 配对后 user_id 不同"
@@ -657,7 +651,7 @@ trap cleanup EXIT
 
 # 端口基数随机化：固定端口曾与同机并发运行的其他实例冲突（守护进程会静默回退到
 # 随机端口，导致 --peer 指向落空）。
-PORT_RUN_BASE=$((30000 + (RANDOM % 200) * 100))
+PORT_RUN_BASE=$((15000 + (RANDOM % 100) * 100)) # 避开内核临时端口段（32768+），否则会与出站连接撞端口
 
 RESULTS=()
 FAILED=0

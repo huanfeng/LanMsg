@@ -14,6 +14,9 @@ use lanmsg_api::types::{
     RequestAction, RequestKind, Response, SettingsDto, StatusDto,
 };
 
+/// IpcClient::events() 返回的事件接收端。
+type EventRx = tokio::sync::broadcast::Receiver<Event>;
+
 #[derive(Parser)]
 #[command(name = "lanmsg-cli", about = "LanMsg 命令行客户端（需先启动 lanmsgd）")]
 struct Cli {
@@ -250,6 +253,10 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Log { conv, limit } => {
+            let self_device = match client.call(Request::GetSelf).await {
+                Ok(Response::SelfInfo { value }) => value.device_id,
+                _ => String::new(),
+            };
             let resp = client
                 .call(Request::ListMessages {
                     conv,
@@ -261,12 +268,16 @@ async fn main() -> Result<()> {
             match resp {
                 Response::Messages { value } => {
                     for m in value {
-                        let name = if m.is_mine {
+                        let name = if m.is_mine && m.author_device == self_device {
                             "我".to_string()
+                        } else if m.is_mine {
+                            format!("我（{}）", m.author_device_name)
                         } else {
                             m.author_device_name.clone()
                         };
-                        if let MessageBodyView::Text { text } = &m.body {
+                        if let MessageBodyView::Text { text } | MessageBodyView::System { text } =
+                            &m.body
+                        {
                             println!("[{}] {}: {}", hhmmss(m.hlc_millis), name, text);
                         } else {
                             println!("[{}] {}: <不支持的消息类型>", hhmmss(m.hlc_millis), name);
@@ -323,6 +334,8 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::PairStart { sas } => {
+            // 先订阅事件再发请求，避免错过快速出现的状态。
+            let rx = client.events();
             let resp = client
                 .call(Request::PairStart {
                     method: if sas { PairMethod::Sas } else { PairMethod::Qr },
@@ -337,7 +350,7 @@ async fn main() -> Result<()> {
                 println!("qr_uri: {uri}");
             }
             println!("session: {}", value.session);
-            watch_pair_status(&client, &value.session).await;
+            watch_pair_status(rx, &value.session).await;
         }
         Cmd::PairJoin { target } => {
             let target = if target.starts_with("lanmsg://") {
@@ -345,12 +358,17 @@ async fn main() -> Result<()> {
             } else {
                 PairTarget::Device { device: target }
             };
-            client
+            // 先订阅事件再发请求：SAS 的 ShowSas 可能在调用返回前就已发出。
+            let rx = client.events();
+            let resp = client
                 .call(Request::PairJoin { target })
                 .await
                 .map_err(api_err)?;
+            if let Response::PairSession { value } = &resp {
+                println!("session: {}", value.session);
+            }
             println!("已发起加入，等待配对状态…");
-            watch_pair_any(&client).await;
+            watch_pair_any(rx).await;
         }
         Cmd::PairConfirm { session, answer } => {
             let matches = match answer.as_str() {
@@ -687,8 +705,7 @@ async fn settings_set(client: &IpcClient, mut kv: Vec<String>) -> anyhow::Result
 }
 
 /// 持续打印指定会话的 PairStatus 直至 Done/Failed。
-async fn watch_pair_status(client: &IpcClient, session: &str) {
-    let mut rx = client.events();
+async fn watch_pair_status(mut rx: EventRx, session: &str) {
     loop {
         match rx.recv().await {
             Ok(Event::PairStatus { session: s, state }) if s == session => {
@@ -704,8 +721,7 @@ async fn watch_pair_status(client: &IpcClient, session: &str) {
 }
 
 /// 打印任意 PairStatus 直至 Done/Failed（PairJoin 后无 session 时使用）。
-async fn watch_pair_any(client: &IpcClient) {
-    let mut rx = client.events();
+async fn watch_pair_any(mut rx: EventRx) {
     loop {
         match rx.recv().await {
             Ok(Event::PairStatus { state, .. }) => {
