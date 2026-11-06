@@ -16,14 +16,14 @@ LanMsg 是“自己的几台设备之间”的聊天式传输工具。界面的�
 | 名称 | 值 | 用途 |
 |---|---|---|
 | `ink` | `#16202A` | 正文、标题 |
-| `ink_muted` | `#5A6875` | 次要文字（预览、说明） |
-| `ink_subtle` | `#8A97A3` | 时间戳、脚注 |
+| `ink_muted` | `#4F5C68` | 次要文字（预览、说明） |
+| `ink_subtle` | `#5F6C78` | 时间戳、脚注 |
 | `canvas` | `#F4F6F7` | 窗口背景、内容区背景 |
 | `rail` | `#E9EDEF` | 左侧图标栏背景（与列表区分层） |
 | `surface` | `#FFFFFF` | 会话列表、卡片、输入框、对方气泡 |
 | `line` | `#DCE2E6` | 分隔线、输入框描边 |
 | `signal` | `#0B7A75` | 强调色（深青）：选中、主按钮、未读徽章底、我的气泡 |
-| `signal_soft` | `#E1F1EF` | 选中行底色、次要强调底 |
+| `signal_soft` | `#E8F4F2` | 选中行底色、次要强调底 |
 | `online` | `#1E9E5A` | 在线点 |
 | `danger` | `#C2410C` | 错误、校验提示 |
 
@@ -51,7 +51,7 @@ LanMsg 是“自己的几台设备之间”的聊天式传输工具。界面的�
 ## 4. 暗色主题
 
 跟随系统（`App::on_system_theme_changed`）。映射：`canvas #12181D`、`rail #182027`、`surface #1C252C`、`line #2B363F`、
-`ink #E6ECEF`、`ink_muted #A3B0BA`、`ink_subtle #73818C`、`signal #3FB8AF`（暗底上作文字/描边也够亮）、`signal_soft #1E3533`、
+`ink #E6ECEF`、`ink_muted #A3B0BA`、`ink_subtle #8D9AA5`、`signal #3FB8AF`（暗底上作文字/描边也够亮）、`signal_soft #1E3533`、
 `online #3CC27A`、`danger #F08A5D`。头像底色不变。
 
 ## 5. 间距与形状
@@ -118,3 +118,9 @@ LanMsg 是“自己的几台设备之间”的聊天式传输工具。界面的�
 8. 空状态只有一句“选择一个会话开始聊天”→ 按 6 节加图标与可行动的说明。
 9. 向导：标题字重太轻；两个按钮同等权重且都禁用、没有说明原因 → 标题 600；“这是我的第一台设备”为主按钮，“加入我已有的设备”为次按钮；名字为空时在名字框下用 meta 字号说明“填写名字后继续”。
 10. 向导卡片在大面积灰底里显得悬空 → 卡片上方加应用标识（48px）与产品名，卡片宽 440、内边距 24。
+
+## 11. 对比度要求（v1.1 补充）
+
+所有文字与其底色的对比度 ≥ 4.5:1（12px 的 meta 字号同样适用），主按钮悬停态白字同样 ≥ 4.5:1。
+v1 中 `ink_subtle`（#8A97A3）在 surface 上只有 2.98:1，已改为 #5F6C78；`ink_muted` 同步加深以保持层级；`signal_soft` 调浅以保证选中项上的 `signal` 文字 ≥ 4.6:1；暗色 `ink_subtle` 改为 #8D9AA5。
+`style.rs` 中须有单元测试断言以下组合的对比度：ink/ink_muted/ink_subtle × surface/canvas/rail/signal_soft（浅暗两套）、白字 × 主按钮实底与悬停。
