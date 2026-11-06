@@ -42,6 +42,7 @@ pub enum ReplyTag {
     Devices,
     Files { append: bool },
     Settings,
+    Init,
     Pair,
     Sent { conv: String },
     Transfer,

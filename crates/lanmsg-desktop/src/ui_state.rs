@@ -3,12 +3,17 @@
 // 注释中文，标识符英文。
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Instant;
 
 use windui::prelude::{signal, Signal};
 
+use crate::autostart;
 use crate::bridge::{Bridge, ReplyTag, UiMsg};
+use crate::debounce::Debouncer;
 use crate::model::{ConnState, Effect, Model, Page};
+use crate::strings;
 use lanmsg_api::types::Response;
 
 /// 界面共享状态句柄（可克隆，仅限 UI 线程使用）。
@@ -20,7 +25,16 @@ pub struct UiState {
     bridge: Bridge,
     /// `--open-conv` 带来的待定位会话：会话列表到达后才能判断是否存在。
     pending_open: Rc<RefCell<Option<String>>>,
+    /// 会话列表搜索框的文本；停止输入后由 `tick_search` 防抖触发搜索。
+    pub search_text: Signal<String>,
+    debouncer: Rc<RefCell<Debouncer>>,
+    started: Instant,
+    /// 数据目录：登记开机自启时决定是否带 `--data-dir`。
+    data_dir: PathBuf,
 }
+
+/// 搜索框停止输入多久后发起搜索（毫秒）。
+const SEARCH_DEBOUNCE_MS: u64 = 300;
 
 impl UiState {
     pub fn new(model: Model, bridge: Bridge) -> UiState {
@@ -29,7 +43,17 @@ impl UiState {
             rev: signal(0u64),
             bridge,
             pending_open: Rc::new(RefCell::new(None)),
+            search_text: signal(String::new()),
+            debouncer: Rc::new(RefCell::new(Debouncer::new(SEARCH_DEBOUNCE_MS))),
+            started: Instant::now(),
+            data_dir: lanmsg_core::paths::default_data_dir(),
         }
+    }
+
+    /// 指定实际使用的数据目录（非演示模式）。
+    pub fn with_data_dir(mut self, dir: PathBuf) -> UiState {
+        self.data_dir = dir;
+        self
     }
 
     /// 处理桥消息：更新 Model、执行副作用、通知视图。
@@ -102,10 +126,38 @@ impl UiState {
     }
 
     fn run(&self, effects: Vec<Effect>) {
-        for Effect::Call(req, tag) in effects {
-            self.bridge.call(req, tag);
+        for fx in effects {
+            match fx {
+                Effect::Call(req, tag) => self.bridge.call(req, tag),
+                Effect::EnableAutostart => {
+                    if let Err(e) = autostart::set_enabled(true, &self.data_dir) {
+                        self.model.borrow_mut().toast =
+                            Some(format!("{}{}", strings::AUTOSTART_FAILED, e));
+                    }
+                }
+            }
         }
         self.rev.update(|v| *v += 1);
+    }
+
+    /// 周期调用：搜索框文本稳定后发起搜索。
+    pub fn tick_search(&self) {
+        let now = self.started.elapsed().as_millis() as u64;
+        let fired = self
+            .debouncer
+            .borrow_mut()
+            .feed(&self.search_text.get(), now);
+        if let Some(q) = fired {
+            self.act(|m| m.search(q));
+        }
+    }
+
+    /// 点击搜索结果：清空搜索框并打开会话。
+    pub fn open_from_search(&self, conv: String) {
+        let now = self.started.elapsed().as_millis() as u64;
+        self.debouncer.borrow_mut().reset_to("", now);
+        self.search_text.set(String::new());
+        self.act(|m| m.open_from_search(conv));
     }
 
     /// 连接状态是否为断开（顶部提示条用）。

@@ -38,6 +38,14 @@ impl DemoPage {
 const NOW: i64 = 1_790_000_000_000;
 const MIN: i64 = 60_000;
 
+/// 会话列表时间相对真实当前时间，截图里才会出现“HH:MM / 昨天”等形式。
+fn real_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(NOW)
+}
+
 fn conv(
     id: &str,
     kind: ConvKind,
@@ -51,7 +59,7 @@ fn conv(
         kind,
         title: title.into(),
         last_text: Some(text.into()),
-        last_hlc_millis: Some(NOW - ago * MIN),
+        last_hlc_millis: Some(real_now() - ago * MIN),
         unread,
         peer_online: true,
     }
@@ -272,7 +280,7 @@ pub fn demo_model(p: DemoPage) -> Model {
             ConvKind::Guest,
             "网页访客 192.168.1.8",
             "[图片]",
-            300,
+            1560,
             1,
         ),
     ];

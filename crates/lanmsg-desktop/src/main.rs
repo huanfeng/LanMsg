@@ -8,10 +8,12 @@
 
 mod autostart;
 mod bridge;
+mod debounce;
 mod decoders;
 mod fixtures;
 mod model;
 mod strings;
+mod tz;
 mod ui_state;
 mod views;
 
@@ -123,7 +125,7 @@ fn main() {
                 data_dir.clone(),
                 tx,
             );
-            UiState::new(Model::new(), bridge)
+            UiState::new(Model::new(), bridge).with_data_dir(data_dir.clone())
         }
     };
     *slot.borrow_mut() = Some(ui.clone());
@@ -134,7 +136,11 @@ fn main() {
     }
 
     let ui_focus = ui.clone();
+    let ui_tick = ui.clone();
     app = app
+        .on_interval(std::time::Duration::from_millis(100), move |_ctx| {
+            ui_tick.tick_search();
+        })
         .on_window_activated(move |_ctx, active| {
             ui_focus.act(|m| m.set_window_focused(active));
         })

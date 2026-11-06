@@ -58,6 +58,8 @@ pub enum PairUi {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     Call(Request, ReplyTag),
+    /// 首台设备初始化成功后登记 lanmsgd 开机自启（失败只提示）。
+    EnableAutostart,
 }
 
 /// 界面全部可观察状态。
@@ -83,6 +85,10 @@ pub struct Model {
     pub window_focused: bool,
     pub search_query: String,
     pub search_results: Vec<MessageView>,
+    /// 已提交、尚未得到回复的向导初始化模式。
+    pub init_mode: Option<InitMode>,
+    /// 以“加入已有设备”方式完成了 Init，等待配对（Task 14 接管）。
+    pub wizard_joining: bool,
 }
 
 impl Default for Model {
@@ -122,6 +128,8 @@ impl Model {
             window_focused: true,
             search_query: String::new(),
             search_results: Vec::new(),
+            init_mode: None,
+            wizard_joining: false,
         }
     }
 
@@ -276,6 +284,16 @@ impl Model {
                     self.search_results = value;
                 }
                 Vec::new()
+            }
+            (ReplyTag::Init, _) => {
+                let mut fx = Vec::new();
+                match self.init_mode.take() {
+                    Some(InitMode::FirstDevice) => fx.push(Effect::EnableAutostart),
+                    Some(InitMode::JoinExisting) => self.wizard_joining = true,
+                    None => {}
+                }
+                fx.push(call(Request::GetSelf, ReplyTag::SelfInfo));
+                fx
             }
             (ReplyTag::Forwarded, _) => {
                 self.toast = Some(strings::FORWARDED.to_string());
@@ -466,6 +484,51 @@ impl Model {
         )]
     }
 
+    /// 向导提交：校验显示名后发 `Init`。设备名为空时用默认值。
+    pub fn submit_init(
+        &mut self,
+        display_name: &str,
+        device_name: &str,
+        mode: InitMode,
+    ) -> Vec<Effect> {
+        if !wizard_name_ok(display_name) {
+            self.toast = Some(strings::WIZARD_NAME_INVALID.to_string());
+            return Vec::new();
+        }
+        let device = device_name.trim();
+        let device = if device.is_empty() {
+            strings::DEFAULT_DEVICE_NAME
+        } else {
+            device
+        };
+        self.init_mode = Some(mode.clone());
+        vec![call(
+            Request::Init {
+                display_name: display_name.trim().to_string(),
+                device_name: device.to_string(),
+                mode,
+            },
+            ReplyTag::Init,
+        )]
+    }
+
+    /// 会话列表的展示顺序：“我的设备”置顶，其余保持 `convs` 的时间降序。
+    pub fn ordered_convs(&self) -> Vec<&ConversationSummary> {
+        let (mut pinned, rest): (Vec<_>, Vec<_>) = self
+            .convs
+            .iter()
+            .partition(|c| c.kind == ConvKind::SelfDevices);
+        pinned.extend(rest);
+        pinned
+    }
+
+    /// 点击搜索结果：清空搜索并打开该会话。
+    pub fn open_from_search(&mut self, conv: String) -> Vec<Effect> {
+        self.search_query.clear();
+        self.search_results.clear();
+        self.open_conv(conv)
+    }
+
     /// 把已有文件转发到会话。
     pub fn forward_files(&mut self, conv: String, hashes: Vec<String>) -> Vec<Effect> {
         vec![call(
@@ -477,6 +540,11 @@ impl Model {
 
 fn call(req: Request, tag: ReplyTag) -> Effect {
     Effect::Call(req, tag)
+}
+
+/// 向导显示名是否合法：去首尾空白后 1–32 个字符。
+pub fn wizard_name_ok(name: &str) -> bool {
+    (1..=32).contains(&name.trim().chars().count())
 }
 
 /// 按最近消息时间降序（无消息的排最后）。
@@ -545,8 +613,9 @@ mod tests {
     fn calls(effects: &[Effect]) -> Vec<&Request> {
         effects
             .iter()
-            .map(|e| match e {
-                Effect::Call(r, _) => r,
+            .filter_map(|e| match e {
+                Effect::Call(r, _) => Some(r),
+                Effect::EnableAutostart => None,
             })
             .collect()
     }
@@ -1010,5 +1079,80 @@ mod tests {
         m.apply(UiMsg::Event(ev.clone()));
         m.apply(UiMsg::Event(ev));
         assert_eq!(m.messages.len(), 1);
+    }
+
+    #[test]
+    fn submit_init_rejects_bad_names_with_toast() {
+        for bad in ["", "   ", &"长".repeat(33)] {
+            let mut m = Model::new();
+            let fx = m.submit_init(bad, "dev", InitMode::FirstDevice);
+            assert!(fx.is_empty(), "{bad:?}");
+            assert_eq!(m.toast.as_deref(), Some(strings::WIZARD_NAME_INVALID));
+            assert_eq!(m.init_mode, None);
+        }
+    }
+
+    #[test]
+    fn submit_init_trims_and_defaults_device_name() {
+        let mut m = Model::new();
+        let fx = m.submit_init("  小李 ", "  ", InitMode::FirstDevice);
+        assert_eq!(
+            fx,
+            vec![Effect::Call(
+                Request::Init {
+                    display_name: "小李".into(),
+                    device_name: strings::DEFAULT_DEVICE_NAME.into(),
+                    mode: InitMode::FirstDevice,
+                },
+                ReplyTag::Init
+            )]
+        );
+        assert!(wizard_name_ok(&"长".repeat(32)));
+    }
+
+    #[test]
+    fn init_reply_first_device_enables_autostart_and_refreshes_self() {
+        let mut m = Model::new();
+        m.submit_init("小李", "pc", InitMode::FirstDevice);
+        let fx = m.apply(reply(ReplyTag::Init, Response::Ok));
+        assert!(fx.contains(&Effect::EnableAutostart));
+        assert!(has(&fx, |r| matches!(r, Request::GetSelf)));
+        assert!(!m.wizard_joining);
+        assert_eq!(m.init_mode, None);
+    }
+
+    #[test]
+    fn init_reply_join_existing_marks_joining_without_autostart() {
+        let mut m = Model::new();
+        m.submit_init("小李", "pc", InitMode::JoinExisting);
+        let fx = m.apply(reply(ReplyTag::Init, Response::Ok));
+        assert!(!fx.contains(&Effect::EnableAutostart));
+        assert!(has(&fx, |r| matches!(r, Request::GetSelf)));
+        assert!(m.wizard_joining);
+    }
+
+    #[test]
+    fn ordered_convs_pins_self_devices_first() {
+        let mut m = Model::new();
+        let mut me = summary("me", Some(1));
+        me.kind = ConvKind::SelfDevices;
+        m.convs = vec![summary("a", Some(9)), summary("b", Some(5)), me];
+        let ids: Vec<_> = m.ordered_convs().iter().map(|c| c.conv.clone()).collect();
+        assert_eq!(ids, ["me", "a", "b"]);
+    }
+
+    #[test]
+    fn open_from_search_clears_search_and_opens_conv() {
+        let mut m = Model::new();
+        m.search("你好".into());
+        m.search_results = vec![msg("m1", "c9", "你好")];
+        let fx = m.open_from_search("c9".into());
+        assert_eq!(m.search_query, "");
+        assert!(m.search_results.is_empty());
+        assert_eq!(m.current_conv.as_deref(), Some("c9"));
+        assert!(has(
+            &fx,
+            |r| matches!(r, Request::ListMessages { conv, .. } if conv == "c9")
+        ));
     }
 }

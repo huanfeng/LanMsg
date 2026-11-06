@@ -7,12 +7,13 @@ use windui::prelude::*;
 use crate::model::Page;
 use crate::strings;
 use crate::ui_state::UiState;
+use crate::views::{chats, wizard};
 
-/// 页面占位内容。
-fn placeholder(p: Page) -> Element {
+/// 页面内容；尚未实现的页先放标题占位。
+fn page_view(ui: &UiState, p: Page) -> Element {
     let title = match p {
-        Page::Wizard => strings::PAGE_WIZARD,
-        Page::Chats => strings::PAGE_CHATS,
+        Page::Wizard => return wizard::wizard(ui),
+        Page::Chats => return chats::chats_page(ui),
         Page::Contacts => strings::PAGE_CONTACTS,
         Page::Files => strings::PAGE_FILES,
         Page::Settings => strings::PAGE_SETTINGS,
@@ -93,11 +94,12 @@ pub fn shell(ui: &UiState) -> Element {
                 .fg_role(Role::OnAccent),
         );
 
+    let ui_page = ui.clone();
     let content = Element::col()
         .weight(1.0)
         .height_match()
         .child(banner)
-        .child(Element::switcher(page, |p| placeholder(p).fill()).weight(1.0));
+        .child(Element::switcher(page, move |p| page_view(&ui_page, p).fill()).weight(1.0));
 
     Element::row()
         .fill()
