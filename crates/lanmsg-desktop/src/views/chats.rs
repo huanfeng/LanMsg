@@ -4,7 +4,9 @@
 use lanmsg_api::types::{ConversationSummary, MessageBodyView, MessageView};
 use windui::prelude::*;
 
+use crate::model::Page;
 use crate::strings;
+use crate::style;
 use crate::tz;
 use crate::ui_state::UiState;
 
@@ -115,45 +117,29 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
-/// 头像底色：按 id 哈希在若干强调色角色里选一个（同一会话颜色稳定）。
-fn avatar_role(id: &str) -> Role {
-    const ROLES: [Role; 5] = [
-        Role::Accent,
-        Role::Success,
-        Role::Warning,
-        Role::AccentActive,
-        Role::SurfaceInverse,
-    ];
-    let h = id
-        .bytes()
-        .fold(5381u32, |h, b| h.wrapping_mul(33).wrapping_add(b as u32));
-    ROLES[h as usize % ROLES.len()]
-}
-
 fn avatar(id: &str, name: &str, online: bool) -> Element {
     let circle = Element::stack()
-        .size(40, 40)
-        .corner(20.0)
-        .bg_role(avatar_role(id))
+        .size(style::AVATAR_SIZE, style::AVATAR_SIZE)
+        .corner(style::AVATAR_SIZE as f32 / 2.0)
+        .bg(style::avatar_color(id))
         .child(
             Element::label(avatar_initial(name))
                 .font_size(17.0)
-                .fg_role(if avatar_role(id) == Role::SurfaceInverse {
-                    Role::OnSurfaceInverse
-                } else {
-                    Role::OnAccent
-                })
+                .fg(Color::WHITE)
                 .align(Align::Center),
         );
-    // 在线小圆点叠在头像右下角
+    // 在线小圆点叠在头像右下角；描边取列表底色，让圆点与头像之间留出一圈缝
     let dot = Element::leaf()
-        .size(11, 11)
-        .corner(5.5)
+        .size(12, 12)
+        .corner(6.0)
         .bg_role(Role::Success)
-        .border_role(Role::Bg, 2)
+        .border_role(Role::Surface, 2)
         .align_xy(Align::End, Align::End)
         .visible(online);
-    Element::stack().size(40, 40).child(circle).child(dot)
+    Element::stack()
+        .size(style::AVATAR_SIZE, style::AVATAR_SIZE)
+        .child(circle)
+        .child(dot)
 }
 
 /// 会话列表一行的展示数据（可比较，供 list_signal 判定行是否需要重建）。
@@ -191,43 +177,59 @@ fn conv_row(c: &ConversationSummary, selected: bool, now: i64, tz_offset: i32) -
 fn conv_item(ui: &UiState, r: ConvRow) -> Element {
     let conv = r.conv.clone();
     let ui_click = ui.clone();
+    let unread = r.unread.is_some();
     let mut bottom = Element::row()
         .width_match()
-        .spacing(6)
+        .spacing(style::SPACE_SM)
         .cross(Align::Center)
         .child(
             Element::label(r.preview)
-                .font_size(13.0)
+                .font_size(style::FONT_META)
                 .fg_role(Role::TextMuted)
                 .max_lines(1)
                 .truncate(Truncate::End)
                 .weight(1.0),
         );
     if let Some(n) = r.unread {
-        bottom = bottom.child(Element::badge(n));
+        bottom = bottom.child(style::badge(n));
     }
+    let title = Element::label(r.title.clone())
+        .font_size(style::FONT_BODY)
+        .fg_role(Role::Text)
+        .max_lines(1)
+        .truncate(Truncate::End)
+        .weight(1.0);
+    // 未读时标题加粗（规范第 6 节）
+    let title = if unread {
+        title.font_weight(style::WEIGHT_STRONG)
+    } else {
+        title
+    };
     let top = Element::row()
         .width_match()
-        .spacing(6)
+        .spacing(style::SPACE_SM)
         .cross(Align::Center)
-        .child(
-            Element::label(r.title.clone())
-                .font_size(15.0)
-                .fg_role(Role::Text)
-                .max_lines(1)
-                .truncate(Truncate::End)
-                .weight(1.0),
-        )
+        .child(title)
         .child(
             Element::label(r.time)
-                .font_size(12.0)
+                .font_size(style::FONT_META)
                 .fg_role(Role::TextSubtle),
         );
-    let mut item = Element::row()
+    let selected = r.selected;
+    Element::row()
         .width_match()
-        .padding_xy(12, 10)
-        .spacing(10)
+        .height(style::CONV_ROW_H)
+        .padding_xy(style::SPACE_MD, 0)
+        .spacing(style::SPACE_MD)
         .cross(Align::Center)
+        // 选中行 signal_soft 底；悬停由 clickable 的半透明叠层提供
+        .bg_when(move || {
+            if selected {
+                style::tokens().signal_soft
+            } else {
+                Color::TRANSPARENT
+            }
+        })
         .clickable()
         .on_click(move |_| {
             let c = conv.clone();
@@ -237,14 +239,10 @@ fn conv_item(ui: &UiState, r: ConvRow) -> Element {
         .child(
             Element::col()
                 .weight(1.0)
-                .spacing(3)
+                .spacing(style::SPACE_XS)
                 .child(top)
                 .child(bottom),
-        );
-    if r.selected {
-        item = item.bg_role(Role::SurfaceAlt);
-    }
-    item
+        )
 }
 
 /// 搜索结果一行的展示数据。
@@ -270,10 +268,10 @@ fn hit_item(ui: &UiState, r: HitRow) -> Element {
     let ui_click = ui.clone();
     let head = Element::row()
         .width_match()
-        .spacing(6)
+        .spacing(style::SPACE_SM)
         .child(
-            Element::label(format!("{} · {}", r.title, r.author))
-                .font_size(14.0)
+            Element::label(r.title)
+                .font_size(style::FONT_BODY)
                 .fg_role(Role::Text)
                 .max_lines(1)
                 .truncate(Truncate::End)
@@ -281,28 +279,51 @@ fn hit_item(ui: &UiState, r: HitRow) -> Element {
         )
         .child(
             Element::label(r.time)
-                .font_size(12.0)
+                .font_size(style::FONT_META)
                 .fg_role(Role::TextSubtle),
         );
     Element::col()
         .width_match()
-        .padding_xy(12, 10)
-        .spacing(3)
+        .padding_xy(style::SPACE_MD, style::SPACE_SM)
+        .spacing(style::SPACE_XS)
         .clickable()
         .on_click(move |_| ui_click.open_from_search(conv.clone()))
         .child(head)
         .child(
-            Element::label(r.snippet)
-                .font_size(13.0)
+            Element::label(format!("{}：{}", r.author, r.snippet))
+                .font_size(style::FONT_META)
                 .fg_role(Role::TextMuted)
                 .max_lines(2)
                 .truncate(Truncate::End),
         )
 }
 
+/// 搜索框：36 高，左侧 16px 放大镜。
+/// windui 的 `leading_icon` 只收字形字符，画不了 SVG；这里用空格字形占住图标区，再把 SVG 叠在其上。
+fn search_box(ui: &UiState) -> Element {
+    let input = Element::text_input(ui.search_text, strings::SEARCH_PLACEHOLDER)
+        .leading_icon(' ')
+        .width_match()
+        .height(style::SEARCH_H);
+    // 输入框内部左内边距 12，图标左缘与之对齐
+    let magnifier = style::icon(style::ICON_SEARCH, 16, Role::TextSubtle)
+        .align_xy(Align::Start, Align::Center)
+        .margin_edges(Insets {
+            left: style::SPACE_MD,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        });
+    Element::stack()
+        .width_match()
+        .height(style::SEARCH_H)
+        .child(input)
+        .child(magnifier)
+}
+
 /// 会话列表（含顶部搜索框）。
 pub fn chat_list(ui: &UiState) -> Element {
-    let search = Element::text_input(ui.search_text, strings::SEARCH_PLACEHOLDER).width_match();
+    let search = search_box(ui);
     let searching = ui.derive(|m| !m.search_query.trim().is_empty());
 
     let rows = ui.derive(|m| {
@@ -351,8 +372,9 @@ pub fn chat_list(ui: &UiState) -> Element {
                 .fill()
                 .child(
                     Element::label(strings::SEARCH_EMPTY)
+                        .font_size(style::FONT_BODY)
                         .fg_role(Role::TextMuted)
-                        .padding(16)
+                        .padding(style::SPACE_LG)
                         .visible_signal(no_hits),
                 )
                 .child(
@@ -368,10 +390,12 @@ pub fn chat_list(ui: &UiState) -> Element {
             Element::col()
                 .fill()
                 .child(
-                    Element::label(strings::CHATS_EMPTY_LIST)
-                        .fg_role(Role::TextMuted)
-                        .padding(16)
-                        .visible_signal(no_convs),
+                    style::empty_state(
+                        strings::CHATS_EMPTY_LIST,
+                        strings::CHATS_EMPTY_LIST_HINT,
+                        None,
+                    )
+                    .visible_signal(no_convs),
                 )
                 .child(
                     Element::list_signal(
@@ -385,20 +409,29 @@ pub fn chat_list(ui: &UiState) -> Element {
     })
     .weight(1.0);
 
-    Element::col()
+    let list = Element::col()
         .fill()
         .bg_role(Role::Surface)
-        .child(Element::col().width_match().padding(10).child(search))
-        .child(body)
+        .child(
+            Element::col()
+                .width_match()
+                .padding(style::SPACE_MD)
+                .child(search),
+        )
+        .child(body);
+    // 列表与内容区之间的 1px line 由分栏条自带；左侧由图标栏的右分隔线承担
+    list
 }
 
 /// 右侧聊天区。Task 12 起接入真实消息视图，本任务只放空状态。
-fn chat_pane(_ui: &UiState) -> Element {
-    Element::stack().fill().child(
-        Element::label(strings::CHAT_PANE_EMPTY)
-            .font_size(15.0)
-            .fg_role(Role::TextMuted)
-            .align(Align::Center),
+fn chat_pane(ui: &UiState) -> Element {
+    let ui_go = ui.clone();
+    let go = Element::link(strings::CHAT_PANE_EMPTY_ACTION)
+        .on_click(move |_| ui_go.act(|m| m.set_page(Page::Contacts)));
+    style::empty_state(
+        strings::CHAT_PANE_EMPTY,
+        strings::CHAT_PANE_EMPTY_HINT,
+        Some(go),
     )
 }
 

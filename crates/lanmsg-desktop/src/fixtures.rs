@@ -335,6 +335,8 @@ pub fn demo_model(p: DemoPage) -> Model {
         }
         DemoPage::Chats => {
             m.page = Page::Chats;
+            // 选中一个已读会话（无徽章），同时保留两个未读会话，截图里能对比选中/未读/已读
+            m.current_conv = Some("c-self".into());
         }
         DemoPage::Chat => {
             m.page = Page::Chats;

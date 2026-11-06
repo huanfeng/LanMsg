@@ -13,6 +13,7 @@ mod decoders;
 mod fixtures;
 mod model;
 mod strings;
+mod style;
 mod tz;
 mod ui_state;
 mod views;
@@ -89,11 +90,7 @@ fn main() {
     let mut app = App::new(strings::APP_TITLE, WINDOW_SIZE.0, WINDOW_SIZE.1)
         .min_size(WINDOW_MIN.0, WINDOW_MIN.1)
         .icon(brand_icon())
-        .theme(if dark {
-            Theme::dark()
-        } else {
-            Theme::default()
-        })
+        .theme(style::theme(dark))
         .screenshot_from_args();
     let theme = app.theme_handle();
 
@@ -145,13 +142,8 @@ fn main() {
             ui_focus.act(|m| m.set_window_focused(active));
         })
         .on_system_theme_changed(move |_ctx, is_dark| {
-            theme.update(|t| {
-                t.palette = if is_dark {
-                    Palette::dark()
-                } else {
-                    Palette::default()
-                }
-            });
+            // 只换色板，保留其它主题设置；色值映射见 style::palette
+            theme.update(|t| t.palette = style::palette(is_dark));
         });
     // 演示模式不注册单实例
     if demo.is_none() {

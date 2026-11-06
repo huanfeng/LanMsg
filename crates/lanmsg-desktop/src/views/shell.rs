@@ -6,6 +6,7 @@ use windui::prelude::*;
 
 use crate::model::Page;
 use crate::strings;
+use crate::style;
 use crate::ui_state::UiState;
 use crate::views::{chats, wizard};
 
@@ -18,40 +19,76 @@ fn page_view(ui: &UiState, p: Page) -> Element {
         Page::Files => strings::PAGE_FILES,
         Page::Settings => strings::PAGE_SETTINGS,
     };
-    Element::col()
-        .fill()
-        .padding(24)
-        .child(Element::label(title).font_size(22.0).fg_role(Role::Text))
+    Element::col().fill().padding(style::SPACE_XL).child(
+        Element::label(title)
+            .font_size(style::FONT_TITLE)
+            .font_weight(style::WEIGHT_STRONG)
+            .fg_role(Role::Text),
+    )
 }
 
-/// 侧栏一个页签：选中时文字用强调色。
+/// 图标栏一个页签：20px 图标 + 下方 12px 文字；选中时整块 `signal_soft` 底、图标与文字用 `signal`；
+/// 角标叠在图标右上角。
 fn nav_item(
     ui: &UiState,
     page: Page,
+    icon_svg: &'static [u8],
     text: &'static str,
     badge: Option<Signal<String>>,
 ) -> Element {
-    let role = ui.derive(move |m| {
-        if m.page == page {
+    let selected = ui.derive(move |m| m.page == page);
+    let idle = selected.map(|s| !*s);
+    let role = selected.map(|s| {
+        if *s {
             Role::AccentText
         } else {
             Role::TextMuted
         }
     });
     let ui_click = ui.clone();
-    let mut item = Element::col()
-        .width_match()
-        .padding_xy(4, 10)
-        .spacing(4)
-        .cross(Align::Center)
-        .clickable()
-        .on_click(move |_| ui_click.act(|m| m.set_page(page)))
-        .child(Element::label(text).font_size(13.0).fg_role_signal(role));
+
+    // 图标区 44x24：图标水平居中、贴底（上方 4px 留给角标探出），角标贴右上、只压住图标的右上角
+    let mut holder = Element::stack()
+        .size(44, 24)
+        .child(
+            style::icon(icon_svg, 20, Role::TextMuted)
+                .align_xy(Align::Center, Align::End)
+                .visible_signal(idle),
+        )
+        .child(
+            style::icon(icon_svg, 20, Role::AccentText)
+                .align_xy(Align::Center, Align::End)
+                .visible_signal(selected),
+        );
     if let Some(b) = badge {
         let show = b.map(|s| !s.is_empty());
-        item = item.child(Element::badge(b).visible_signal(show));
+        holder = holder.child(
+            style::badge(b)
+                .align_xy(Align::End, Align::Start)
+                .visible_signal(show),
+        );
     }
-    item
+
+    Element::col()
+        .size(style::NAV_ITEM_W, style::NAV_ITEM_H)
+        .padding_xy(0, style::SPACE_SM)
+        .cross(Align::Center)
+        .corner(style::RADIUS_NAV_ITEM)
+        .bg_when(move || {
+            if selected.get() {
+                style::tokens().signal_soft
+            } else {
+                Color::TRANSPARENT
+            }
+        })
+        .clickable()
+        .on_click(move |_| ui_click.act(|m| m.set_page(page)))
+        .child(holder)
+        .child(
+            Element::label(text)
+                .font_size(style::FONT_META)
+                .fg_role_signal(role),
+        )
 }
 
 /// 顶层界面。
@@ -66,31 +103,63 @@ pub fn shell(ui: &UiState) -> Element {
         n => n.to_string(),
     });
 
-    let nav = Element::col()
-        .width(76)
+    // 图标栏：rail 底，顶部应用标识，右侧 1px 分隔线
+    let rail = Element::col()
+        .width(style::RAIL_WIDTH)
         .height_match()
-        .bg_role(Role::Surface)
-        .padding_xy(4, 12)
-        .spacing(6)
-        .visible_signal(not_wizard)
-        .child(nav_item(ui, Page::Chats, strings::NAV_CHATS, None))
+        .bg_when(|| style::tokens().rail)
+        .padding_edges(Insets {
+            top: style::SPACE_LG,
+            bottom: style::SPACE_MD,
+            left: 0,
+            right: 0,
+        })
+        .spacing(style::SPACE_XS)
+        .cross(Align::Center)
+        .child(style::logo(28))
+        .child(Element::leaf().height(style::SPACE_MD))
+        .child(nav_item(
+            ui,
+            Page::Chats,
+            style::ICON_CHATS,
+            strings::NAV_CHATS,
+            None,
+        ))
         .child(nav_item(
             ui,
             Page::Contacts,
+            style::ICON_CONTACTS,
             strings::NAV_CONTACTS,
             Some(pending),
         ))
-        .child(nav_item(ui, Page::Files, strings::NAV_FILES, None))
-        .child(nav_item(ui, Page::Settings, strings::NAV_SETTINGS, None));
+        .child(nav_item(
+            ui,
+            Page::Files,
+            style::ICON_FILES,
+            strings::NAV_FILES,
+            None,
+        ))
+        .child(nav_item(
+            ui,
+            Page::Settings,
+            style::ICON_SETTINGS,
+            strings::NAV_SETTINGS,
+            None,
+        ));
+    let nav = Element::row()
+        .height_match()
+        .visible_signal(not_wizard)
+        .child(rail)
+        .child(style::vline());
 
     let banner = Element::row()
         .width_match()
-        .padding_xy(16, 8)
+        .padding_xy(style::SPACE_LG, style::SPACE_SM)
         .bg_role(Role::Warning)
         .visible_signal(disconnected)
         .child(
             Element::label(strings::DISCONNECTED_BANNER)
-                .font_size(13.0)
+                .font_size(style::FONT_BODY)
                 .fg_role(Role::OnAccent),
         );
 

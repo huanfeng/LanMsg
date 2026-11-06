@@ -6,6 +6,7 @@ use windui::prelude::*;
 
 use crate::model::wizard_name_ok;
 use crate::strings;
+use crate::style;
 use crate::ui_state::UiState;
 
 /// 默认设备名：主机名环境变量，其次 /etc/hostname，最后兜底文案。
@@ -19,35 +20,37 @@ fn default_device_name() -> String {
         .unwrap_or_else(|| strings::DEFAULT_DEVICE_NAME.to_string())
 }
 
-fn field(label: &'static str, input: Element) -> Element {
-    Element::col()
+/// 一个表单项：标签、输入框，以及紧贴输入框下方的若干说明/校验提示。
+fn field(label: &'static str, input: Element, hints: Vec<Element>) -> Element {
+    let col = Element::col()
         .width_match()
-        .spacing(6)
+        .spacing(style::SPACE_SM)
         .child(
             Element::label(label)
-                .font_size(13.0)
+                .font_size(style::FONT_BODY)
                 .fg_role(Role::TextMuted),
         )
-        .child(input.width_match())
+        .child(input.width_match());
+    hints.into_iter().fold(col, |c, h| c.child(h))
 }
 
-/// 输入框下的红字校验提示，条件为真时才显示。
-fn error_hint(text: &'static str, show: Signal<bool>) -> Element {
+/// 输入框下的说明文字（meta 字号），条件为真时才显示；`role` 区分普通说明与校验失败。
+fn hint(text: &'static str, role: Role, show: Signal<bool>) -> Element {
     Element::label(text)
-        .font_size(12.0)
-        .fg_role(Role::Danger)
+        .font_size(style::FONT_META)
+        .fg_role(role)
         .visible_signal(show)
 }
 
-/// 一个选项块：大按钮 + 下方一行说明。
+/// 一个选项块：按钮 + 下方一行说明。
 fn choice(button: Element, hint: &'static str) -> Element {
     Element::col()
         .width_match()
-        .spacing(6)
+        .spacing(style::SPACE_SM)
         .child(button.width_match())
         .child(
             Element::label(hint)
-                .font_size(12.0)
+                .font_size(style::FONT_META)
                 .fg_role(Role::TextSubtle),
         )
 }
@@ -58,6 +61,8 @@ pub fn wizard(ui: &UiState) -> Element {
     let device = signal(default_device_name());
     // 设备名允许留空（用默认值），非空则限 1–32 个字符
     let name_bad = name.map(|n| !n.is_empty() && !wizard_name_ok(n));
+    // 名字为空时说明为什么两个按钮不可用
+    let name_empty = name.map(|n| n.is_empty());
     let device_bad = device.map(|d| !d.trim().is_empty() && !wizard_name_ok(d));
     let in_flight = ui.derive(|m| m.init_in_flight);
     // 名字合法、设备名合法、且没有在途的 Init 才允许提交
@@ -74,8 +79,10 @@ pub fn wizard(ui: &UiState) -> Element {
             ui_first.act(|m| m.submit_init(&n, &d, InitMode::FirstDevice));
         });
     let ui_join = ui.clone();
+    // 次按钮：surface 底 + 1px line + ink 字（outline_soft 的中性灰边 + 意图色文字）
     let join = Element::button(strings::WIZARD_JOIN_EXISTING)
         .intent(Intent::Neutral)
+        .outline_soft()
         .enabled_when(can_submit)
         .on_click(move |_| {
             let (n, d) = (name.get(), device.get());
@@ -84,18 +91,29 @@ pub fn wizard(ui: &UiState) -> Element {
 
     let form = Element::col()
         .width_match()
-        .spacing(18)
+        .spacing(style::SPACE_LG)
         .visible_signal(not_joining)
         .child(field(
             strings::WIZARD_NAME_LABEL,
             Element::text_input(name, strings::WIZARD_NAME_PLACEHOLDER).autofocus(),
+            vec![
+                hint(strings::WIZARD_NAME_INVALID, Role::Danger, name_bad),
+                hint(
+                    strings::WIZARD_NAME_REQUIRED_HINT,
+                    Role::TextSubtle,
+                    name_empty,
+                ),
+            ],
         ))
-        .child(error_hint(strings::WIZARD_NAME_INVALID, name_bad))
         .child(field(
             strings::WIZARD_DEVICE_LABEL,
             Element::text_input(device, strings::WIZARD_DEVICE_PLACEHOLDER),
+            vec![hint(
+                strings::WIZARD_DEVICE_INVALID,
+                Role::Danger,
+                device_bad,
+            )],
         ))
-        .child(error_hint(strings::WIZARD_DEVICE_INVALID, device_bad))
         .child(Element::divider())
         .child(choice(first, strings::WIZARD_FIRST_DEVICE_HINT))
         .child(choice(join, strings::WIZARD_JOIN_HINT));
@@ -104,11 +122,11 @@ pub fn wizard(ui: &UiState) -> Element {
     let ui_back = ui.clone();
     let waiting = Element::col()
         .width_match()
-        .spacing(14)
+        .spacing(style::SPACE_MD)
         .visible_signal(joining)
         .child(
             Element::label(strings::WIZARD_JOINING)
-                .font_size(14.0)
+                .font_size(style::FONT_BODY)
                 .fg_role(Role::TextMuted),
         )
         .child(
@@ -120,23 +138,42 @@ pub fn wizard(ui: &UiState) -> Element {
         );
 
     let card = Element::col()
-        .width(460)
-        .padding(28)
-        .spacing(18)
+        .width(style::WIZARD_CARD_W)
+        .padding(style::SPACE_XL)
+        .spacing(style::SPACE_LG)
         .bg_role(Role::Surface)
-        .corner(12.0)
+        .border_role(Role::Border, 1)
+        .corner(style::RADIUS_CARD)
         .child(
             Element::label(strings::WIZARD_TITLE)
-                .font_size(24.0)
+                .font_size(style::FONT_TITLE)
+                .font_weight(style::WEIGHT_STRONG)
                 .fg_role(Role::Text),
         )
         .child(
             Element::label(strings::WIZARD_SUBTITLE)
-                .font_size(13.0)
+                .font_size(style::FONT_BODY)
                 .fg_role(Role::TextMuted),
         )
         .child(form)
         .child(waiting);
 
-    Element::stack().fill().child(card.align(Align::Center))
+    // 卡片上方：48px 应用标识 + 产品名，避免卡片在大面积底色里悬空
+    let brand = Element::col()
+        .spacing(style::SPACE_SM)
+        .cross(Align::Center)
+        .child(style::logo(48))
+        .child(
+            Element::label(strings::APP_TITLE)
+                .font_size(style::FONT_HEADING)
+                .font_weight(style::WEIGHT_STRONG)
+                .fg_role(Role::Text),
+        );
+
+    let column = Element::col()
+        .spacing(style::SPACE_LG)
+        .cross(Align::Center)
+        .child(brand)
+        .child(card);
+    Element::stack().fill().child(column.align(Align::Center))
 }
