@@ -29,14 +29,14 @@ pub struct Tokens {
 /// 浅色主题色值。
 pub const LIGHT: Tokens = Tokens {
     ink: Color::hex(0x16202A),
-    ink_muted: Color::hex(0x5A6875),
-    ink_subtle: Color::hex(0x8A97A3),
+    ink_muted: Color::hex(0x4F5C68),
+    ink_subtle: Color::hex(0x5F6C78),
     canvas: Color::hex(0xF4F6F7),
     rail: Color::hex(0xE9EDEF),
     surface: Color::hex(0xFFFFFF),
     line: Color::hex(0xDCE2E6),
     signal: Color::hex(0x0B7A75),
-    signal_soft: Color::hex(0xE1F1EF),
+    signal_soft: Color::hex(0xE8F4F2),
     online: Color::hex(0x1E9E5A),
     danger: Color::hex(0xC2410C),
 };
@@ -45,7 +45,7 @@ pub const LIGHT: Tokens = Tokens {
 pub const DARK: Tokens = Tokens {
     ink: Color::hex(0xE6ECEF),
     ink_muted: Color::hex(0xA3B0BA),
-    ink_subtle: Color::hex(0x73818C),
+    ink_subtle: Color::hex(0x8D9AA5),
     canvas: Color::hex(0x12181D),
     rail: Color::hex(0x182027),
     surface: Color::hex(0x1C252C),
@@ -59,7 +59,7 @@ pub const DARK: Tokens = Tokens {
 /// 暗色主题下 `signal` 太亮，白字压在上面只有约 2.3:1，所以实底（主按钮、徽章）另取一档深青，
 /// `signal`（浅青）只在暗底上当文字、描边、选中色使用。浅色主题二者同值。
 const SIGNAL_FILL_DARK: Color = Color::hex(0x0B7A75);
-const SIGNAL_FILL_DARK_HOVER: Color = Color::hex(0x0F8F89);
+const SIGNAL_FILL_DARK_HOVER: Color = Color::hex(0x0B7F79);
 const SIGNAL_FILL_DARK_ACTIVE: Color = Color::hex(0x096560);
 const SIGNAL_FILL_LIGHT_HOVER: Color = Color::hex(0x096A65);
 const SIGNAL_FILL_LIGHT_ACTIVE: Color = Color::hex(0x075A56);
@@ -109,6 +109,26 @@ pub const NAV_ITEM_H: i32 = 56;
 pub const CONV_ROW_H: i32 = 64;
 pub const AVATAR_SIZE: i32 = 40;
 pub const SEARCH_H: i32 = 36;
+/// 头像内首字字号。
+pub const AVATAR_FONT: f32 = 17.0;
+/// 在线点：内圆 10、外圈（底色环）14，叠在头像右下角。
+pub const ONLINE_DOT: i32 = 10;
+pub const ONLINE_RING: i32 = 14;
+/// 图标尺寸：搜索框放大镜 16、图标栏 20、应用标识 28、空状态 48。
+pub const ICON_SM: i32 = 16;
+pub const ICON_MD: i32 = 20;
+pub const LOGO_SIZE: i32 = 28;
+pub const ICON_EMPTY_SIZE: i32 = 48;
+/// 图标栏图标区（含角标探出的余量）。
+pub const NAV_ICON_BOX_W: i32 = 48;
+pub const NAV_ICON_BOX_H: i32 = 24;
+/// 徽章高度（同时是最小宽度）。
+pub const BADGE_H: i32 = 16;
+/// 图标栏选中指示条：贴图标栏左缘的 3px 竖条（signal），在 rail 上让选中项一眼可辨。
+pub const NAV_BAR_W: i32 = 3;
+pub const NAV_BAR_H: i32 = 24;
+/// 图标栏项外层宽度（块 48 + 左侧指示条所需余量）。
+pub const NAV_SLOT_W: i32 = 56;
 /// 向导卡片宽度。
 pub const WIZARD_CARD_W: i32 = 440;
 /// 按钮与输入框高度。
@@ -240,8 +260,8 @@ pub fn icon(svg: &'static [u8], size: i32, role: Role) -> Element {
 /// 实底胶囊徽章（未读数、请求数）：`signal` 实底白字，最小宽 = 高 = 16。
 pub fn badge(text: impl Into<TextContent>) -> Element {
     Element::stack()
-        .height(16)
-        .min_width(16)
+        .height(BADGE_H)
+        .min_width(BADGE_H)
         .padding_xy(5, 0)
         .corner(RADIUS_PILL)
         .bg_role(Role::Accent)
@@ -267,7 +287,7 @@ pub fn empty_state(title: &'static str, hint: &'static str, action: Option<Eleme
     let mut col = Element::col()
         .spacing(SPACE_SM)
         .cross(Align::Center)
-        .child(icon(ICON_EMPTY, 48, Role::TextSubtle))
+        .child(icon(ICON_EMPTY, ICON_EMPTY_SIZE, Role::TextSubtle))
         .child(Element::leaf().height(SPACE_XS))
         .child(
             Element::label(title)
@@ -288,6 +308,16 @@ pub fn empty_state(title: &'static str, hint: &'static str, action: Option<Eleme
         .fill()
         .padding(SPACE_XL)
         .child(col.align(Align::Center))
+}
+
+/// 窗口图标：logo.svg 按系统要的像素数现画，每档 1:1；解码失败时退回 windui 内置品牌图标。
+pub fn window_icon() -> windui::icon::IconSource {
+    windui::icon::IconSource::sized(|size| {
+        windui::render::image::Image::from_svg_bytes(ICON_LOGO, Some(size))
+            .ok()
+            .and_then(|img| windui::icon::WindowIcon::from_image(&img))
+            .unwrap_or_else(|| windui::icon::brand_icon_at(size))
+    })
 }
 
 /// 应用标识：保持自身颜色。
@@ -329,6 +359,53 @@ mod tests {
         for dark in [false, true] {
             assert!(contrast(palette(dark).accent, Color::WHITE) >= 4.5);
         }
+    }
+
+    /// 规范第 11 节：正文三档文字 × 四种底色（浅暗两套）、白字 × 主按钮实底/悬停，全部 >= 4.5:1。
+    #[test]
+    fn text_and_button_contrast_meets_wcag_aa() {
+        let mut fails = Vec::new();
+        for (name, t) in [("light", &LIGHT), ("dark", &DARK)] {
+            for (tn, fg) in [
+                ("ink", t.ink),
+                ("ink_muted", t.ink_muted),
+                ("ink_subtle", t.ink_subtle),
+            ] {
+                for (bn, bg) in [
+                    ("surface", t.surface),
+                    ("canvas", t.canvas),
+                    ("rail", t.rail),
+                    ("signal_soft", t.signal_soft),
+                ] {
+                    let r = contrast(fg, bg);
+                    println!("{name} {tn} on {bn}: {r:.2}");
+                    if r < 4.5 {
+                        fails.push(format!("{name} {tn} on {bn}: {r:.2}"));
+                    }
+                }
+            }
+            // signal 当文字用时（选中项）落在 signal_soft / surface 上
+            for (bn, bg) in [("signal_soft", t.signal_soft), ("surface", t.surface)] {
+                let r = contrast(t.signal, bg);
+                println!("{name} signal on {bn}: {r:.2}");
+                if r < 4.5 {
+                    fails.push(format!("{name} signal on {bn}: {r:.2}"));
+                }
+            }
+            let p = palette(name == "dark");
+            for (bn, bg) in [
+                ("fill", p.accent),
+                ("hover", p.accent_hover),
+                ("active", p.accent_active),
+            ] {
+                let r = contrast(Color::WHITE, bg);
+                println!("{name} white on button {bn}: {r:.2}");
+                if r < 4.5 {
+                    fails.push(format!("{name} white on button {bn}: {r:.2}"));
+                }
+            }
+        }
+        assert!(fails.is_empty(), "对比度不足: {fails:?}");
     }
 
     #[test]

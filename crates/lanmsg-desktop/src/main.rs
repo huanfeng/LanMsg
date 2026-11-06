@@ -89,7 +89,7 @@ fn main() {
     let dark = windui::event::system_prefers_dark();
     let mut app = App::new(strings::APP_TITLE, WINDOW_SIZE.0, WINDOW_SIZE.1)
         .min_size(WINDOW_MIN.0, WINDOW_MIN.1)
-        .icon(brand_icon())
+        .icon(style::window_icon())
         .theme(style::theme(dark))
         .screenshot_from_args();
     let theme = app.theme_handle();

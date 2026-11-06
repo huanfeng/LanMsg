@@ -117,23 +117,41 @@ pub(crate) fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
+/// 头像（在线点的描边环取列表底色 `surface`）。
 pub(crate) fn avatar(id: &str, name: &str, online: bool) -> Element {
+    avatar_in_row(id, name, online, false)
+}
+
+/// 头像；`selected` 为真时在线点的外圈取 `signal_soft`，与选中行底色无缝衔接。
+fn avatar_in_row(id: &str, name: &str, online: bool, selected: bool) -> Element {
     let circle = Element::stack()
         .size(style::AVATAR_SIZE, style::AVATAR_SIZE)
         .corner(style::AVATAR_SIZE as f32 / 2.0)
         .bg(style::avatar_color(id))
         .child(
             Element::label(avatar_initial(name))
-                .font_size(17.0)
-                .fg(Color::WHITE)
+                .font_size(style::AVATAR_FONT)
+                .fg_role(Role::OnAccent)
                 .align(Align::Center),
         );
-    // 在线小圆点叠在头像右下角；描边取列表底色，让圆点与头像之间留出一圈缝
-    let dot = Element::leaf()
-        .size(12, 12)
-        .corner(6.0)
-        .bg_role(Role::Success)
-        .border_role(Role::Surface, 2)
+    // 在线小圆点叠在头像右下角：外圈 14 用行底色留出缝（不用描边，描边在选中行上会露出非底色的白缝），内圆 10 居中
+    let dot = Element::stack()
+        .size(style::ONLINE_RING, style::ONLINE_RING)
+        .corner(style::ONLINE_RING as f32 / 2.0)
+        .bg_when(move || {
+            if selected {
+                style::tokens().signal_soft
+            } else {
+                style::tokens().surface
+            }
+        })
+        .child(
+            Element::leaf()
+                .size(style::ONLINE_DOT, style::ONLINE_DOT)
+                .corner(style::ONLINE_DOT as f32 / 2.0)
+                .bg_role(Role::Success)
+                .align(Align::Center),
+        )
         .align_xy(Align::End, Align::End)
         .visible(online);
     Element::stack()
@@ -205,9 +223,10 @@ fn conv_item(ui: &UiState, r: ConvRow) -> Element {
     } else {
         title
     };
+    // 标题与时间之间留 12，加粗标题截断时也不会贴住时间
     let top = Element::row()
         .width_match()
-        .spacing(style::SPACE_SM)
+        .spacing(style::SPACE_MD)
         .cross(Align::Center)
         .child(title)
         .child(
@@ -235,7 +254,7 @@ fn conv_item(ui: &UiState, r: ConvRow) -> Element {
             let c = conv.clone();
             ui_click.act(|m| m.open_conv(c));
         })
-        .child(avatar(&r.conv, &r.title, r.online))
+        .child(avatar_in_row(&r.conv, &r.title, r.online, selected))
         .child(
             Element::col()
                 .weight(1.0)
@@ -300,13 +319,27 @@ fn hit_item(ui: &UiState, r: HitRow) -> Element {
 
 /// 搜索框：36 高，左侧 16px 放大镜。
 /// windui 的 `leading_icon` 只收字形字符，画不了 SVG；这里用空格字形占住图标区，再把 SVG 叠在其上。
+/// SVG 图标节点命中不透明，会吃掉落在其上的按下事件（事件只沿祖先链冒泡，到不了同级的输入框），
+/// 所以图标包进可点击容器：点击经 `focus_when` 把焦点交给输入框，点放大镜等同点输入框。
 fn search_box(ui: &UiState) -> Element {
+    let focus_input = signal(0u64);
     let input = Element::text_input(ui.search_text, strings::SEARCH_PLACEHOLDER)
         .leading_icon(' ')
         .width_match()
-        .height(style::SEARCH_H);
-    // 输入框内部左内边距 12，图标左缘与之对齐
-    let magnifier = style::icon(style::ICON_SEARCH, 16, Role::TextSubtle)
+        .height(style::SEARCH_H)
+        .focus_when(focus_input);
+    // 输入框内部左内边距 12，图标左缘与之对齐；容器与图标同大，悬停叠层只落在图标上
+    let magnifier = Element::stack()
+        .size(style::ICON_SM, style::ICON_SM)
+        .corner(style::RADIUS_CONTROL / 2.0)
+        .focusable(false)
+        .clickable()
+        .on_click(move |_| focus_input.update(|n| *n += 1))
+        .child(style::icon(
+            style::ICON_SEARCH,
+            style::ICON_SM,
+            Role::TextSubtle,
+        ))
         .align_xy(Align::Start, Align::Center)
         .margin_edges(Insets {
             left: style::SPACE_MD,

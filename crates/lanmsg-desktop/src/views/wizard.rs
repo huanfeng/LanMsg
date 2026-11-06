@@ -100,7 +100,7 @@ pub fn wizard(ui: &UiState) -> Element {
                 hint(strings::WIZARD_NAME_INVALID, Role::Danger, name_bad),
                 hint(
                     strings::WIZARD_NAME_REQUIRED_HINT,
-                    Role::TextSubtle,
+                    Role::TextMuted,
                     name_empty,
                 ),
             ],

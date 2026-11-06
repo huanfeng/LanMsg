@@ -49,14 +49,14 @@ fn nav_item(
 
     // 图标区 44x24：图标水平居中、贴底（上方 4px 留给角标探出），角标贴右上、只压住图标的右上角
     let mut holder = Element::stack()
-        .size(44, 24)
+        .size(style::NAV_ICON_BOX_W, style::NAV_ICON_BOX_H)
         .child(
-            style::icon(icon_svg, 20, Role::TextMuted)
+            style::icon(icon_svg, style::ICON_MD, Role::TextMuted)
                 .align_xy(Align::Center, Align::End)
                 .visible_signal(idle),
         )
         .child(
-            style::icon(icon_svg, 20, Role::AccentText)
+            style::icon(icon_svg, style::ICON_MD, Role::AccentText)
                 .align_xy(Align::Center, Align::End)
                 .visible_signal(selected),
         );
@@ -69,7 +69,7 @@ fn nav_item(
         );
     }
 
-    Element::col()
+    let block = Element::col()
         .size(style::NAV_ITEM_W, style::NAV_ITEM_H)
         .padding_xy(0, style::SPACE_SM)
         .cross(Align::Center)
@@ -89,6 +89,18 @@ fn nav_item(
                 .font_size(style::FONT_META)
                 .fg_role_signal(role),
         )
+        .align(Align::Center);
+    // 选中指示条：signal_soft 在 rail 上只差一线，再加左缘 3px signal 竖条；指示条在块之外，不挡点击
+    let bar = Element::leaf()
+        .size(style::NAV_BAR_W, style::NAV_BAR_H)
+        .corner(style::NAV_BAR_W as f32 / 2.0)
+        .bg_role(Role::Accent)
+        .align_xy(Align::Start, Align::Center)
+        .visible_signal(selected);
+    Element::stack()
+        .size(style::NAV_SLOT_W, style::NAV_ITEM_H)
+        .child(bar)
+        .child(block)
 }
 
 /// 顶层界面。
@@ -116,7 +128,7 @@ pub fn shell(ui: &UiState) -> Element {
         })
         .spacing(style::SPACE_XS)
         .cross(Align::Center)
-        .child(style::logo(28))
+        .child(style::logo(style::LOGO_SIZE))
         .child(Element::leaf().height(style::SPACE_MD))
         .child(nav_item(
             ui,
