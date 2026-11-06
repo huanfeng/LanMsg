@@ -782,7 +782,10 @@ impl Messaging {
                                 );
                                 let _ = self.events.send(Event::MessageAdded { msg: msg_view });
 
-                                let conv_row = self.store.get_conversation(&env.conv)?.unwrap();
+                                let conv_row =
+                                    self.store.get_conversation(&env.conv)?.ok_or_else(|| {
+                                        CoreError::NotFound(format!("会话不存在: {}", env.conv))
+                                    })?;
                                 let peer_online = match conv_row.kind {
                                     ConvKindRow::Dm => conv_row.peer_user.is_some_and(|pu| {
                                         self.conns

@@ -452,6 +452,8 @@ async fn routing_task(
                             if let Err(e) = inner.trust.on_cert_update(&pi, certs).await {
                                 tracing::warn!(peer = %d, error = %e, "CertUpdate 处理失败");
                             }
+                        } else {
+                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
                         }
                     }
                     Frame::ContactRequest(req) => {
@@ -461,6 +463,8 @@ async fn routing_task(
                             {
                                 tracing::warn!(peer = %d, error = %e, "ContactRequest 处理失败");
                             }
+                        } else {
+                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
                         }
                     }
                     Frame::ContactResponse(resp) => {
@@ -470,6 +474,8 @@ async fn routing_task(
                             {
                                 tracing::warn!(peer = %d, error = %e, "ContactResponse 处理失败");
                             }
+                        } else {
+                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
                         }
                     }
                     // 吊销帧分派给 Trust；本机被吊销时清空 HelloInfo 证书、
@@ -490,6 +496,8 @@ async fn routing_task(
                                     tracing::warn!(peer = %d, error = %e, "Revocation 处理失败");
                                 }
                             }
+                        } else {
+                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
                         }
                     }
                     // 配对帧分派给 Pairing（P2 Task 7）。
@@ -498,6 +506,8 @@ async fn routing_task(
                             if let Err(e) = inner.pairing.on_pair_frame(&pi, p).await {
                                 tracing::warn!(peer = %d, error = %e, "Pair 帧处理失败");
                             }
+                        } else {
+                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
                         }
                     }
                     // 同步 offer 分派给 SyncEngine（P2 Task 9）。
@@ -526,6 +536,8 @@ async fn routing_task(
                                     tracing::warn!(peer = %d, error = %e, "SyncOffer 处理失败");
                                 }
                             }
+                        } else {
+                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
                         }
                     }
                     // Blob 持有者查询/应答分派给 BlobServer（P2 Task 11）。
@@ -654,12 +666,37 @@ async fn on_discovery(inner: &Arc<Inner>, de: DiscoveryEvent) {
     if !inner.dialing.lock().unwrap().insert(addr) {
         return;
     }
+    let guard = DialingGuard {
+        inner: inner.clone(),
+        addr,
+    };
     let inner = inner.clone();
     let via_multicast = de.via_multicast;
     tokio::spawn(async move {
-        let _ = inner.conns.connect(addr, via_multicast).await;
-        inner.dialing.lock().unwrap().remove(&addr);
+        // guard 随任务结束（含被取消/panic）Drop，必定从在途表移除。
+        let _guard = guard;
+        // 关停时打断拨号，不让后台任务拖住退出。
+        tokio::select! {
+            _ = inner.conns.connect(addr, via_multicast) => {}
+            _ = inner.conns.wait_shutdown() => {}
+        }
     });
+}
+
+/// 发现触发拨号的在途登记：Drop 时移除，保证任何退出路径都不泄漏地址。
+struct DialingGuard {
+    inner: Arc<Inner>,
+    addr: SocketAddr,
+}
+
+impl Drop for DialingGuard {
+    fn drop(&mut self) {
+        self.inner
+            .dialing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.addr);
+    }
 }
 
 /// 登记静态对端并启动其后台重连任务；同一地址只启动一次。

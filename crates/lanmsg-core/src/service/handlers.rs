@@ -1,7 +1,5 @@
-// P1 核心骨架：请求处理器（Task 11）。
-// 已实现：GetSelf、Init{FirstDevice}、SetStatus、ListPeers、ListConversations、
-// ListMessages、OpenDm、SendText、AddManualPeer、Shutdown。
-// 其余一律返回 `未实现：<变体名>`（唯一允许的占位，后续阶段替换）。
+// 请求处理器：把 `Request` 各变体分派到消息、信任、配对、文件等模块（C5 全部变体）。
+// 仍未实现的变体（若有）统一返回 `未实现：<变体名>`，见文件末尾 `variant_name`。
 // 注释中文，标识符英文。
 
 use std::net::SocketAddr;

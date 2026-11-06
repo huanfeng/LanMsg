@@ -85,8 +85,7 @@ impl DiscoveredTable {
         g.get(d).map(|(a, s, _)| (a.clone(), *s))
     }
 
-    /// 列出 `within` 内记录的设备（后续任务使用）。
-    #[allow(dead_code)] // P2 后续任务（Task 10 扫描/同步）使用
+    /// 列出 `within` 内记录的设备。
     pub fn recent(&self, within: Duration) -> Vec<(Announce, SocketAddr)> {
         let g = self.0.lock().unwrap();
         let now = Instant::now();

@@ -185,8 +185,8 @@ impl ConnManager {
         let peer_addr = peer_info.addr;
         let self_dev = self.self_device();
 
-        // 假设：对端在自己发 Up 之前不发帧，故宽限期间读循环推送的 Frame 不会
-        // 被外层丢弃；即使丢了，也会由 Up 之后的 SyncOffer 收敛。
+        // 读循环在本端发 Up 之前挂起（对端帧不先于本端 Up 上送），故宽限期间
+        // 不会有 Frame 越过 Up 到达外层。
         // 同时拨号：裁决保留“拨号方 DeviceId 较小”的连接。本端较大时，本条出站
         // 连接若遇对端同时拨入，必被对端关闭；若此时先登记并发 Up，读循环随后
         // 自清理发 Down，对端拨入连接再发 Up，外层看到 Up/Down/Up。故先在宽限窗口内
@@ -714,7 +714,6 @@ mod tests {
     }
 
     /// 带证书的管理器：用于数据通道与身份校验测试。
-    #[allow(dead_code)] // 数据测试分批使用
     async fn make_manager_with_cert(
     ) -> (ConnManager, mpsc::Receiver<ConnEvent>, DeviceId, DeviceCert) {
         let (device, _identity) = make_identity();
