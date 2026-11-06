@@ -1,6 +1,7 @@
 // IPC 桥：后台线程里的 IpcClient。
 // UI 线程经 `Bridge::call` 投递请求，结果与事件经 windui 通道（`UiMsg`）回到 UI 线程。
 // 连接失败时拉起 lanmsgd 一次，之后每秒重试；任何阻塞都发生在后台线程。
+// 断线只靠 `IpcClient::events()` 的 Closed 判定（读任务退出即关闭），不对单个调用的 Io 错误做断线推断。
 // 注释中文，标识符英文。
 
 use std::path::{Path, PathBuf};
@@ -14,9 +15,6 @@ use windui::prelude::Sender;
 
 /// 重连间隔。
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
-/// 连接存活探测间隔与超时。
-const PROBE_INTERVAL: Duration = Duration::from_secs(2);
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 发往 UI 线程的消息。
 #[derive(Debug, Clone)]
@@ -144,13 +142,19 @@ async fn run(
             }
         }
         // 断开期间的请求不排队：立刻以“未连接”回复，避免重连后重放过期操作
-        while let Ok((_, tag)) = rx.try_recv() {
-            let _ = ui.send(UiMsg::Reply {
-                tag,
-                result: Err(not_connected()),
-            });
+        let retry = tokio::time::sleep(RETRY_INTERVAL);
+        tokio::pin!(retry);
+        loop {
+            tokio::select! {
+                _ = &mut retry => break,
+                cmd = rx.recv() => {
+                    let Some((_, tag)) = cmd else { return };
+                    if ui.send(UiMsg::Reply { tag, result: Err(not_connected()) }).is_err() {
+                        return;
+                    }
+                }
+            }
         }
-        tokio::time::sleep(RETRY_INTERVAL).await;
     }
 }
 
@@ -161,8 +165,6 @@ async fn serve(
     ui: &Sender<UiMsg>,
 ) -> String {
     let mut events = client.events();
-    let (dead_tx, mut dead_rx) = mpsc::unbounded_channel::<String>();
-    let mut probe = tokio::time::interval(PROBE_INTERVAL);
     loop {
         tokio::select! {
             cmd = rx.recv() => {
@@ -171,14 +173,8 @@ async fn serve(
                 };
                 let client = client.clone();
                 let ui = ui.clone();
-                let dead_tx = dead_tx.clone();
                 tokio::spawn(async move {
                     let result = client.call(req).await;
-                    if let Err(e) = &result {
-                        if e.code == ErrorCode::Io {
-                            let _ = dead_tx.send(e.message.clone());
-                        }
-                    }
                     let _ = ui.send(UiMsg::Reply { tag, result });
                 });
             }
@@ -197,17 +193,6 @@ async fn serve(
                     return "事件流已关闭".to_string();
                 }
             },
-            Some(reason) = dead_rx.recv() => return reason,
-            // 读循环退出后 IpcClient 不会主动通知，靠定时探测发现断线
-            _ = probe.tick() => {
-                let alive = matches!(
-                    tokio::time::timeout(PROBE_TIMEOUT, client.call(Request::GetSelf)).await,
-                    Ok(Ok(_))
-                );
-                if !alive {
-                    return "与后台服务的连接已断开".to_string();
-                }
-            }
         }
     }
 }

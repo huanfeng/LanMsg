@@ -3,7 +3,7 @@
 // 注释中文，标识符英文。
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 与当前可执行文件同目录的 lanmsgd 绝对路径。
 fn daemon_exe() -> io::Result<PathBuf> {
@@ -19,9 +19,80 @@ fn daemon_exe() -> io::Result<PathBuf> {
     Ok(dir.join(name))
 }
 
-/// 开启 / 关闭开机自启。
-pub fn set_enabled(on: bool) -> io::Result<()> {
-    imp::set_enabled(on, &daemon_exe()?)
+/// 开启 / 关闭开机自启。`data_dir` 非默认目录时，自启项会带上 `--data-dir`。
+pub fn set_enabled(on: bool, data_dir: &Path) -> io::Result<()> {
+    let extra = (data_dir != lanmsg_core::paths::default_data_dir()).then_some(data_dir);
+    imp::set_enabled(on, &daemon_exe()?, extra)
+}
+
+/// desktop entry 的 Exec 参数转义：加双引号，引号内 `"`、`` ` ``、`$`、`\` 前加反斜杠，
+/// `%` 写作 `%%`（否则会被当作字段代码）。
+#[cfg(any(target_os = "linux", test))]
+fn escape_exec_arg(arg: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in arg.chars() {
+        match ch {
+            '"' | '`' | '$' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            '%' => out.push_str("%%"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Linux 自启项内容。
+#[cfg(any(target_os = "linux", test))]
+fn desktop_entry(exe: &Path, data_dir: Option<&Path>) -> String {
+    let mut exec = escape_exec_arg(&exe.to_string_lossy());
+    if let Some(d) = data_dir {
+        exec.push_str(" --data-dir ");
+        exec.push_str(&escape_exec_arg(&d.to_string_lossy()));
+    }
+    format!(
+        "[Desktop Entry]\nType=Application\nName=LanMsg\nExec={exec}\nX-GNOME-Autostart-enabled=true\nTerminal=false\n"
+    )
+}
+
+/// XML 文本转义（& < > " '）。
+#[cfg(any(target_os = "macos", test))]
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// macOS LaunchAgent plist 内容。
+#[cfg(any(target_os = "macos", test))]
+fn plist_content(exe: &Path, data_dir: Option<&Path>) -> String {
+    let mut args = format!("<string>{}</string>", xml_escape(&exe.to_string_lossy()));
+    if let Some(d) = data_dir {
+        args.push_str(&format!(
+            "<string>--data-dir</string><string>{}</string>",
+            xml_escape(&d.to_string_lossy())
+        ));
+    }
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+<plist version=\"1.0\">\n<dict>\n\
+<key>Label</key><string>app.lanmsg.daemon</string>\n\
+<key>ProgramArguments</key><array>{args}</array>\n\
+<key>RunAtLoad</key><true/>\n\
+</dict>\n</plist>\n"
+    )
 }
 
 /// 当前是否已开启开机自启。
@@ -65,11 +136,14 @@ mod imp {
         }
     }
 
-    pub fn set_enabled(on: bool, exe: &Path) -> io::Result<()> {
+    pub fn set_enabled(on: bool, exe: &Path, data_dir: Option<&Path>) -> io::Result<()> {
         let key = open_run_key(KEY_SET_VALUE)?;
         let result = if on {
             // 路径加引号，避免含空格时被拆开；REG_SZ 要求以 NUL 结尾的 UTF-16 字节
-            let value = format!("\"{}\"", exe.display());
+            let mut value = format!("\"{}\"", exe.display());
+            if let Some(d) = data_dir {
+                value.push_str(&format!(" --data-dir \"{}\"", d.display()));
+            }
             let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
             let bytes: Vec<u8> = wide.iter().flat_map(|u| u.to_le_bytes()).collect();
             // SAFETY: key 已成功打开；bytes 在调用期间有效。
@@ -123,20 +197,18 @@ mod imp {
         home.join(".config/autostart/lanmsgd.desktop")
     }
 
-    pub(super) fn desktop_entry(exe: &Path) -> String {
-        format!(
-            "[Desktop Entry]\nType=Application\nName=LanMsg\nExec=\"{}\"\nX-GNOME-Autostart-enabled=true\nTerminal=false\n",
-            exe.display()
-        )
-    }
-
-    pub(super) fn set_enabled_in(home: &Path, on: bool, exe: &Path) -> io::Result<()> {
+    pub(super) fn set_enabled_in(
+        home: &Path,
+        on: bool,
+        exe: &Path,
+        data_dir: Option<&Path>,
+    ) -> io::Result<()> {
         let path = desktop_path(home);
         if on {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            std::fs::write(&path, desktop_entry(exe))
+            std::fs::write(&path, super::desktop_entry(exe, data_dir))
         } else {
             match std::fs::remove_file(&path) {
                 Ok(()) => Ok(()),
@@ -150,8 +222,8 @@ mod imp {
         desktop_path(home).is_file()
     }
 
-    pub fn set_enabled(on: bool, exe: &Path) -> io::Result<()> {
-        set_enabled_in(&home_dir()?, on, exe)
+    pub fn set_enabled(on: bool, exe: &Path, data_dir: Option<&Path>) -> io::Result<()> {
+        set_enabled_in(&home_dir()?, on, exe, data_dir)
     }
 
     pub fn is_enabled() -> bool {
@@ -172,26 +244,13 @@ mod imp {
         Ok(home.join("Library/LaunchAgents/app.lanmsg.daemon.plist"))
     }
 
-    fn plist(exe: &Path) -> String {
-        format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-<plist version=\"1.0\">\n<dict>\n\
-<key>Label</key><string>app.lanmsg.daemon</string>\n\
-<key>ProgramArguments</key><array><string>{}</string></array>\n\
-<key>RunAtLoad</key><true/>\n\
-</dict>\n</plist>\n",
-            exe.display()
-        )
-    }
-
-    pub fn set_enabled(on: bool, exe: &Path) -> io::Result<()> {
+    pub fn set_enabled(on: bool, exe: &Path, data_dir: Option<&Path>) -> io::Result<()> {
         let path = plist_path()?;
         if on {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            std::fs::write(&path, plist(exe))
+            std::fs::write(&path, super::plist_content(exe, data_dir))
         } else {
             match std::fs::remove_file(&path) {
                 Ok(()) => Ok(()),
@@ -211,7 +270,7 @@ mod imp {
     use std::io;
     use std::path::Path;
 
-    pub fn set_enabled(_on: bool, _exe: &Path) -> io::Result<()> {
+    pub fn set_enabled(_on: bool, _exe: &Path, _data_dir: Option<&Path>) -> io::Result<()> {
         Err(io::Error::other("当前平台不支持开机自启"))
     }
 
@@ -220,8 +279,47 @@ mod imp {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_exec_arg_handles_special_chars() {
+        assert_eq!(escape_exec_arg("/opt/a b/x"), "\"/opt/a b/x\"");
+        assert_eq!(escape_exec_arg(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(escape_exec_arg("a$b`c"), r#""a\$b\`c""#);
+        assert_eq!(escape_exec_arg(r"a\b"), r#""a\\b""#);
+        assert_eq!(escape_exec_arg("100%"), "\"100%%\"");
+    }
+
+    #[test]
+    fn desktop_entry_includes_data_dir_when_given() {
+        let t = desktop_entry(Path::new("/opt/lan msg/lanmsgd"), None);
+        assert!(t.contains("Exec=\"/opt/lan msg/lanmsgd\"\n"));
+        let t = desktop_entry(Path::new("/opt/lanmsgd"), Some(Path::new("/data/my dir")));
+        assert!(t.contains("Exec=\"/opt/lanmsgd\" --data-dir \"/data/my dir\"\n"));
+    }
+
+    #[test]
+    fn xml_escape_covers_five_chars() {
+        assert_eq!(
+            xml_escape("a&b<c>d\"e'f"),
+            "a&amp;b&lt;c&gt;d&quot;e&apos;f"
+        );
+    }
+
+    #[test]
+    fn plist_escapes_path_and_includes_data_dir() {
+        let t = plist_content(Path::new("/Apps/R&D/lanmsgd"), Some(Path::new("/d/<x>")));
+        assert!(t.contains("<string>/Apps/R&amp;D/lanmsgd</string>"));
+        assert!(t.contains("<string>--data-dir</string><string>/d/&lt;x&gt;</string>"));
+        let t = plist_content(Path::new("/a/lanmsgd"), None);
+        assert!(!t.contains("--data-dir"));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
     use super::imp::*;
     use std::path::Path;
 
@@ -230,18 +328,18 @@ mod tests {
         let home = tempfile::tempdir().expect("创建临时 HOME");
         let exe = Path::new("/opt/lanmsg/lanmsgd");
         assert!(!is_enabled_in(home.path()));
-        set_enabled_in(home.path(), true, exe).expect("开启应成功");
+        set_enabled_in(home.path(), true, exe, None).expect("开启应成功");
         assert!(is_enabled_in(home.path()));
         let text = std::fs::read_to_string(desktop_path(home.path())).expect("读取自启项");
         assert!(text.contains("Exec=\"/opt/lanmsg/lanmsgd\""));
         assert!(text.contains("X-GNOME-Autostart-enabled=true"));
-        set_enabled_in(home.path(), false, exe).expect("关闭应成功");
+        set_enabled_in(home.path(), false, exe, None).expect("关闭应成功");
         assert!(!is_enabled_in(home.path()));
     }
 
     #[test]
     fn disable_when_not_enabled_is_ok() {
         let home = tempfile::tempdir().expect("创建临时 HOME");
-        set_enabled_in(home.path(), false, Path::new("/x")).expect("本就未开启时关闭应成功");
+        set_enabled_in(home.path(), false, Path::new("/x"), None).expect("本就未开启时关闭应成功");
     }
 }

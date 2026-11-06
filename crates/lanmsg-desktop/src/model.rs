@@ -137,7 +137,12 @@ impl Model {
             UiMsg::Reply { tag, result } => match result {
                 Ok(resp) => self.apply_reply(tag, resp),
                 Err(e) => {
-                    self.toast = Some(e.message);
+                    // 断线期间的自动请求会得到“未连接”，顶部提示条已说明，不再弹 toast
+                    let offline_io =
+                        e.code == ErrorCode::Io && matches!(self.conn, ConnState::Disconnected(_));
+                    if !offline_io {
+                        self.toast = Some(e.message);
+                    }
                     Vec::new()
                 }
             },
@@ -900,6 +905,20 @@ mod tests {
             }),
         });
         assert_eq!(m.toast.as_deref(), Some("对方不在线"));
+    }
+
+    #[test]
+    fn io_error_while_disconnected_does_not_toast() {
+        let mut m = Model::new();
+        m.apply(UiMsg::Disconnected("断开".into()));
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::Generic,
+            result: Err(ApiError {
+                code: ErrorCode::Io,
+                message: "未连接".into(),
+            }),
+        });
+        assert_eq!(m.toast, None);
     }
 
     #[test]

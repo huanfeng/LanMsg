@@ -34,6 +34,11 @@ impl UiState {
 
     /// 处理桥消息：更新 Model、执行副作用、通知视图。
     pub fn dispatch(&self, msg: UiMsg) {
+        // 断线时丢弃此前的待定位请求，避免重连很久之后突然跳转；
+        // 断线期间新发起的请求保留到重连后的首次会话列表回复
+        if matches!(msg, UiMsg::Disconnected(_)) {
+            self.pending_open.borrow_mut().take();
+        }
         let is_convs_reply = matches!(
             &msg,
             UiMsg::Reply {
@@ -80,8 +85,11 @@ impl UiState {
             return;
         }
         *self.pending_open.borrow_mut() = Some(conv);
-        // 刷新会话列表，回复到达后在 resolve_pending_open 里判断存在与否
-        self.act(|m| m.set_page(Page::Chats));
+        // 仅在已连接时立即刷新会话列表；否则等重连后的全量刷新，
+        // 回复到达后在 resolve_pending_open 里判断存在与否
+        if self.read(|m| m.conn == ConnState::Connected) {
+            self.act(|m| m.set_page(Page::Chats));
+        }
     }
 
     fn resolve_pending_open(&self) {
@@ -135,12 +143,35 @@ mod tests {
     #[test]
     fn open_conv_request_resolves_when_conv_list_arrives() {
         let ui = UiState::new(Model::new(), Bridge::detached());
+        ui.dispatch(UiMsg::Connected);
         ui.request_open_conv("c2".into());
         assert_eq!(
             ui.read(|m| m.current_conv.clone()),
             None,
             "列表未到先不打开"
         );
+        ui.dispatch(convs_reply(&["c1", "c2"]));
+        assert_eq!(ui.read(|m| m.current_conv.clone()).as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn pending_open_is_dropped_on_disconnect() {
+        let ui = UiState::new(Model::new(), Bridge::detached());
+        ui.dispatch(UiMsg::Connected);
+        ui.request_open_conv("c2".into());
+        ui.dispatch(UiMsg::Disconnected("断开".into()));
+        ui.dispatch(UiMsg::Connected);
+        ui.dispatch(convs_reply(&["c1", "c2"]));
+        assert_eq!(ui.read(|m| m.current_conv.clone()), None);
+    }
+
+    #[test]
+    fn pending_open_while_disconnected_resolves_after_reconnect() {
+        let ui = UiState::new(Model::new(), Bridge::detached());
+        ui.dispatch(UiMsg::Disconnected("断开".into()));
+        ui.request_open_conv("c2".into());
+        assert_eq!(ui.read(|m| m.page), Page::Chats, "不应被改页");
+        ui.dispatch(UiMsg::Connected);
         ui.dispatch(convs_reply(&["c1", "c2"]));
         assert_eq!(ui.read(|m| m.current_conv.clone()).as_deref(), Some("c2"));
     }
