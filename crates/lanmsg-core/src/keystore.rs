@@ -3,7 +3,7 @@
 // 注释中文，标识符英文。
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -59,10 +59,18 @@ impl KeyStore for FileKeyStore {
     fn save(&self, name: &str, data: &[u8]) -> Result<(), KeyStoreError> {
         let path = self.file_path(name);
         let tmp_path = self.dir.join(format!("{name}.tmp"));
-        fs::write(&tmp_path, data)?;
+        // Unix 下创建时即指定 0600，避免先宽权限后 chmod 的窗口。
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
-            let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        {
+            let mut f = opts.open(&tmp_path)?;
+            f.write_all(data)?;
+            f.sync_all()?;
         }
         fs::rename(&tmp_path, &path)?;
         #[cfg(unix)]

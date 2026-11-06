@@ -328,4 +328,33 @@ mod tests {
         );
         assert!(matches!(err, Err(CoreError::AlreadyInitialized)));
     }
+
+    /// KeyStore 出错（如系统密钥库未解锁）时必须向上返回错误，不得生成新密钥。
+    #[test]
+    fn identity_does_not_regenerate_on_keystore_error() {
+        use crate::error::KeyStoreError;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ErrKs {
+            saves: AtomicUsize,
+        }
+        impl KeyStore for ErrKs {
+            fn load(&self, _: &str) -> Result<Option<Vec<u8>>, KeyStoreError> {
+                Err(KeyStoreError::Io(std::io::Error::other("模拟：未解锁")))
+            }
+            fn save(&self, _: &str, _: &[u8]) -> Result<(), KeyStoreError> {
+                self.saves.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            fn delete(&self, _: &str) -> Result<(), KeyStoreError> {
+                Ok(())
+            }
+        }
+        let ks = ErrKs {
+            saves: AtomicUsize::new(0),
+        };
+        let res = Identity::load_or_create(&ks, &temp_store());
+        assert!(matches!(res, Err(CoreError::KeyStore(_))));
+        assert_eq!(ks.saves.load(Ordering::Relaxed), 0);
+    }
 }

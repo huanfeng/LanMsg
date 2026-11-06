@@ -125,3 +125,15 @@ pub const BLOB_QUERY_WAIT: Duration = Duration::from_secs(2);
 
 /// 进度上报间隔。
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// 密钥库后端选择标记文件名（位于数据目录下），内容为 `os` 或 `file`。
+pub const KEYSTORE_BACKEND_MARKER: &str = "keystore.backend";
+
+/// 密钥库后端标记取值：使用系统密钥库。
+pub const KEYSTORE_BACKEND_OS: &str = "os";
+
+/// 密钥库后端标记取值：使用文件密钥库。
+pub const KEYSTORE_BACKEND_FILE: &str = "file";
+
+/// 探测系统密钥库可用性时读写的临时条目名。
+pub const KEYSTORE_PROBE_NAME: &str = "lanmsg-probe";

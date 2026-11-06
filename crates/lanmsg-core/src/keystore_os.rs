@@ -1,13 +1,18 @@
 // P3 Task 7：平台密钥库。
 // 桌面端优先把密钥放进系统密钥库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），
-// 系统密钥库不可用（无头 Linux、无会话 D-Bus 等）时回退到文件密钥库并记 warn。
+// 后端（系统库/文件库）首次使用时选定一次并持久化，之后出错不再回退（见 OsKeyStore）。
 // 注释中文，标识符英文。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use lanmsg_proto::consts::{
+    KEYSTORE_BACKEND_FILE, KEYSTORE_BACKEND_MARKER, KEYSTORE_BACKEND_OS, KEYSTORE_PROBE_NAME,
+};
 
 use crate::error::KeyStoreError;
+use crate::identity::{KEY_DEVICE, KEY_USER};
 use crate::keystore::{FileKeyStore, KeyStore};
 
 /// 系统密钥库后端抽象（便于测试注入）。
@@ -61,89 +66,208 @@ impl SecretBackend for KeyringBackend {
     }
 }
 
-/// 平台密钥库：primary（系统密钥库）优先，出错回退 fallback（文件密钥库）。
+/// 已选定的后端。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Mode {
+    Os,
+    File,
+}
+
+/// 平台密钥库：后端在首次使用时选定一次并持久化到数据目录的标记文件。
+///
+/// - 标记 `file`：只用文件库，不再尝试系统库。
+/// - 标记 `os`：只用系统库；系统库出错一律返回 Err，绝不回退文件、绝不把错误当“不存在”
+///   （否则登录时 Secret Service 尚未解锁会导致身份被重建）。
+/// - 标记不存在：文件库已有密钥（老用户）则尝试迁移（写入后读回比对一致才删文件），
+///   文件库为空则探测系统库；成功选 `os`，否则选 `file`。
 pub struct OsKeyStore {
     primary: Option<Box<dyn SecretBackend>>,
     fallback: FileKeyStore,
-    /// primary 出错的 warn 只记一次，避免刷屏。
+    marker: PathBuf,
+    mode: Mutex<Option<Mode>>,
+    /// 迁移后删旧文件失败的 warn 只记一次，避免刷屏。
     warned: AtomicBool,
 }
 
 impl OsKeyStore {
-    pub fn new(primary: Option<Box<dyn SecretBackend>>, fallback: FileKeyStore) -> Self {
+    /// `marker` 为后端选择标记文件路径；`primary` 为 None 时恒用文件库（不写标记）。
+    pub fn new(
+        primary: Option<Box<dyn SecretBackend>>,
+        fallback: FileKeyStore,
+        marker: PathBuf,
+    ) -> Self {
         Self {
             primary,
             fallback,
+            marker,
+            mode: Mutex::new(None),
             warned: AtomicBool::new(false),
         }
     }
 
-    fn warn_primary_failed(&self, err: &KeyStoreError) {
+    fn warn_once(&self, msg: &str, err: &KeyStoreError) {
         if !self.warned.swap(true, Ordering::Relaxed) {
-            tracing::warn!("系统密钥库不可用，回退到文件密钥库: {err}");
+            tracing::warn!("{msg}: {err}");
         }
     }
+
+    /// 取得（必要时选定并持久化）后端。
+    fn resolve(&self) -> Result<(Mode, &dyn SecretBackend), KeyStoreError> {
+        let Some(primary) = self.primary.as_deref() else {
+            return Ok((Mode::File, &NoBackend));
+        };
+        let mut guard = self.mode.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mode) = *guard {
+            return Ok((mode, primary));
+        }
+        let mode = match std::fs::read_to_string(&self.marker) {
+            Ok(text) => match text.trim() {
+                KEYSTORE_BACKEND_OS => Mode::Os,
+                KEYSTORE_BACKEND_FILE => Mode::File,
+                other => {
+                    return Err(KeyStoreError::Corrupt(format!(
+                        "密钥库后端标记内容非法: {other:?}"
+                    )))
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.select_backend(primary)?,
+            Err(e) => return Err(KeyStoreError::Io(e)),
+        };
+        *guard = Some(mode);
+        Ok((mode, primary))
+    }
+
+    fn write_marker(&self, value: &str) -> Result<(), KeyStoreError> {
+        std::fs::write(&self.marker, value)?;
+        Ok(())
+    }
+
+    /// 标记不存在时的首次选定。
+    fn select_backend(&self, primary: &dyn SecretBackend) -> Result<Mode, KeyStoreError> {
+        let mut legacy = Vec::new();
+        for name in [KEY_DEVICE, KEY_USER] {
+            if let Some(v) = self.fallback.load(name)? {
+                legacy.push((name, v));
+            }
+        }
+        if legacy.is_empty() {
+            return match probe(primary) {
+                Ok(()) => {
+                    self.write_marker(KEYSTORE_BACKEND_OS)?;
+                    Ok(Mode::Os)
+                }
+                Err(e) => {
+                    tracing::warn!("系统密钥库不可用，改用文件密钥库: {e}");
+                    self.write_marker(KEYSTORE_BACKEND_FILE)?;
+                    Ok(Mode::File)
+                }
+            };
+        }
+        // 迁移：先全部写入并读回比对，全部一致才写标记、删文件。
+        let migrated: Result<(), KeyStoreError> = legacy.iter().try_for_each(|(name, v)| {
+            primary.set(name, v)?;
+            match primary.get(name)? {
+                Some(back) if back == *v => Ok(()),
+                _ => Err(KeyStoreError::Corrupt(format!(
+                    "密钥 {name} 写入系统密钥库后读回不一致"
+                ))),
+            }
+        });
+        match migrated {
+            Ok(()) => {
+                // 标记先于删文件：标记写失败时文件原样保留。
+                self.write_marker(KEYSTORE_BACKEND_OS)?;
+                for (name, _) in &legacy {
+                    if let Err(e) = self.fallback.delete(name) {
+                        self.warn_once("密钥已迁入系统密钥库，但删除旧文件失败", &e);
+                    }
+                }
+                Ok(Mode::Os)
+            }
+            Err(e) => {
+                tracing::warn!("密钥迁入系统密钥库失败，保留文件密钥库: {e}");
+                for (name, _) in &legacy {
+                    let _ = primary.remove(name);
+                }
+                self.write_marker(KEYSTORE_BACKEND_FILE)?;
+                Ok(Mode::File)
+            }
+        }
+    }
+}
+
+/// 探测系统密钥库：写入、读回比对、删除一个探测条目。
+fn probe(primary: &dyn SecretBackend) -> Result<(), KeyStoreError> {
+    const PROBE_VALUE: &[u8] = b"lanmsg";
+    primary.set(KEYSTORE_PROBE_NAME, PROBE_VALUE)?;
+    let back = primary.get(KEYSTORE_PROBE_NAME)?;
+    primary.remove(KEYSTORE_PROBE_NAME)?;
+    if back.as_deref() == Some(PROBE_VALUE) {
+        Ok(())
+    } else {
+        Err(KeyStoreError::Corrupt("探测条目读回不一致".into()))
+    }
+}
+
+/// 无系统后端时的占位（resolve 在 File 模式下不会调用它）。
+struct NoBackend;
+
+impl SecretBackend for NoBackend {
+    fn get(&self, _: &str) -> Result<Option<Vec<u8>>, KeyStoreError> {
+        Ok(None)
+    }
+    fn set(&self, _: &str, _: &[u8]) -> Result<(), KeyStoreError> {
+        Ok(())
+    }
+    fn remove(&self, _: &str) -> Result<(), KeyStoreError> {
+        Ok(())
+    }
+}
+
+/// 系统库出错时统一包装，提示用户解锁后重试。
+fn os_unavailable(e: KeyStoreError) -> KeyStoreError {
+    KeyStoreError::Io(std::io::Error::other(format!(
+        "系统密钥库暂不可用，请解锁后重试: {e}"
+    )))
 }
 
 impl KeyStore for OsKeyStore {
     fn load(&self, name: &str) -> Result<Option<Vec<u8>>, KeyStoreError> {
-        let Some(primary) = &self.primary else {
-            return self.fallback.load(name);
-        };
-        match primary.get(name) {
-            Ok(Some(v)) => Ok(Some(v)),
-            Ok(None) => {
-                // 迁移：primary 没有而文件库有 → 写入 primary，成功后删除文件。
-                let Some(v) = self.fallback.load(name)? else {
-                    return Ok(None);
-                };
-                match primary.set(name, &v) {
-                    Ok(()) => {
-                        if let Err(e) = self.fallback.delete(name) {
-                            tracing::warn!("密钥已迁入系统密钥库，但删除旧文件失败: {e}");
-                        }
-                    }
-                    Err(e) => self.warn_primary_failed(&e),
-                }
-                Ok(Some(v))
-            }
-            Err(e) => {
-                self.warn_primary_failed(&e);
-                self.fallback.load(name)
-            }
+        match self.resolve()? {
+            (Mode::File, _) => self.fallback.load(name),
+            (Mode::Os, os) => os.get(name).map_err(os_unavailable),
         }
     }
 
     fn save(&self, name: &str, bytes: &[u8]) -> Result<(), KeyStoreError> {
-        if let Some(primary) = &self.primary {
-            match primary.set(name, bytes) {
-                Ok(()) => return Ok(()),
-                Err(e) => self.warn_primary_failed(&e),
-            }
+        match self.resolve()? {
+            (Mode::File, _) => self.fallback.save(name, bytes),
+            (Mode::Os, os) => os.set(name, bytes).map_err(os_unavailable),
         }
-        self.fallback.save(name, bytes)
     }
 
     fn delete(&self, name: &str) -> Result<(), KeyStoreError> {
-        if let Some(primary) = &self.primary {
-            if let Err(e) = primary.remove(name) {
-                self.warn_primary_failed(&e);
-            }
+        match self.resolve()? {
+            (Mode::File, _) => self.fallback.delete(name),
+            (Mode::Os, os) => os.remove(name).map_err(os_unavailable),
         }
-        // 两处都删，避免残留的文件副本在 primary 恢复后被迁回。
-        self.fallback.delete(name)
     }
 }
 
 /// 构造平台密钥库：服务名 `LanMsg-<blake3(规范化 data_dir) 前 8 位 hex>`，
-/// 文件回退目录为 `<data_dir>/keys`。
+/// 文件库目录为 `<data_dir>/keys`，后端标记为 `<data_dir>/keystore.backend`。
+///
+/// 先创建数据目录再规范化，保证服务名稳定。注意：移动数据目录会改变服务名；
+/// 标记为 `os` 时系统库里的旧条目将不可见，需先在原路径运行一次导出（本版本不实现）。
 pub fn os_keystore(data_dir: &Path) -> Arc<dyn KeyStore> {
+    let _ = std::fs::create_dir_all(data_dir);
     let canonical = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
     let digest = blake3::hash(canonical.to_string_lossy().as_bytes());
     let service = format!("LanMsg-{}", &digest.to_hex()[..8]);
     Arc::new(OsKeyStore::new(
         Some(Box::new(KeyringBackend::new(service))),
         FileKeyStore::new(data_dir.join("keys")),
+        data_dir.join(KEYSTORE_BACKEND_MARKER),
     ))
 }
 
@@ -151,128 +275,231 @@ pub fn os_keystore(data_dir: &Path) -> Arc<dyn KeyStore> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
 
-    /// 内存后端：模拟可用的系统密钥库。
+    /// 可配置的内存后端：模拟可用/不可用/写入后读不回的系统密钥库。
     #[derive(Clone, Default)]
-    struct MemBackend(Arc<Mutex<HashMap<String, Vec<u8>>>>);
-
-    impl SecretBackend for MemBackend {
-        fn get(&self, name: &str) -> Result<Option<Vec<u8>>, KeyStoreError> {
-            Ok(self.0.lock().unwrap().get(name).cloned())
-        }
-        fn set(&self, name: &str, bytes: &[u8]) -> Result<(), KeyStoreError> {
-            self.0.lock().unwrap().insert(name.into(), bytes.to_vec());
-            Ok(())
-        }
-        fn remove(&self, name: &str) -> Result<(), KeyStoreError> {
-            self.0.lock().unwrap().remove(name);
-            Ok(())
-        }
+    struct FakeBackend {
+        map: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        fail_get: Arc<AtomicBool>,
+        fail_set: Arc<AtomicBool>,
+        /// set 返回 Ok 但并不真正保存。
+        drop_writes: Arc<AtomicBool>,
+        sets: Arc<AtomicUsize>,
     }
-
-    /// 始终失败的后端：模拟无 Secret Service 的环境。
-    struct FailingBackend;
 
     fn unavailable() -> KeyStoreError {
         KeyStoreError::Io(std::io::Error::other("模拟：系统密钥库不可用"))
     }
 
-    impl SecretBackend for FailingBackend {
-        fn get(&self, _: &str) -> Result<Option<Vec<u8>>, KeyStoreError> {
-            Err(unavailable())
+    impl FakeBackend {
+        fn failing() -> Self {
+            let b = Self::default();
+            b.fail_get.store(true, Ordering::Relaxed);
+            b.fail_set.store(true, Ordering::Relaxed);
+            b
         }
-        fn set(&self, _: &str, _: &[u8]) -> Result<(), KeyStoreError> {
-            Err(unavailable())
+    }
+
+    impl SecretBackend for FakeBackend {
+        fn get(&self, name: &str) -> Result<Option<Vec<u8>>, KeyStoreError> {
+            if self.fail_get.load(Ordering::Relaxed) {
+                return Err(unavailable());
+            }
+            Ok(self.map.lock().unwrap().get(name).cloned())
         }
-        fn remove(&self, _: &str) -> Result<(), KeyStoreError> {
-            Err(unavailable())
+        fn set(&self, name: &str, bytes: &[u8]) -> Result<(), KeyStoreError> {
+            if self.fail_set.load(Ordering::Relaxed) {
+                return Err(unavailable());
+            }
+            self.sets.fetch_add(1, Ordering::Relaxed);
+            if !self.drop_writes.load(Ordering::Relaxed) {
+                self.map.lock().unwrap().insert(name.into(), bytes.to_vec());
+            }
+            Ok(())
         }
+        fn remove(&self, name: &str) -> Result<(), KeyStoreError> {
+            if self.fail_set.load(Ordering::Relaxed) {
+                return Err(unavailable());
+            }
+            self.map.lock().unwrap().remove(name);
+            Ok(())
+        }
+    }
+
+    fn keys_dir(dir: &Path) -> PathBuf {
+        dir.join("keys")
+    }
+
+    fn marker(dir: &Path) -> PathBuf {
+        dir.join(KEYSTORE_BACKEND_MARKER)
+    }
+
+    fn open(dir: &Path, b: &FakeBackend) -> OsKeyStore {
+        OsKeyStore::new(
+            Some(Box::new(b.clone())),
+            FileKeyStore::new(keys_dir(dir)),
+            marker(dir),
+        )
+    }
+
+    fn marker_text(dir: &Path) -> String {
+        std::fs::read_to_string(marker(dir)).unwrap()
     }
 
     #[test]
     fn uses_primary_when_available() {
         let dir = tempfile::tempdir().unwrap();
-        let mem = MemBackend::default();
-        let ks = OsKeyStore::new(
-            Some(Box::new(mem.clone())),
-            FileKeyStore::new(dir.path().join("keys")),
-        );
-        ks.save("device.key", b"secret").unwrap();
+        let mem = FakeBackend::default();
+        let ks = open(dir.path(), &mem);
+        ks.save(KEY_DEVICE, b"secret").unwrap();
         assert_eq!(
-            mem.get("device.key").unwrap().as_deref(),
+            mem.get(KEY_DEVICE).unwrap().as_deref(),
             Some(&b"secret"[..])
         );
-        assert!(!dir.path().join("keys").join("device.key").exists());
+        assert!(!keys_dir(dir.path()).join(KEY_DEVICE).exists());
+        assert_eq!(marker_text(dir.path()), KEYSTORE_BACKEND_OS);
         assert_eq!(
-            ks.load("device.key").unwrap().as_deref(),
+            ks.load(KEY_DEVICE).unwrap().as_deref(),
             Some(&b"secret"[..])
         );
-        ks.delete("device.key").unwrap();
-        assert_eq!(ks.load("device.key").unwrap(), None);
+        ks.delete(KEY_DEVICE).unwrap();
+        assert_eq!(ks.load(KEY_DEVICE).unwrap(), None);
+        // 探测条目已清理。
+        assert_eq!(mem.get(KEYSTORE_PROBE_NAME).unwrap(), None);
     }
 
     #[test]
-    fn falls_back_to_file_when_primary_fails() {
+    fn falls_back_to_file_when_primary_unavailable_at_selection() {
         let dir = tempfile::tempdir().unwrap();
-        let ks = OsKeyStore::new(
-            Some(Box::new(FailingBackend)),
-            FileKeyStore::new(dir.path().join("keys")),
-        );
-        ks.save("device.key", b"secret").unwrap();
-        assert!(dir.path().join("keys").join("device.key").exists());
+        let ks = open(dir.path(), &FakeBackend::failing());
+        ks.save(KEY_DEVICE, b"secret").unwrap();
+        assert!(keys_dir(dir.path()).join(KEY_DEVICE).exists());
+        assert_eq!(marker_text(dir.path()), KEYSTORE_BACKEND_FILE);
         assert_eq!(
-            ks.load("device.key").unwrap().as_deref(),
+            ks.load(KEY_DEVICE).unwrap().as_deref(),
             Some(&b"secret"[..])
         );
-        ks.delete("device.key").unwrap();
-        assert_eq!(ks.load("device.key").unwrap(), None);
+        ks.delete(KEY_DEVICE).unwrap();
+        assert_eq!(ks.load(KEY_DEVICE).unwrap(), None);
     }
 
     #[test]
     fn no_primary_uses_file_only() {
         let dir = tempfile::tempdir().unwrap();
-        let ks = OsKeyStore::new(None, FileKeyStore::new(dir.path().join("keys")));
+        let ks = OsKeyStore::new(
+            None,
+            FileKeyStore::new(keys_dir(dir.path())),
+            marker(dir.path()),
+        );
         ks.save("a", b"1").unwrap();
         assert_eq!(ks.load("a").unwrap().as_deref(), Some(&b"1"[..]));
+        assert!(!marker(dir.path()).exists());
     }
 
     #[test]
-    fn migrates_file_key_into_primary_on_load() {
+    fn fresh_install_probe_selects_os_or_file() {
+        // 可用 → os，重开沿用标记（即便此后系统库坏了也不改选）。
         let dir = tempfile::tempdir().unwrap();
-        let fallback = FileKeyStore::new(dir.path().join("keys"));
-        fallback.save("device.key", b"old").unwrap();
-        let mem = MemBackend::default();
-        let ks = OsKeyStore::new(
-            Some(Box::new(mem.clone())),
-            FileKeyStore::new(dir.path().join("keys")),
+        let mem = FakeBackend::default();
+        open(dir.path(), &mem).load(KEY_DEVICE).unwrap();
+        assert_eq!(marker_text(dir.path()), KEYSTORE_BACKEND_OS);
+        let broken = FakeBackend::failing();
+        assert!(open(dir.path(), &broken).load(KEY_DEVICE).is_err());
+
+        // 不可用 → file，重开沿用标记（此后系统库恢复也只用文件库）。
+        let dir = tempfile::tempdir().unwrap();
+        open(dir.path(), &FakeBackend::failing())
+            .save(KEY_DEVICE, b"v")
+            .unwrap();
+        assert_eq!(marker_text(dir.path()), KEYSTORE_BACKEND_FILE);
+        let healthy = FakeBackend::default();
+        let ks = open(dir.path(), &healthy);
+        assert_eq!(ks.load(KEY_DEVICE).unwrap().as_deref(), Some(&b"v"[..]));
+        assert_eq!(healthy.sets.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn legacy_file_keys_migrated_with_readback() {
+        let dir = tempfile::tempdir().unwrap();
+        let fallback = FileKeyStore::new(keys_dir(dir.path()));
+        fallback.save(KEY_DEVICE, b"old-d").unwrap();
+        fallback.save(KEY_USER, b"old-u").unwrap();
+        let mem = FakeBackend::default();
+        let ks = open(dir.path(), &mem);
+        assert_eq!(ks.load(KEY_DEVICE).unwrap().as_deref(), Some(&b"old-d"[..]));
+        assert_eq!(ks.load(KEY_USER).unwrap().as_deref(), Some(&b"old-u"[..]));
+        assert_eq!(mem.get(KEY_USER).unwrap().as_deref(), Some(&b"old-u"[..]));
+        assert!(!keys_dir(dir.path()).join(KEY_DEVICE).exists());
+        assert!(!keys_dir(dir.path()).join(KEY_USER).exists());
+        assert_eq!(marker_text(dir.path()), KEYSTORE_BACKEND_OS);
+    }
+
+    #[test]
+    fn set_ok_but_readback_missing_keeps_file() {
+        let dir = tempfile::tempdir().unwrap();
+        FileKeyStore::new(keys_dir(dir.path()))
+            .save(KEY_DEVICE, b"v")
+            .unwrap();
+        let mem = FakeBackend::default();
+        mem.drop_writes.store(true, Ordering::Relaxed);
+        let ks = open(dir.path(), &mem);
+        assert_eq!(ks.load(KEY_DEVICE).unwrap().as_deref(), Some(&b"v"[..]));
+        assert!(keys_dir(dir.path()).join(KEY_DEVICE).exists());
+        assert_eq!(marker_text(dir.path()), KEYSTORE_BACKEND_FILE);
+    }
+
+    #[test]
+    fn migration_set_failure_keeps_file_and_marks_file() {
+        let dir = tempfile::tempdir().unwrap();
+        FileKeyStore::new(keys_dir(dir.path()))
+            .save("device.key", b"v")
+            .unwrap();
+        let ks = open(dir.path(), &FakeBackend::failing());
+        assert_eq!(ks.load(KEY_DEVICE).unwrap().as_deref(), Some(&b"v"[..]));
+        assert!(keys_dir(dir.path()).join(KEY_DEVICE).exists());
+        assert_eq!(marker_text(dir.path()), KEYSTORE_BACKEND_FILE);
+    }
+
+    #[test]
+    fn os_marked_backend_error_returns_err_not_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(marker(dir.path()), KEYSTORE_BACKEND_OS).unwrap();
+        // 文件库里即便有同名文件也不得回退。
+        FileKeyStore::new(keys_dir(dir.path()))
+            .save(KEY_DEVICE, b"stale")
+            .unwrap();
+        let ks = open(dir.path(), &FakeBackend::failing());
+        assert!(ks.load(KEY_DEVICE).is_err());
+        assert!(ks.save(KEY_DEVICE, b"x").is_err());
+        assert!(ks.delete(KEY_DEVICE).is_err());
+        // 文件库内容未被触碰。
+        assert_eq!(
+            FileKeyStore::new(keys_dir(dir.path()))
+                .load(KEY_DEVICE)
+                .unwrap()
+                .as_deref(),
+            Some(&b"stale"[..])
         );
-        assert_eq!(ks.load("device.key").unwrap().as_deref(), Some(&b"old"[..]));
-        assert_eq!(mem.get("device.key").unwrap().as_deref(), Some(&b"old"[..]));
-        assert!(!dir.path().join("keys").join("device.key").exists());
     }
 
     #[test]
-    fn migration_failure_keeps_file_and_returns_value() {
-        // primary 读返回 None 但写失败：值照常返回，文件不删。
-        struct ReadOkWriteFail;
-        impl SecretBackend for ReadOkWriteFail {
-            fn get(&self, _: &str) -> Result<Option<Vec<u8>>, KeyStoreError> {
-                Ok(None)
-            }
-            fn set(&self, _: &str, _: &[u8]) -> Result<(), KeyStoreError> {
-                Err(unavailable())
-            }
-            fn remove(&self, _: &str) -> Result<(), KeyStoreError> {
-                Ok(())
-            }
-        }
+    fn file_marked_never_touches_primary() {
         let dir = tempfile::tempdir().unwrap();
-        let fallback = FileKeyStore::new(dir.path().join("keys"));
-        fallback.save("k", b"v").unwrap();
-        let ks = OsKeyStore::new(Some(Box::new(ReadOkWriteFail)), fallback);
+        std::fs::write(marker(dir.path()), KEYSTORE_BACKEND_FILE).unwrap();
+        let mem = FakeBackend::default();
+        let ks = open(dir.path(), &mem);
+        ks.save("k", b"v").unwrap();
         assert_eq!(ks.load("k").unwrap().as_deref(), Some(&b"v"[..]));
-        assert!(dir.path().join("keys").join("k").exists());
+        assert_eq!(mem.sets.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn invalid_marker_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(marker(dir.path()), "bogus").unwrap();
+        let ks = open(dir.path(), &FakeBackend::default());
+        assert!(ks.load(KEY_DEVICE).is_err());
     }
 
     /// 真实系统密钥库读写；检测到不可用（CI 无 Secret Service 等）时跳过。
@@ -291,5 +518,21 @@ mod tests {
         assert_eq!(backend.get("probe").unwrap(), None);
         // 删除不存在的条目视为成功。
         backend.remove("probe").unwrap();
+    }
+
+    /// 在 tokio 多线程运行时内调用真实后端：不可用时应返回 Err 而非 panic/死锁。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn keyring_backend_in_tokio_multi_thread_does_not_panic() {
+        let backend = KeyringBackend::new(format!("LanMsg-test-rt-{}", std::process::id()));
+        let _ = backend.get("probe");
+        let _ = backend.set("probe", b"x");
+        let _ = backend.remove("probe");
+    }
+
+    /// 同上，current_thread 运行时。
+    #[tokio::test]
+    async fn keyring_backend_in_tokio_current_thread_does_not_panic() {
+        let backend = KeyringBackend::new(format!("LanMsg-test-rt1-{}", std::process::id()));
+        let _ = backend.get("probe");
     }
 }
