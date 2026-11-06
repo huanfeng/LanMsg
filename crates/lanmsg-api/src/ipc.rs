@@ -157,13 +157,22 @@ impl IpcListener {
 }
 
 /// IPC 客户端（C7）：`call` 用自增 id 关联响应；连接断开时所有挂起调用
-/// 返回 `ApiError { code: Io, .. }`，事件经 `events()` 订阅。
+/// 返回 `ApiError { code: Io, .. }`，事件经 `events()` 订阅；读任务退出后
+/// 事件发送端被 drop，订阅者收到 `Closed`，之后的 `call` 直接返回 Io 错误。
 #[derive(Clone)]
 pub struct IpcClient {
     send: Arc<tokio::sync::Mutex<SplitSink<Framed<Stream, IpcCodec>, IpcFrame>>>,
     next_id: Arc<AtomicU64>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ApiResponse>>>>,
-    events: Arc<broadcast::Sender<Event>>,
+    pending: Arc<Mutex<Pending>>,
+    /// 读任务退出后置 None（drop 发送端使订阅者收到 Closed）。
+    events: Arc<Mutex<Option<broadcast::Sender<Event>>>>,
+}
+
+/// 挂起调用表；`closed` 与表同锁，避免 drain 之后又有调用插入而永久挂起。
+#[derive(Default)]
+struct Pending {
+    map: HashMap<u64, oneshot::Sender<ApiResponse>>,
+    closed: bool,
 }
 
 /// 连接断开时的 Io 错误响应。
@@ -184,15 +193,18 @@ impl IpcClient {
         let stream = Stream::connect(name).await?;
         let (events_tx, _events_rx) = broadcast::channel(256);
         let (sink, mut source) = Framed::new(stream, IpcCodec).split();
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ApiResponse>>>> = Arc::default();
+        let pending: Arc<Mutex<Pending>> = Arc::default();
+        let events: Arc<Mutex<Option<broadcast::Sender<Event>>>> =
+            Arc::new(Mutex::new(Some(events_tx.clone())));
 
         let pending_loop = pending.clone();
-        let events_loop = events_tx.clone();
+        let events_loop = events_tx;
+        let events_close = events.clone();
         tokio::spawn(async move {
             loop {
                 match source.next().await {
                     Some(Ok(IpcFrame::Response(resp))) => {
-                        let slot = pending_loop.lock().unwrap().remove(&resp.id);
+                        let slot = pending_loop.lock().unwrap().map.remove(&resp.id);
                         if let Some(tx) = slot {
                             let _ = tx.send(resp);
                         }
@@ -204,8 +216,16 @@ impl IpcClient {
                     Some(Err(_)) | None => break,
                 }
             }
-            // 连接断开：所有挂起调用返回 Io 错误；events 发送端 drop 使订阅者收到 Closed。
-            for (_id, tx) in pending_loop.lock().unwrap().drain() {
+            // 连接断开：drop 事件发送端（含 IpcClient 持有的那份）使订阅者收到 Closed；
+            // 置 closed 并 drain 挂起调用，以 Io 错误回复。
+            drop(events_loop);
+            events_close.lock().unwrap().take();
+            let drained: Vec<_> = {
+                let mut p = pending_loop.lock().unwrap();
+                p.closed = true;
+                p.map.drain().collect()
+            };
+            for (_id, tx) in drained {
                 let _ = tx.send(io_error_response("IPC 连接已断开"));
             }
         });
@@ -214,7 +234,7 @@ impl IpcClient {
             send: Arc::new(tokio::sync::Mutex::new(sink)),
             next_id: Arc::new(AtomicU64::new(1)),
             pending,
-            events: Arc::new(events_tx),
+            events,
         })
     }
 
@@ -222,13 +242,22 @@ impl IpcClient {
     pub async fn call(&self, body: Request) -> Result<Response, ApiError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        {
+            let mut p = self.pending.lock().unwrap();
+            if p.closed {
+                return Err(ApiError {
+                    code: ErrorCode::Io,
+                    message: "IPC 连接已断开".into(),
+                });
+            }
+            p.map.insert(id, tx);
+        }
         let send_result = {
             let mut sink = self.send.lock().await;
             sink.send(IpcFrame::Request(ApiRequest { id, body })).await
         };
         if let Err(e) = send_result {
-            self.pending.lock().unwrap().remove(&id);
+            self.pending.lock().unwrap().map.remove(&id);
             return Err(ApiError {
                 code: ErrorCode::Io,
                 message: e.to_string(),
@@ -243,9 +272,12 @@ impl IpcClient {
         }
     }
 
-    /// 订阅服务端推送的事件。
+    /// 订阅服务端推送的事件。连接已断开时返回的接收端首次 `recv` 即为 `Closed`。
     pub fn events(&self) -> broadcast::Receiver<Event> {
-        self.events.subscribe()
+        match self.events.lock().unwrap().as_ref() {
+            Some(tx) => tx.subscribe(),
+            None => broadcast::channel(1).1,
+        }
     }
 }
 
@@ -302,5 +334,40 @@ mod tests {
         let mut codec = IpcCodec;
         let result = codec.decode(&mut src);
         assert!(matches!(result, Err(IpcError::TooLarge(_))));
+    }
+
+    /// 服务端 drop 连接后：事件流 Closed、后续 call 返回 Io、新订阅立即 Closed。
+    #[tokio::test]
+    async fn client_closes_events_when_server_drops() {
+        let endpoint = std::env::temp_dir()
+            .join(format!("lanmsg-ipc-close-{}.sock", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let listener = IpcListener::bind(&endpoint).expect("bind 应成功");
+        let accept = tokio::spawn(async move { listener.accept().await.expect("accept") });
+        let client = IpcClient::connect(&endpoint).await.expect("connect");
+        let mut rx = client.events();
+        drop(accept.await.unwrap());
+
+        let r = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("recv 不应挂起");
+        assert!(matches!(r, Err(broadcast::error::RecvError::Closed)));
+
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.call(Request::GetSelf),
+        )
+        .await
+        .expect("call 不应挂起")
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Io);
+
+        let mut late = client.events();
+        assert!(matches!(
+            late.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
+        let _ = std::fs::remove_file(&endpoint);
     }
 }
