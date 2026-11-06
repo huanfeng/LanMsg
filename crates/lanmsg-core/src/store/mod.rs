@@ -5,8 +5,10 @@
 pub mod blobs;
 pub mod contacts;
 pub mod convs;
+pub mod file_index;
 pub mod messages;
 pub mod schema;
+pub mod search_index;
 pub mod users;
 
 pub use blobs::{
@@ -15,6 +17,7 @@ pub use blobs::{
 };
 pub use contacts::{ContactRow, ContactState, RequestKindRow, RequestRow};
 pub use convs::{ConvKindRow, ConvRow, Gate};
+pub use file_index::{file_kind, FileQuery, FileRow};
 pub use messages::{MsgStateRow, StoredMessage};
 pub use users::{DeviceRow, UserRow};
 
@@ -157,5 +160,60 @@ mod tests {
                 .unwrap_or_else(|e| panic!("表 {table} 查询失败: {e}"));
             assert_eq!(n, 0, "表 {table} 应为空");
         }
+    }
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+    use lanmsg_proto::ids::{ConvId, DeviceId, MsgId};
+    use lanmsg_proto::types::{Envelope, Hlc, MsgBody, Signature64};
+
+    /// 已有 v2 数据库（P1+P2 迁移）里的历史消息，升级到 v3 后由回填补齐索引。
+    #[test]
+    fn v2_database_upgrades_and_backfills_search_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        let env = Envelope {
+            conv: ConvId([1u8; 32]),
+            id: MsgId {
+                author: DeviceId([2u8; 32]),
+                seq: 1,
+            },
+            conv_seq: 1,
+            hlc: Hlc {
+                millis: 100,
+                counter: 0,
+            },
+            body: MsgBody::Text {
+                text: "升级前的历史消息".into(),
+            },
+            enc: None,
+            sig: Signature64([0u8; 64]),
+        };
+        {
+            let conn = Connection::open(&path).unwrap();
+            for (i, sql) in MIGRATIONS[..2].iter().enumerate() {
+                conn.execute_batch(sql).unwrap();
+                conn.pragma_update(None, "user_version", i as u32 + 1)
+                    .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO messages(author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text, hidden, deleted)
+                 VALUES(?1, 1, ?2, 1, 100, 0, ?3, 'delivered', 1, ?4, 0, 0)",
+                rusqlite::params![
+                    &env.id.author.0[..],
+                    &env.conv.0[..],
+                    lanmsg_proto::to_cbor(&env),
+                    "升级前的历史消息"
+                ],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), MIGRATIONS.len() as u32);
+        assert!(s.search_messages("历史消息", None, 10).unwrap().is_empty());
+        assert_eq!(s.backfill_search_index().unwrap(), 1);
+        assert_eq!(s.search_messages("历史消息", None, 10).unwrap().len(), 1);
     }
 }

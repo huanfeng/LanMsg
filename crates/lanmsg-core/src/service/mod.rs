@@ -3,6 +3,7 @@
 // 启动顺序：Store → Identity → ConnManager::bind → Discovery::spawn → 路由任务 → 静态对端拨号。
 // 注释中文，标识符英文。
 
+pub mod files;
 pub mod handlers;
 pub mod ingest;
 pub mod views;
@@ -307,6 +308,14 @@ impl Service {
         for addr in static_peers {
             tokio::spawn(static_peer_task(inner.clone(), addr));
         }
+
+        // 旧库的文件 / 文字搜索索引回填：后台执行，不阻塞启动（完成后写标记，只做一次）。
+        let backfill_store = inner.store.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = backfill_store.backfill_search_index() {
+                tracing::warn!("搜索索引回填失败: {e}");
+            }
+        });
 
         // 恢复遗留的 preparing 行（重启前的文件发送重新走后台任务）。
         inner.msg.resume_preparing().await?;

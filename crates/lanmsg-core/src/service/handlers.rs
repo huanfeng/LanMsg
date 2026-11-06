@@ -77,6 +77,28 @@ pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiE
             *inner.ui_focus.lock().unwrap_or_else(|e| e.into_inner()) = conv;
             Ok(Response::Ok)
         }
+        Request::QueryFiles { filter } => Ok(Response::Files {
+            value: crate::service::files::query_files(inner, &filter)?,
+        }),
+        Request::SearchMessages { query, conv, limit } => {
+            let conv = conv.as_deref().map(parse_conv).transpose()?;
+            Ok(Response::Messages {
+                value: crate::service::files::search_messages(inner, &query, conv.as_ref(), limit)?,
+            })
+        }
+        Request::ForwardFiles { conv, hashes } => {
+            let conv = parse_conv(&conv)?;
+            let hashes = hashes
+                .iter()
+                .map(|h| {
+                    BlobHash::from_hex(h).map_err(|_| invalid_arg(format!("非法文件哈希: {h}")))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let id = crate::service::files::forward_files(inner, &conv, &hashes).await?;
+            Ok(Response::MsgId {
+                value: id.to_string(),
+            })
+        }
         Request::Shutdown => {
             inner.discovery.shutdown();
             inner.conns.shutdown().await;

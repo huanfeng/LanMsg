@@ -396,7 +396,7 @@ impl Store {
             rusqlite::params![&author.0[..], seq as i64],
         )?;
         // 复用 insert_envelope 的事务内逻辑：直接在 tx 上插入核心行。
-        insert_envelope_on_tx(&tx, env, MsgStateRow::Sending, now)?;
+        insert_envelope_on_tx(self, &tx, env, MsgStateRow::Sending, now)?;
         // 信封携带的 Blob 元数据，按 hash 索引（Files/Folder 两种形态）。
         let items_with_rel: Vec<(&BlobMeta, Option<String>)> = match &env.body {
             lanmsg_proto::types::MsgBody::Files { items } => {
@@ -816,6 +816,7 @@ fn chrono_now() -> i64 {
 
 /// 在给定事务上插入信封核心行（供 finish_preparing 复用，推进版本向量）。
 fn insert_envelope_on_tx(
+    store: &Store,
     tx: &rusqlite::Transaction<'_>,
     env: &Envelope,
     state: MsgStateRow,
@@ -825,7 +826,7 @@ fn insert_envelope_on_tx(
         lanmsg_proto::types::MsgBody::Text { text } => Some(text.clone()),
         _ => None,
     };
-    tx.execute(
+    let inserted = tx.execute(
         "INSERT OR IGNORE INTO messages(author, seq, conv_id, conv_seq, hlc_millis, hlc_counter, envelope, state, received_at, text, author_user, hidden, deleted)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, 0)",
         rusqlite::params![
@@ -841,7 +842,12 @@ fn insert_envelope_on_tx(
             text,
             lanmsg_proto::body_is_hidden(&env.body) as i64,
         ],
-    )?;
+    )? > 0;
+    // 本机发出的文件 / 文字消息同样要进文件视图与搜索索引（与 insert_envelope 一致）。
+    if inserted {
+        store.index_files(tx, env)?;
+        store.index_message_text(tx, env, lanmsg_proto::body_is_hidden(&env.body))?;
+    }
     tx.execute(
         "INSERT INTO version_vectors(conv_id, author, contiguous) VALUES(?1, ?2, ?3)
          ON CONFLICT(conv_id, author) DO UPDATE SET contiguous = MAX(contiguous, excluded.contiguous)",

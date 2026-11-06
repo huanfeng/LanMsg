@@ -66,4 +66,27 @@ CREATE TABLE transfers(transfer_id TEXT PRIMARY KEY, hash BLOB NOT NULL, state T
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE INDEX transfers_hash ON transfers(hash, state);
 ",
+    // 迁移 3（P3）：文件视图索引与消息文字搜索索引（FTS5 trigram，外部内容表）。
+    // 索引由 insert_envelope 同事务维护，旧库由 backfill_search_index 一次性回填。
+    "
+CREATE TABLE file_index(id INTEGER PRIMARY KEY, conv_id BLOB NOT NULL, author BLOB NOT NULL,
+  seq INTEGER NOT NULL, item_idx INTEGER NOT NULL, hash BLOB NOT NULL, name TEXT NOT NULL,
+  mime TEXT NOT NULL, size INTEGER NOT NULL, kind TEXT NOT NULL, hlc_millis INTEGER NOT NULL,
+  UNIQUE(author, seq, item_idx));
+CREATE INDEX file_index_order ON file_index(hlc_millis DESC);
+CREATE INDEX file_index_conv ON file_index(conv_id, hlc_millis DESC);
+CREATE VIRTUAL TABLE file_index_fts USING fts5(name, content='file_index', content_rowid='id', tokenize='trigram');
+CREATE TRIGGER file_index_ai AFTER INSERT ON file_index BEGIN
+  INSERT INTO file_index_fts(rowid, name) VALUES (new.id, new.name); END;
+CREATE TRIGGER file_index_ad AFTER DELETE ON file_index BEGIN
+  INSERT INTO file_index_fts(file_index_fts, rowid, name) VALUES('delete', old.id, old.name); END;
+CREATE TABLE message_text_index(id INTEGER PRIMARY KEY, conv_id BLOB NOT NULL, author BLOB NOT NULL,
+  seq INTEGER NOT NULL, hlc_millis INTEGER NOT NULL, text TEXT NOT NULL, UNIQUE(author, seq));
+CREATE INDEX message_text_index_conv ON message_text_index(conv_id, hlc_millis DESC);
+CREATE VIRTUAL TABLE message_text_fts USING fts5(text, content='message_text_index', content_rowid='id', tokenize='trigram');
+CREATE TRIGGER message_text_ai AFTER INSERT ON message_text_index BEGIN
+  INSERT INTO message_text_fts(rowid, text) VALUES (new.id, new.text); END;
+CREATE TRIGGER message_text_ad AFTER DELETE ON message_text_index BEGIN
+  INSERT INTO message_text_fts(message_text_fts, rowid, text) VALUES('delete', old.id, old.text); END;
+",
 ];

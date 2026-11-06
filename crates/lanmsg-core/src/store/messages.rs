@@ -245,6 +245,8 @@ impl Store {
                      WHERE author = ?1 AND seq = ?2 AND state != 'recalled'",
                     rusqlite::params![&target.author.0[..], target.seq as i64],
                 )?;
+                // 被撤回的消息不再出现在文件视图与文字搜索里。
+                crate::store::file_index::unindex_tx(&tx, target)?;
             }
             // 目标此前被召回：新插入的消息直接置 recalled。
             let recalled: Option<i64> = tx
@@ -259,6 +261,11 @@ impl Store {
                     "UPDATE messages SET state = 'recalled' WHERE author = ?1 AND seq = ?2",
                     rusqlite::params![author_bytes, env.id.seq as i64],
                 )?;
+            }
+            // 与入库同事务写文件 / 文字索引；已处于撤回状态（撤回先到）的不写。
+            if recalled.is_none() {
+                self.index_files(&tx, env)?;
+                self.index_message_text(&tx, env, hidden)?;
             }
         }
 
@@ -288,47 +295,126 @@ impl Store {
 
     /// 批量设置隐藏标记。
     pub fn set_hidden(&self, ids: &[MsgId], hidden: bool) -> Result<(), crate::store::StoreError> {
-        let conn = self
+        let mut conn = self
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let tx = conn.transaction()?;
         for id in ids {
-            conn.execute(
+            tx.execute(
                 "UPDATE messages SET hidden = ?1 WHERE author = ?2 AND seq = ?3",
                 rusqlite::params![hidden as i64, &id.author.0[..], id.seq as i64],
             )?;
+            // 文字索引只收可见消息：隐藏时移除，转为可见（如接受陌生人）时补写。
+            if hidden {
+                tx.execute(
+                    "DELETE FROM message_text_index WHERE author = ?1 AND seq = ?2",
+                    rusqlite::params![&id.author.0[..], id.seq as i64],
+                )?;
+            } else {
+                self.reindex_text_tx(&tx, id)?;
+            }
         }
+        tx.commit()?;
         Ok(())
     }
 
     /// 批量标记本地删除（同步保留，UI 不再显示）。
     pub fn mark_deleted(&self, ids: &[MsgId]) -> Result<(), crate::store::StoreError> {
-        let conn = self
+        let mut conn = self
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let tx = conn.transaction()?;
         for id in ids {
-            conn.execute(
+            tx.execute(
                 "UPDATE messages SET deleted = 1 WHERE author = ?1 AND seq = ?2",
                 rusqlite::params![&id.author.0[..], id.seq as i64],
             )?;
+            crate::store::file_index::unindex_tx(&tx, id)?;
         }
+        tx.commit()?;
         Ok(())
     }
 
     /// 撤回无效时恢复目标：删除该目标的 recalls 行，并把状态为 recalled 的
     /// 消息恢复为 sent（原始状态未单独记录，sent 为最接近的可用状态）。
     pub fn undo_recall(&self, target: &MsgId) -> Result<(), crate::store::StoreError> {
-        let conn = self
+        let mut conn = self
             .conn()
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
-        conn.execute(
+        let tx = conn.transaction()?;
+        tx.execute(
             "DELETE FROM recalls WHERE target_author = ?1 AND target_seq = ?2",
             rusqlite::params![&target.author.0[..], target.seq as i64],
         )?;
-        conn.execute(
+        let restored = tx.execute(
             "UPDATE messages SET state = 'sent'
              WHERE author = ?1 AND seq = ?2 AND state = 'recalled'",
             rusqlite::params![&target.author.0[..], target.seq as i64],
         )?;
+        // 恢复可见后补回撤回时移除的索引。
+        if restored > 0 {
+            self.reindex_message_tx(&tx, target)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 按库中记录重建某消息的文件 / 文字索引（跳过已删除；幂等）。
+    fn reindex_message_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        id: &MsgId,
+    ) -> Result<(), crate::store::StoreError> {
+        use rusqlite::OptionalExtension;
+        let row: Option<(Vec<u8>, bool, bool)> = tx
+            .query_row(
+                "SELECT envelope, hidden, deleted FROM messages WHERE author = ?1 AND seq = ?2",
+                rusqlite::params![&id.author.0[..], id.seq as i64],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get::<_, i64>(1)? != 0,
+                        r.get::<_, i64>(2)? != 0,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((bytes, hidden, deleted)) = row else {
+            return Ok(());
+        };
+        if deleted {
+            return Ok(());
+        }
+        let env: Envelope = lanmsg_proto::from_cbor(&bytes)
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        self.index_files(tx, &env)?;
+        self.index_message_text(tx, &env, hidden)?;
+        Ok(())
+    }
+
+    /// 转为可见时补写文字索引（文件索引与可见性无关，不动）。
+    fn reindex_text_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        id: &MsgId,
+    ) -> Result<(), crate::store::StoreError> {
+        use rusqlite::OptionalExtension;
+        let row: Option<(Vec<u8>, String, bool)> = tx
+            .query_row(
+                "SELECT envelope, state, deleted FROM messages WHERE author = ?1 AND seq = ?2",
+                rusqlite::params![&id.author.0[..], id.seq as i64],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
+            )
+            .optional()?;
+        let Some((bytes, state, deleted)) = row else {
+            return Ok(());
+        };
+        if deleted || state == "recalled" {
+            return Ok(());
+        }
+        let env: Envelope = lanmsg_proto::from_cbor(&bytes)
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        self.index_message_text(tx, &env, false)?;
         Ok(())
     }
 
