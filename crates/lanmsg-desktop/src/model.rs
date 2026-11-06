@@ -14,6 +14,8 @@ pub const MESSAGE_PAGE: u32 = 50;
 pub const MESSAGE_WINDOW_MAX: usize = 300;
 /// 文件视图一页的大小。
 pub const FILE_PAGE: u32 = 100;
+/// 静默刷新时一次最多取回的文件条数（与 core 的单次上限一致）。
+const FILE_REFRESH_MAX: u32 = 500;
 /// 搜索结果上限。
 const SEARCH_LIMIT: u32 = 50;
 
@@ -164,6 +166,17 @@ pub struct Model {
     pub devices: Vec<DeviceView>,
     pub files: Vec<FileView>,
     pub file_filter: FileFilter,
+    /// 每次发出“从头查询”自增；追加页与首页的回复带回它，不一致的迟到回复丢弃。
+    pub files_epoch: u64,
+    /// 追加下一页的请求已发出、尚未回复。
+    pub files_loading: bool,
+    /// 上次返回满页，还可能有更早的文件。
+    pub files_more: bool,
+    /// 已收到过至少一次文件查询的回复（区分“加载中”与“没有文件”）。
+    pub files_loaded: bool,
+    /// 文件页视图的重建序号：进入文件页或用户改筛选时自增（回到列表顶部）；
+    /// 事件触发的静默刷新不自增，滚动位置得以保留。
+    pub files_view_epoch: u64,
     pub settings: Option<SettingsDto>,
     pub transfers: BTreeMap<String, TransferInfo>,
     /// 哈希 -> 传输 id：取消传输要用；下载回复与进度事件都会登记，结束时清除。
@@ -236,6 +249,11 @@ impl Model {
                 before_millis: None,
                 limit: FILE_PAGE,
             },
+            files_epoch: 0,
+            files_loading: false,
+            files_more: false,
+            files_loaded: false,
+            files_view_epoch: 0,
             settings: None,
             transfers: BTreeMap::new(),
             transfer_ids: BTreeMap::new(),
@@ -288,6 +306,10 @@ impl Model {
                         } => self.draft_restore = Some((conv.clone(), d.clone())),
                         ReplyTag::Messages { older: true, .. } => self.older_in_flight = false,
                         ReplyTag::Messages { older: false, .. } => self.reload_in_flight = false,
+                        ReplyTag::Files {
+                            append: true,
+                            epoch,
+                        } if *epoch == self.files_epoch => self.files_loading = false,
                         _ => {}
                     }
                     if let ReplyTag::Transfer { hash } = &tag {
@@ -443,8 +465,15 @@ impl Model {
                 self.devices = value;
                 Vec::new()
             }
-            (ReplyTag::Files { append }, Response::Files { value }) => {
+            (ReplyTag::Files { append, epoch }, Response::Files { value }) => {
+                // 条件变了之后迟到的回复（含旧的追加页）一律丢弃
+                if epoch != self.files_epoch {
+                    return Vec::new();
+                }
+                self.files_loaded = true;
+                self.files_more = value.len() as u32 >= self.file_filter.limit;
                 if append {
+                    self.files_loading = false;
                     self.files.extend(value);
                 } else {
                     self.files = value;
@@ -454,6 +483,13 @@ impl Model {
             (ReplyTag::Settings, Response::Settings { value }) => {
                 self.settings = Some(value);
                 Vec::new()
+            }
+            (ReplyTag::SettingsSaved, Response::Ok) => {
+                self.toast = Some(strings::SETTINGS_SAVED.to_string());
+                vec![call(Request::GetSettings, ReplyTag::Settings)]
+            }
+            (ReplyTag::ProfileSaved, Response::Ok) => {
+                vec![call(Request::GetSelf, ReplyTag::SelfInfo)]
             }
             (
                 ReplyTag::Pair { nonce } | ReplyTag::PairJoin { nonce },
@@ -519,6 +555,7 @@ impl Model {
             }
             (ReplyTag::Deleted { msg }, Response::Ok) => {
                 self.messages.retain(|m| m.id != msg);
+                self.files.retain(|f| f.msg != msg);
                 Vec::new()
             }
             (ReplyTag::Responded { request }, Response::Ok) => {
@@ -553,7 +590,28 @@ impl Model {
         }
     }
 
+    /// 事件处理；文件页打开时，会改变文件列表内容的事件（新文件消息、传输结束）
+    /// 额外触发一次静默刷新，让“下载”按钮及时变成“打开”。
     fn apply_event(&mut self, ev: Event) -> Vec<Effect> {
+        let touches_files = self.page == Page::Files
+            && match &ev {
+                Event::TransferFinished { .. } => true,
+                Event::MessageAdded { msg } | Event::MessageUpdated { msg } => {
+                    matches!(
+                        msg.body,
+                        MessageBodyView::Files { .. } | MessageBodyView::Folder { .. }
+                    )
+                }
+                _ => false,
+            };
+        let mut fx = self.apply_event_inner(ev);
+        if touches_files {
+            fx.extend(self.refresh_files());
+        }
+        fx
+    }
+
+    fn apply_event_inner(&mut self, ev: Event) -> Vec<Effect> {
         match ev {
             Event::MessageAdded { msg } => {
                 if self.current_conv.as_deref() != Some(msg.conv.as_str())
@@ -741,13 +799,12 @@ impl Model {
                 call(Request::ListPeers, ReplyTag::Peers),
                 call(Request::ListMyDevices, ReplyTag::Devices),
             ],
-            Page::Files => vec![call(
-                Request::QueryFiles {
-                    filter: self.file_filter.clone(),
-                },
-                ReplyTag::Files { append: false },
-            )],
-            Page::Settings => vec![call(Request::GetSettings, ReplyTag::Settings)],
+            Page::Files => self.query_files(true),
+            // 设置页内嵌“我的设备”，一并刷新设备列表
+            Page::Settings => vec![
+                call(Request::GetSettings, ReplyTag::Settings),
+                call(Request::ListMyDevices, ReplyTag::Devices),
+            ],
         }
     }
 
@@ -1044,6 +1101,121 @@ impl Model {
         self.search_query.clear();
         self.search_results.clear();
         self.open_conv(conv)
+    }
+
+    /// 从头查询文件列表（条件变化、进入文件页）；`reset_view` 为真时文件页回到列表顶部。
+    fn query_files(&mut self, reset_view: bool) -> Vec<Effect> {
+        self.files_epoch += 1;
+        self.files_loading = false;
+        if reset_view {
+            self.files_view_epoch += 1;
+        }
+        self.file_filter.before_millis = None;
+        vec![call(
+            Request::QueryFiles {
+                filter: self.file_filter.clone(),
+            },
+            ReplyTag::Files {
+                append: false,
+                epoch: self.files_epoch,
+            },
+        )]
+    }
+
+    /// 静默刷新文件列表：保持当前条件与已加载的条数（不退回第一页、不动滚动位置）。
+    pub fn refresh_files(&mut self) -> Vec<Effect> {
+        self.files_epoch += 1;
+        self.files_loading = false;
+        let mut filter = self.file_filter.clone();
+        filter.before_millis = None;
+        filter.limit = (self.files.len() as u32).clamp(FILE_PAGE, FILE_REFRESH_MAX);
+        vec![call(
+            Request::QueryFiles { filter },
+            ReplyTag::Files {
+                append: false,
+                epoch: self.files_epoch,
+            },
+        )]
+    }
+
+    /// 文件类型筛选；条件没变不重复查询。
+    pub fn set_file_kind(&mut self, kind: FileKindFilter) -> Vec<Effect> {
+        if self.file_filter.kind == kind {
+            return Vec::new();
+        }
+        self.file_filter.kind = kind;
+        self.query_files(true)
+    }
+
+    /// 会话筛选（None = 全部会话）。
+    pub fn set_file_conv(&mut self, conv: Option<String>) -> Vec<Effect> {
+        if self.file_filter.conv == conv {
+            return Vec::new();
+        }
+        self.file_filter.conv = conv;
+        self.query_files(true)
+    }
+
+    /// 状态筛选（None = 全部状态）。
+    pub fn set_file_state(&mut self, state: Option<BlobState>) -> Vec<Effect> {
+        if self.file_filter.state == state {
+            return Vec::new();
+        }
+        self.file_filter.state = state;
+        self.query_files(true)
+    }
+
+    /// 名字搜索；去首尾空白，空白等于不搜。
+    pub fn set_file_name(&mut self, name: String) -> Vec<Effect> {
+        let name = Some(name.trim().to_string()).filter(|n| !n.is_empty());
+        if self.file_filter.name_query == name {
+            return Vec::new();
+        }
+        self.file_filter.name_query = name;
+        self.query_files(true)
+    }
+
+    /// 滚到底：上次是满页且没有追加请求在途时，以最后一项的时间为游标追加下一页。
+    pub fn load_more_files(&mut self) -> Vec<Effect> {
+        if !self.files_more || self.files_loading {
+            return Vec::new();
+        }
+        let Some(last) = self.files.last() else {
+            return Vec::new();
+        };
+        let mut filter = self.file_filter.clone();
+        filter.before_millis = Some(last.hlc_millis);
+        self.files_loading = true;
+        vec![call(
+            Request::QueryFiles { filter },
+            ReplyTag::Files {
+                append: true,
+                epoch: self.files_epoch,
+            },
+        )]
+    }
+
+    /// 保存设置页：`SetSettings`；显示名变了（去空白后）再发 `SetProfile`。
+    pub fn save_settings(&mut self, settings: SettingsDto, display_name: &str) -> Vec<Effect> {
+        let mut fx = vec![call(
+            Request::SetSettings { settings },
+            ReplyTag::SettingsSaved,
+        )];
+        let name = display_name.trim();
+        let current = self
+            .me
+            .as_ref()
+            .and_then(|me| me.display_name.as_deref())
+            .unwrap_or_default();
+        if name != current {
+            fx.push(call(
+                Request::SetProfile {
+                    display_name: name.to_string(),
+                },
+                ReplyTag::ProfileSaved,
+            ));
+        }
+        fx
     }
 
     /// 下载一个文件；回复里的传输 id 用于取消。
@@ -2903,5 +3075,268 @@ mod tests {
         assert!(has(&fx, |r| matches!(r, Request::ListMyDevices)));
         m.set_contacts_tab(99);
         assert_eq!(m.contacts_tab, CONTACTS_TABS - 1);
+    }
+
+    // ---- 文件页与设置页（Task 15） ----
+
+    fn file_view(i: usize) -> FileView {
+        FileView {
+            item: remote_item(&format!("h{i}")),
+            conv: "c1".into(),
+            conv_title: "小王".into(),
+            msg: format!("m{i}"),
+            hlc_millis: 10_000 - i as i64,
+        }
+    }
+
+    fn files_page(n: usize) -> Vec<FileView> {
+        (0..n).map(file_view).collect()
+    }
+
+    fn files_reply(tag: ReplyTag, n: usize) -> UiMsg {
+        reply(
+            tag,
+            Response::Files {
+                value: files_page(n),
+            },
+        )
+    }
+
+    fn query_tag(fx: &[Effect]) -> ReplyTag {
+        fx.iter()
+            .find_map(|e| match e {
+                Effect::Call(Request::QueryFiles { .. }, t) => Some(t.clone()),
+                _ => None,
+            })
+            .expect("应发出 QueryFiles")
+    }
+
+    fn query_filter(fx: &[Effect]) -> FileFilter {
+        calls(fx)
+            .into_iter()
+            .find_map(|r| match r {
+                Request::QueryFiles { filter } => Some(filter.clone()),
+                _ => None,
+            })
+            .expect("应发出 QueryFiles")
+    }
+
+    #[test]
+    fn file_filter_change_resets_cursor_and_queries() {
+        let mut m = Model::new();
+        m.file_filter.before_millis = Some(5);
+        let fx = m.set_file_kind(FileKindFilter::Image);
+        let f = query_filter(&fx);
+        assert_eq!(f.kind, FileKindFilter::Image);
+        assert_eq!(f.before_millis, None);
+        assert_eq!(f.limit, FILE_PAGE);
+        assert!(matches!(
+            query_tag(&fx),
+            ReplyTag::Files { append: false, .. }
+        ));
+
+        let fx = m.set_file_conv(Some("c1".into()));
+        assert_eq!(query_filter(&fx).conv.as_deref(), Some("c1"));
+        let fx = m.set_file_state(Some(BlobState::Local));
+        assert_eq!(query_filter(&fx).state, Some(BlobState::Local));
+        // 之前的条件保留
+        assert_eq!(query_filter(&fx).kind, FileKindFilter::Image);
+    }
+
+    #[test]
+    fn file_name_filter_trims_and_blank_clears() {
+        let mut m = Model::new();
+        let fx = m.set_file_name("  报告 ".into());
+        assert_eq!(query_filter(&fx).name_query.as_deref(), Some("报告"));
+        let fx = m.set_file_name("   ".into());
+        assert_eq!(query_filter(&fx).name_query, None);
+        // 与当前条件相同不重复查询
+        assert!(m.set_file_name(String::new()).is_empty());
+    }
+
+    #[test]
+    fn stale_files_reply_is_ignored() {
+        let mut m = Model::new();
+        let old = query_tag(&m.set_file_kind(FileKindFilter::Image));
+        let new = query_tag(&m.set_file_kind(FileKindFilter::Video));
+        m.apply(files_reply(new, 3));
+        assert_eq!(m.files.len(), 3);
+        // 先发后到的旧回复不能覆盖新结果
+        m.apply(files_reply(old, 7));
+        assert_eq!(m.files.len(), 3);
+    }
+
+    #[test]
+    fn files_more_follows_page_fullness() {
+        let mut m = Model::new();
+        let tag = query_tag(&m.set_page(Page::Files));
+        m.apply(files_reply(tag, FILE_PAGE as usize));
+        assert!(m.files_more && m.files_loaded);
+        let tag = query_tag(&m.set_file_kind(FileKindFilter::Image));
+        m.apply(files_reply(tag, 3));
+        assert!(!m.files_more);
+        assert!(m.load_more_files().is_empty(), "不满页不再翻页");
+    }
+
+    #[test]
+    fn load_more_files_uses_last_time_and_appends_once() {
+        let mut m = Model::new();
+        let tag = query_tag(&m.set_page(Page::Files));
+        m.apply(files_reply(tag, FILE_PAGE as usize));
+        let last = m.files.last().map(|f| f.hlc_millis);
+        let fx = m.load_more_files();
+        assert_eq!(query_filter(&fx).before_millis, last);
+        let tag = query_tag(&fx);
+        assert!(matches!(tag, ReplyTag::Files { append: true, .. }));
+        // 请求在途时不重复发
+        assert!(m.load_more_files().is_empty());
+        let mut next = files_page(2);
+        next[0].msg = "later0".into();
+        next[1].msg = "later1".into();
+        m.apply(reply(tag, Response::Files { value: next }));
+        assert_eq!(m.files.len(), FILE_PAGE as usize + 2);
+        assert!(!m.files_more && !m.files_loading);
+    }
+
+    #[test]
+    fn load_more_error_clears_in_flight_and_stale_append_is_dropped() {
+        let mut m = Model::new();
+        let tag = query_tag(&m.set_page(Page::Files));
+        m.apply(files_reply(tag, FILE_PAGE as usize));
+        let tag = query_tag(&m.load_more_files());
+        m.apply(err_reply(tag, "失败"));
+        assert!(!m.files_loading);
+        // 追加请求在途时条件变了：旧的追加结果不能混进新列表
+        let append = query_tag(&m.load_more_files());
+        let fresh = query_tag(&m.set_file_kind(FileKindFilter::Video));
+        m.apply(files_reply(fresh, 4));
+        m.apply(files_reply(append, 9));
+        assert_eq!(m.files.len(), 4);
+        assert!(!m.files_loading);
+    }
+
+    #[test]
+    fn files_page_entry_and_filter_bump_view_epoch_but_refresh_does_not() {
+        let mut m = Model::new();
+        m.set_page(Page::Files);
+        let e1 = m.files_view_epoch;
+        m.set_file_kind(FileKindFilter::Image);
+        assert!(m.files_view_epoch > e1);
+        let e2 = m.files_view_epoch;
+        m.page = Page::Files;
+        m.apply(UiMsg::Event(Event::TransferFinished {
+            transfer: "t".into(),
+            hash: "h".into(),
+            ok: true,
+            error: None,
+        }));
+        assert_eq!(m.files_view_epoch, e2);
+    }
+
+    #[test]
+    fn transfer_finished_refreshes_files_only_on_files_page() {
+        let mut m = Model::new();
+        m.files = files_page(3);
+        let ev = || {
+            UiMsg::Event(Event::TransferFinished {
+                transfer: "t".into(),
+                hash: "h0".into(),
+                ok: true,
+                error: None,
+            })
+        };
+        assert!(!has(&m.apply(ev()), |r| matches!(
+            r,
+            Request::QueryFiles { .. }
+        )));
+        m.page = Page::Files;
+        let fx = m.apply(ev());
+        // 刷新保持已加载的条数，不退回第一页
+        assert!(has(&fx, |r| matches!(r, Request::QueryFiles { .. })));
+        assert_eq!(query_filter(&fx).limit, FILE_PAGE);
+        assert!(matches!(
+            query_tag(&fx),
+            ReplyTag::Files { append: false, .. }
+        ));
+    }
+
+    #[test]
+    fn refresh_keeps_loaded_count_when_more_pages_loaded() {
+        let mut m = Model::new();
+        m.page = Page::Files;
+        m.files = files_page(FILE_PAGE as usize + 40);
+        let fx = m.refresh_files();
+        assert_eq!(query_filter(&fx).limit, FILE_PAGE + 40);
+        assert_eq!(query_filter(&fx).before_millis, None);
+    }
+
+    #[test]
+    fn new_files_message_refreshes_files_page() {
+        let mut m = Model::new();
+        m.page = Page::Files;
+        let mut mv = msg("m9", "c1", "x");
+        mv.body = MessageBodyView::Files {
+            items: vec![remote_item("h9")],
+        };
+        let fx = m.apply(UiMsg::Event(Event::MessageAdded { msg: mv }));
+        assert!(has(&fx, |r| matches!(r, Request::QueryFiles { .. })));
+        let fx = m.apply(UiMsg::Event(Event::MessageAdded {
+            msg: msg("m10", "c1", "纯文字"),
+        }));
+        assert!(!has(&fx, |r| matches!(r, Request::QueryFiles { .. })));
+    }
+
+    #[test]
+    fn deleted_reply_drops_files_of_that_message() {
+        let mut m = Model::new();
+        m.files = files_page(3);
+        m.apply(reply(ReplyTag::Deleted { msg: "m1".into() }, Response::Ok));
+        assert_eq!(m.files.len(), 2);
+        assert!(m.files.iter().all(|f| f.msg != "m1"));
+    }
+
+    fn settings_dto() -> SettingsDto {
+        SettingsDto {
+            device_name: "旧名".into(),
+            download_dir: "/d".into(),
+            auto_image_max: 1 << 20,
+            auto_file_max: 2 << 20,
+            auto_file_wifi_only: true,
+            localsend_enabled: true,
+            unicast_targets: Vec::new(),
+            background_mode: BackgroundMode::Realtime,
+            localsend_listening: None,
+        }
+    }
+
+    #[test]
+    fn save_settings_sends_profile_only_when_name_changed() {
+        let mut m = Model::new();
+        let mut me = self_info(true);
+        me.display_name = Some("小李".into());
+        m.me = Some(me);
+        let fx = m.save_settings(settings_dto(), "小李");
+        assert!(has(&fx, |r| matches!(r, Request::SetSettings { .. })));
+        assert!(!has(&fx, |r| matches!(r, Request::SetProfile { .. })));
+        let fx = m.save_settings(settings_dto(), "  新名字 ");
+        assert!(has(&fx, |r| matches!(r,
+            Request::SetProfile { display_name } if display_name == "新名字")));
+    }
+
+    #[test]
+    fn settings_saved_reply_toasts_and_reloads() {
+        let mut m = Model::new();
+        let fx = m.apply(reply(ReplyTag::SettingsSaved, Response::Ok));
+        assert_eq!(m.toast.as_deref(), Some(strings::SETTINGS_SAVED));
+        assert!(has(&fx, |r| matches!(r, Request::GetSettings)));
+        let fx = m.apply(reply(ReplyTag::ProfileSaved, Response::Ok));
+        assert!(has(&fx, |r| matches!(r, Request::GetSelf)));
+    }
+
+    #[test]
+    fn settings_save_failure_shows_server_message() {
+        let mut m = Model::new();
+        m.apply(err_reply(ReplyTag::SettingsSaved, "下载目录不能为空"));
+        assert_eq!(m.toast.as_deref(), Some("下载目录不能为空"));
     }
 }

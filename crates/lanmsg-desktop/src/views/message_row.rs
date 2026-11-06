@@ -112,7 +112,7 @@ pub fn file_icon(mime: &str, name: &str) -> FileIcon {
     }
 }
 
-fn icon_bytes(i: FileIcon) -> &'static [u8] {
+pub fn icon_bytes(i: FileIcon) -> &'static [u8] {
     match i {
         FileIcon::Image => style::ICON_FILE_IMAGE,
         FileIcon::Video => style::ICON_FILE_VIDEO,

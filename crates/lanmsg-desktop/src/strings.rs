@@ -12,7 +12,7 @@ pub const NAV_CONTACTS: &str = "联系人";
 pub const NAV_FILES: &str = "文件";
 pub const NAV_SETTINGS: &str = "设置";
 
-/// 各页占位标题（后续任务替换为真实内容）。
+/// 页面标题。
 pub const PAGE_FILES: &str = "文件";
 pub const PAGE_SETTINGS: &str = "设置";
 
@@ -188,3 +188,86 @@ pub const PAIR_JOIN_LINK_INVALID: &str = "请粘贴以 lanmsg:// 开头的配对
 pub const PAIR_JOIN_LINK_EMPTY_HINT: &str = "先粘贴配对链接才能使用";
 pub const PAIR_JOIN_LINK_BUTTON: &str = "使用链接";
 pub const PAIR_JOIN_ACTION: &str = "加入";
+
+/// 文件页。
+pub const FILES_KIND_ALL: &str = "全部";
+pub const FILES_KIND_IMAGE: &str = "图片";
+pub const FILES_KIND_VIDEO: &str = "视频";
+pub const FILES_KIND_DOCUMENT: &str = "文档";
+pub const FILES_KIND_ARCHIVE: &str = "压缩包";
+pub const FILES_KIND_OTHER: &str = "其他";
+pub const FILES_ALL_CONVS: &str = "全部会话";
+pub const FILES_STATE_ALL: &str = "全部状态";
+pub const FILES_STATE_LOCAL: &str = "已下载";
+pub const FILES_STATE_REMOTE: &str = "未下载";
+pub const FILES_STATE_OFFLINE: &str = "源离线";
+pub const FILES_SEARCH_PLACEHOLDER: &str = "按文件名搜索";
+pub const FILES_EMPTY: &str = "还没有文件";
+pub const FILES_EMPTY_HINT: &str = "别人发来或你发出的文件会汇总在这里";
+pub const FILES_EMPTY_FILTERED: &str = "没有符合条件的文件";
+pub const FILES_EMPTY_FILTERED_HINT: &str = "换一个类型、会话或关键词试试";
+pub const FILES_LOADING: &str = "正在加载文件…";
+pub const FILES_LOADING_MORE: &str = "正在加载更多…";
+pub const FILES_MENU_OPEN: &str = "打开";
+pub const FILES_MENU_OPEN_FOLDER: &str = "打开所在文件夹";
+pub const FILES_MENU_DOWNLOAD: &str = "下载";
+pub const FILES_MENU_FORWARD: &str = "转发到会话…";
+pub const FILES_MENU_LOCATE: &str = "定位到会话";
+pub const FILES_MENU_DELETE: &str = "删除本地副本…";
+pub const FILES_DELETE_TITLE: &str = "删除本地副本？";
+pub const FILES_DELETE_MESSAGE: &str = "会从本机的聊天记录和文件列表中移除，对方的记录不受影响。";
+pub const FILES_DELETE_ACTION: &str = "删除";
+
+/// 设置页。
+pub const SETTINGS_SAVED: &str = "设置已保存";
+pub const SETTINGS_SAVE: &str = "保存";
+pub const SETTINGS_SAVE_BLOCKED: &str = "有内容不符合要求，改正后才能保存";
+pub const SETTINGS_LOADING: &str = "正在读取设置…";
+pub const SETTINGS_GROUP_PERSONAL: &str = "个人";
+pub const SETTINGS_GROUP_DEVICES: &str = "我的设备";
+pub const SETTINGS_GROUP_STORAGE: &str = "下载与存储";
+pub const SETTINGS_GROUP_NETWORK: &str = "网络";
+pub const SETTINGS_GROUP_GENERAL: &str = "通用";
+pub const SETTINGS_GROUP_ABOUT: &str = "关于";
+pub const SETTINGS_DISPLAY_NAME: &str = "显示名";
+pub const SETTINGS_DISPLAY_NAME_HINT: &str = "对方看到的名字，1–32 个字符";
+pub const SETTINGS_DISPLAY_NAME_INVALID: &str = "显示名需要 1–32 个字符";
+pub const SETTINGS_DEVICE_NAME: &str = "设备名";
+pub const SETTINGS_DEVICE_NAME_HINT: &str = "这台电脑在你的设备列表里的名字，1–32 个字符";
+pub const SETTINGS_DEVICE_NAME_INVALID: &str = "设备名需要 1–32 个字符";
+pub const SETTINGS_DOWNLOAD_DIR: &str = "下载目录";
+pub const SETTINGS_DOWNLOAD_DIR_INVALID: &str = "下载目录不能为空";
+pub const SETTINGS_PICK_DIR: &str = "选择…";
+pub const SETTINGS_PICK_DIR_TITLE: &str = "选择下载目录";
+pub const SETTINGS_PICK_DIR_FAILED: &str = "无法打开选择框，可直接输入目录路径";
+pub const SETTINGS_AUTO_IMAGE: &str = "图片自动下载上限";
+pub const SETTINGS_AUTO_FILE: &str = "文件自动下载上限";
+pub const SETTINGS_MB: &str = "MB";
+pub const SETTINGS_MB_INVALID: &str = "请输入 1–10240 之间的整数";
+pub const SETTINGS_AUTO_HINT: &str = "联系人发来的内容不超过上限时自动下载，超过则等你点击下载";
+pub const SETTINGS_WIFI_ONLY: &str = "仅在 Wi-Fi 或有线网络下自动下载文件";
+pub const SETTINGS_LOCALSEND: &str = "兼容 LocalSend";
+pub const SETTINGS_LOCALSEND_HINT: &str = "开启后可与 LocalSend 应用互传文件";
+pub const SETTINGS_TARGETS: &str = "单播通告目标";
+pub const SETTINGS_TARGETS_HINT: &str =
+    "每行一个 IP、IP:端口 或网段（如 10.8.0.0/24），用于组播到不了的网络";
+pub const SETTINGS_TARGETS_PLACEHOLDER: &str = "例如 10.8.0.5";
+pub const SETTINGS_AUTOSTART: &str = "开机自动启动";
+pub const SETTINGS_AUTOSTART_HINT: &str =
+    "登录系统后在后台运行，随时接收消息；开关立即生效，无需保存";
+pub const SETTINGS_AUTOSTART_FAILED: &str = "修改开机自启失败：";
+pub const SETTINGS_ABOUT_VERSION: &str = "版本";
+pub const SETTINGS_ABOUT_LICENSE: &str = "许可证";
+pub const SETTINGS_ABOUT_LICENSE_VALUE: &str = "GPL-3.0-or-later";
+pub const SETTINGS_ABOUT_USER_FINGERPRINT: &str = "用户指纹";
+pub const SETTINGS_ABOUT_DEVICE_FINGERPRINT: &str = "本机指纹";
+
+/// 设置页地址行校验错误，`line` 为 1 起的行号。
+pub fn settings_target_invalid(line: usize, text: &str) -> String {
+    format!("第 {line} 行无效：{text}")
+}
+
+/// 删除确认里追加的说明：被删的消息里不止这一个文件。
+pub fn files_delete_siblings(n: usize) -> String {
+    format!("这条消息共有 {n} 个文件，会一并移除。")
+}

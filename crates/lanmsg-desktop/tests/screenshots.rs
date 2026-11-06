@@ -22,7 +22,15 @@ fn every_demo_page_renders() {
     let tmp = tempfile::tempdir().expect("创建临时目录");
     let dir = out_dir(&tmp);
     for page in [
-        "wizard", "chats", "chat", "contacts", "devices", "pair", "files", "settings",
+        "wizard",
+        "chats",
+        "chat",
+        "contacts",
+        "devices",
+        "pair",
+        "files",
+        "files-grid",
+        "settings",
     ] {
         let png = dir.join(format!("{page}.png"));
         let status = Command::new(env!("CARGO_BIN_EXE_lanmsg"))

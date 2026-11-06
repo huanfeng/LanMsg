@@ -15,6 +15,7 @@ use crate::debounce::Debouncer;
 use crate::model::{ConnState, Effect, Model, Page, PairUi};
 use crate::strings;
 use crate::views::composer::PastedImage;
+use crate::views::files::FilesUi;
 use lanmsg_api::types::{PairStateDto, Response};
 
 /// 当前输入框的登记：(会话, 文本信号)。
@@ -38,6 +39,8 @@ pub struct UiState {
     pub paste: Signal<Option<PastedImage>>,
     /// 回到列表底部的请求序号：消息列表按它重建，首次布局即滚到底。
     pub bottom_epoch: Signal<u64>,
+    /// 文件页筛选控件的状态。
+    pub files_ui: FilesUi,
     /// 当前输入框：(会话, 文本信号)；发送失败的草稿经它回填。
     composer: Rc<RefCell<Option<ComposerSlot>>>,
     /// 配对对话框的显隐信号：ESC 只隐藏、不改 Model，由 `tick_pair` 发现后取消配对。
@@ -58,6 +61,7 @@ const SEARCH_DEBOUNCE_MS: u64 = 300;
 
 impl UiState {
     pub fn new(model: Model, bridge: Bridge) -> UiState {
+        let files_ui = FilesUi::new(&model.file_filter, &model.convs);
         UiState {
             model: Rc::new(RefCell::new(model)),
             rev: signal(0u64),
@@ -67,6 +71,7 @@ impl UiState {
             forward: signal((0u64, Vec::new())),
             paste: signal(None),
             bottom_epoch: signal(0u64),
+            files_ui,
             composer: Rc::new(RefCell::new(None)),
             pair_show: Rc::new(RefCell::new(None)),
             pair_done_since: Rc::new(RefCell::new(None)),
@@ -280,6 +285,12 @@ impl UiState {
         if let Some(q) = fired {
             self.act(|m| m.search(q));
         }
+    }
+
+    /// 周期调用：把文件页筛选控件上的变化同步给 Model。
+    pub fn tick_files(&self) {
+        let now = self.started.elapsed().as_millis() as u64;
+        self.files_ui.tick(self, now);
     }
 
     /// 点击搜索结果：清空搜索框并打开会话。

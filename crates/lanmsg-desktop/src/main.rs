@@ -144,6 +144,7 @@ fn main() {
             ui_tick.tick_search();
             ui_tick.tick_paste();
             ui_tick.tick_pair();
+            ui_tick.tick_files();
         })
         .on_window_activated(move |_ctx, active| {
             ui_focus.act(|m| m.set_window_focused(active));

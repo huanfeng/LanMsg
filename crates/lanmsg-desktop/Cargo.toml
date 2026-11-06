@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 blake3 = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
+ipnet = "2"
 lanmsg-api = { version = "0.1.0", path = "../lanmsg-api" }
 lanmsg-core = { version = "0.1.0", path = "../lanmsg-core" }
 lanmsg-media = { version = "0.1.0", path = "../lanmsg-media" }

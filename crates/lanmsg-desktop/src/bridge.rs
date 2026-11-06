@@ -43,10 +43,16 @@ pub enum ReplyTag {
     Contacts,
     Requests,
     Devices,
+    /// 文件页查询；`epoch` 是发出时 `Model.files_epoch` 的值，条件变了之后迟到的回复据此丢弃。
     Files {
         append: bool,
+        epoch: u64,
     },
     Settings,
+    /// `SetSettings` 的回复：成功后提示并重新读取。
+    SettingsSaved,
+    /// `SetProfile` 的回复：成功后刷新本人信息。
+    ProfileSaved,
     Init,
     /// 发起方的 `PairStart`；`nonce` 是发出时 `Model.pair_nonce` 的值，用于丢弃取消后迟到的回复。
     Pair {

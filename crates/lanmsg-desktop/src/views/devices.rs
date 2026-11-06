@@ -110,9 +110,27 @@ pub fn device_row(d: &DeviceView, confirm: Option<ConfirmState>) -> Element {
 }
 
 /// “我的设备”分组：设备卡片列表 + 两个添加入口；移除前二次确认。
+/// 确认框随分组放在原地：适合分组不在滚动区里的场景；放在滚动区里时，
+/// 遮罩只会盖住分组所在的那一块，应改用 `devices_panel` + `remove_confirm_host`。
 pub fn devices_section(ui: &UiState) -> Element {
-    let digest = ui.digest(|m| m.devices.clone());
     let confirm = ConfirmState::new();
+    Element::col()
+        .width_match()
+        .child(devices_panel(ui, confirm))
+        .child(remove_confirm_host(ui, confirm))
+}
+
+/// 移除设备的确认框宿主：放在页面最外层的 stack 里，遮罩才是全窗的。
+pub fn remove_confirm_host(ui: &UiState, confirm: ConfirmState) -> Element {
+    let ui = ui.clone();
+    confirm_host(confirm, move |device| {
+        ui.act(|m| m.remove_device(device));
+    })
+}
+
+/// 设备列表 + 添加入口，不含确认框宿主；“移除”按钮把待确认的设备交给 `confirm`。
+pub fn devices_panel(ui: &UiState, confirm: ConfirmState) -> Element {
+    let digest = ui.digest(|m| m.devices.clone());
 
     let ui_list = ui.clone();
     let list = Element::switcher(digest, move |_| {
@@ -153,15 +171,11 @@ pub fn devices_section(ui: &UiState) -> Element {
                 .visible_signal(in_pair),
         );
 
-    let ui_ok = ui.clone();
     Element::col()
         .width_match()
         .spacing(style::SPACE_MD)
         .child(list)
         .child(actions)
-        .child(confirm_host(confirm, move |device| {
-            ui_ok.act(|m| m.remove_device(device));
-        }))
 }
 
 #[cfg(test)]

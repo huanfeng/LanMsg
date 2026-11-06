@@ -8,23 +8,17 @@ use crate::model::Page;
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
-use crate::views::{chats, contacts, pair, wizard};
+use crate::views::{chats, contacts, files, pair, settings, wizard};
 
-/// 页面内容；尚未实现的页先放标题占位。
+/// 页面内容。
 fn page_view(ui: &UiState, p: Page) -> Element {
-    let title = match p {
-        Page::Wizard => return wizard::wizard(ui),
-        Page::Chats => return chats::chats_page(ui),
-        Page::Contacts => return contacts::contacts_page(ui),
-        Page::Files => strings::PAGE_FILES,
-        Page::Settings => strings::PAGE_SETTINGS,
-    };
-    Element::col().fill().padding(style::SPACE_XL).child(
-        Element::label(title)
-            .font_size(style::FONT_TITLE)
-            .font_weight(style::WEIGHT_STRONG)
-            .fg_role(Role::Text),
-    )
+    match p {
+        Page::Wizard => wizard::wizard(ui),
+        Page::Chats => chats::chats_page(ui),
+        Page::Contacts => contacts::contacts_page(ui),
+        Page::Files => files::files_page(ui),
+        Page::Settings => settings::settings_page(ui),
+    }
 }
 
 /// 图标栏一个页签：20px 图标 + 下方 12px 文字；选中时整块 `signal_soft` 底、图标与文字用 `signal`；

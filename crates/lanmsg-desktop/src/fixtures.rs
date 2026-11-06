@@ -15,6 +15,8 @@ pub enum DemoPage {
     Devices,
     Pair,
     Files,
+    /// 文件页，筛选为“图片”（网格）。
+    FilesGrid,
     Settings,
 }
 
@@ -29,6 +31,7 @@ impl DemoPage {
             "devices" => DemoPage::Devices,
             "pair" => DemoPage::Pair,
             "files" => DemoPage::Files,
+            "files-grid" => DemoPage::FilesGrid,
             "settings" => DemoPage::Settings,
             _ => return None,
         })
@@ -318,21 +321,158 @@ fn device(id: &str, name: &str, ty: &str, online: bool, is_self: bool) -> Device
 }
 
 fn demo_files() -> Vec<FileView> {
-    (0..15)
-        .map(|i| {
-            let (name, mime) = match i % 5 {
-                0 => (format!("照片{i}.jpg"), "image/jpeg"),
-                1 => (format!("文档{i}.pdf"), "application/pdf"),
-                2 => (format!("录像{i}.mp4"), "video/mp4"),
-                3 => (format!("压缩包{i}.zip"), "application/zip"),
-                _ => (format!("笔记{i}.txt"), "text/plain"),
+    // (名字, MIME, 大小, 状态, 会话 id, 会话标题, 来源)
+    let rows: [(&str, &str, u64, BlobState, &str, &str, &str); 15] = [
+        (
+            "周报-第45周.pdf",
+            "application/pdf",
+            482_000,
+            BlobState::Local,
+            "c-dm",
+            "小王",
+            "存于 小王的笔记本",
+        ),
+        (
+            "门口监控.mp4",
+            "video/mp4",
+            86_400_000,
+            BlobState::Remote,
+            "c-dm",
+            "小王",
+            "存于 小王的笔记本",
+        ),
+        (
+            "团建照片01.jpg",
+            "image/jpeg",
+            3_200_000,
+            BlobState::Local,
+            "c-dm",
+            "小王",
+            "存于 小王的笔记本",
+        ),
+        (
+            "设计稿.zip",
+            "application/zip",
+            96_000_000,
+            BlobState::Downloading,
+            "c-dm",
+            "小王",
+            "存于 小王的笔记本",
+        ),
+        (
+            "会议纪要.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            61_000,
+            BlobState::Local,
+            "c-self",
+            "我的设备",
+            "存于 我的手机",
+        ),
+        (
+            "屏幕截图 2026-11-05.png",
+            "image/png",
+            1_100_000,
+            BlobState::Local,
+            "c-self",
+            "我的设备",
+            "存于 我的手机",
+        ),
+        (
+            "年度预算.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            230_000,
+            BlobState::SourceOffline,
+            "c-guest",
+            "网页访客 192.168.1.8",
+            "存于 小王的笔记本",
+        ),
+        (
+            "演示视频.mkv",
+            "video/x-matroska",
+            512_000_000,
+            BlobState::Remote,
+            "c-guest",
+            "网页访客 192.168.1.8",
+            "存于 小王的笔记本",
+        ),
+        (
+            "项目备份.7z",
+            "application/x-7z-compressed",
+            1_800_000_000,
+            BlobState::SourceOffline,
+            "c-guest",
+            "网页访客 192.168.1.8",
+            "存于 小王的笔记本",
+        ),
+        (
+            "团建照片02.jpg",
+            "image/jpeg",
+            2_900_000,
+            BlobState::Local,
+            "c-dm",
+            "小王",
+            "存于 小王的笔记本",
+        ),
+        (
+            "读书笔记.md",
+            "text/markdown",
+            8_400,
+            BlobState::Local,
+            "c-self",
+            "我的设备",
+            "存于 我的手机",
+        ),
+        (
+            "会议录像.mp4",
+            "video/mp4",
+            240_000_000,
+            BlobState::SourceOffline,
+            "c-dm",
+            "小王",
+            "存于 小王的笔记本",
+        ),
+        (
+            "产品原型.png",
+            "image/png",
+            4_700_000,
+            BlobState::Remote,
+            "c-dm",
+            "小王",
+            "存于 小王的笔记本",
+        ),
+        (
+            "安装包.tar.gz",
+            "application/gzip",
+            52_000_000,
+            BlobState::Remote,
+            "c-dm",
+            "小王",
+            "存于 小王的笔记本",
+        ),
+        (
+            "风景.jpg",
+            "image/jpeg",
+            5_100_000,
+            BlobState::Local,
+            "c-self",
+            "我的设备",
+            "存于 我的手机",
+        ),
+    ];
+    rows.iter()
+        .enumerate()
+        .map(|(i, (name, mime, size, state, conv, title, stored))| {
+            let mut item = file_item(name, mime, *size, state.clone());
+            item.source_label = match state {
+                BlobState::Local => "来自 小王 · 已下载".to_string(),
+                _ => format!("来自 小王 · {stored}"),
             };
             FileView {
-                item: file_item(&name, mime, 100_000 * (i as u64 + 1), BlobState::Local),
-                conv: "c-dm".into(),
-                conv_title: "小王".into(),
+                item,
+                conv: (*conv).into(),
+                conv_title: (*title).into(),
                 msg: format!("m{i}"),
-                hlc_millis: NOW - i as i64 * 60 * MIN,
+                hlc_millis: real_now() - (i as i64 * 3 + 1) * 60 * MIN,
             }
         })
         .collect()
@@ -433,8 +573,8 @@ pub fn demo_model(p: DemoPage) -> Model {
     m.settings = Some(SettingsDto {
         device_name: "我的电脑".into(),
         download_dir: "/home/demo/Downloads/LanMsg".into(),
-        auto_image_max: 10_000_000,
-        auto_file_max: 50_000_000,
+        auto_image_max: 10 * 1024 * 1024,
+        auto_file_max: 50 * 1024 * 1024,
         auto_file_wifi_only: false,
         localsend_enabled: true,
         unicast_targets: vec!["192.168.1.20".into()],
@@ -485,6 +625,40 @@ pub fn demo_model(p: DemoPage) -> Model {
         }
         DemoPage::Files => {
             m.page = Page::Files;
+            m.files_loaded = true;
+            m.transfers.insert(
+                "hash-设计稿.zip".into(),
+                TransferInfo {
+                    hash: "hash-设计稿.zip".into(),
+                    done: 40_300_000,
+                    total: 96_000_000,
+                    bytes_per_sec: 3_250_000,
+                },
+            );
+        }
+        DemoPage::FilesGrid => {
+            m.page = Page::Files;
+            m.files_loaded = true;
+            m.file_filter.kind = FileKindFilter::Image;
+            m.files.retain(|f| f.item.mime.starts_with("image/"));
+            // 网格里多放几张，才看得出换行
+            let more: Vec<_> = m
+                .files
+                .iter()
+                .cycle()
+                .take(6)
+                .enumerate()
+                .map(|(i, f)| {
+                    let mut f = f.clone();
+                    f.msg = format!("extra{i}");
+                    f.item.name = format!("街拍{}.jpg", i + 1);
+                    f.item.hash = format!("hash-extra{i}");
+                    f.item.thumb_path = demo_thumb(&f.item.name, 320, 180, (i as u8) * 23);
+                    f.hlc_millis -= (i as i64 + 1) * 90 * MIN;
+                    f
+                })
+                .collect();
+            m.files.extend(more);
         }
         DemoPage::Settings => {
             m.page = Page::Settings;
@@ -503,6 +677,7 @@ mod tests {
         assert_eq!(m.messages.len(), 24);
         assert_eq!(m.convs.len(), 3);
         assert_eq!(m.files.len(), 15);
+        assert!(m.files.iter().all(|f| !f.item.hash.is_empty()));
         assert_eq!(m.contacts.len(), 2);
         assert_eq!(m.requests.len(), 1);
         assert_eq!(m.devices.len(), 2);
@@ -511,7 +686,15 @@ mod tests {
     #[test]
     fn demo_names_round_trip() {
         for n in [
-            "wizard", "chats", "chat", "contacts", "devices", "pair", "files", "settings",
+            "wizard",
+            "chats",
+            "chat",
+            "contacts",
+            "devices",
+            "pair",
+            "files",
+            "files-grid",
+            "settings",
         ] {
             assert!(DemoPage::parse(n).is_some(), "{n}");
         }
