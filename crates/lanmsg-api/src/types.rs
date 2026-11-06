@@ -1,7 +1,7 @@
 // P1 核心骨架：客户端 API 类型（C5）。
 // IPC 与 FFI 共用。ID 字段在 API 层一律为 String（C2 的 hex / MsgId 字符串形式），以便 FFI。
 // 所有类型 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]，
-// uniffi feature 下加 #[cfg_attr(feature = "uniffi", derive(...))]（结构体用 uniffi::Record，枚举用 uniffi::Enum）。
+// 对外类型在 uniffi feature 下加 #[cfg_attr(feature = "uniffi", derive(...))]（结构体用 uniffi::Record，枚举用 uniffi::Enum）。
 // 注释中文，标识符英文。
 
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 
 /// 客户端 API 请求包装：id 为请求序号，body 为具体请求。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ApiRequest {
     pub id: u64,
     pub body: Request,
@@ -18,15 +17,13 @@ pub struct ApiRequest {
 
 /// 客户端 API 响应包装：id 对应请求序号，result 为响应结果或错误。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ApiResponse {
     pub id: u64,
     pub result: Result<Response, ApiError>,
 }
 
-/// IPC 帧：客户端请求、服务端响应或服务端主动推送的事件。
+/// IPC 帧（仅 IPC 使用，不导出到 UniFFI）：客户端请求、服务端响应或服务端主动推送的事件。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum IpcFrame {
     Request(ApiRequest),
     Response(ApiResponse),
@@ -35,7 +32,6 @@ pub enum IpcFrame {
 
 /// API 调用错误。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ApiError {
     pub code: ErrorCode,
     pub message: String,

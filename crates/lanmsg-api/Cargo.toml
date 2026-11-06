@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-# P2/P5 FFI 绑定启用；未启用时 cfg_attr 不展开，无需 uniffi 依赖。
-uniffi = []
+# FFI 绑定（lanmsg-ffi）启用；未启用时不拉入 uniffi 依赖。
+uniffi = ["dep:uniffi"]
 
 [dependencies]
 lanmsg-proto = { path = "../lanmsg-proto" }
@@ -20,3 +20,4 @@ interprocess = { version = "2", features = ["tokio"] }
 tokio = { version = "1", features = ["net"] }
 futures-util = { version = "0.3", features = ["sink"] }
 blake3 = "1"
+uniffi = { version = "0.28", optional = true }

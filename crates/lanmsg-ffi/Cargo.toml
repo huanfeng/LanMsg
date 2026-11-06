@@ -1,0 +1,31 @@
+[package]
+name = "lanmsg-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "lanmsg_ffi"
+crate-type = ["cdylib", "lib"]
+
+[features]
+# 仅供 uniffi-bindgen 二进制生成 Kotlin 绑定。
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+lanmsg-core = { path = "../lanmsg-core" }
+lanmsg-api = { path = "../lanmsg-api", features = ["uniffi"] }
+lanmsg-proto = { path = "../lanmsg-proto" }
+uniffi = { version = "0.28", features = ["tokio"] }
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
