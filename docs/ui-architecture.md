@@ -137,6 +137,7 @@
 | onb_start | 开始 |
 | onb_name_title | 你的名字 |
 | onb_name_hint | 其他人会看到这个名字 |
+| onb_name_required | 填写名字后继续 |
 | onb_device_name | 本机名称 |
 | onb_next | 下一步 |
 | onb_mode_title | 这台设备是？ |

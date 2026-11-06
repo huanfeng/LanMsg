@@ -10,6 +10,7 @@
     <string name="onb_start">开始</string>
     <string name="onb_name_title">你的名字</string>
     <string name="onb_name_hint">其他人会看到这个名字</string>
+    <string name="onb_name_required">填写名字后继续</string>
     <string name="onb_device_name">本机名称</string>
     <string name="onb_next">下一步</string>
     <string name="onb_mode_title">这台设备是？</string>

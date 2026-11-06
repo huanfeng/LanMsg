@@ -35,6 +35,11 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.navArgument
 import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.chat.ChatScreen
+import name.apk.lanmsg.ui.chat.ImageViewerScreen
+import name.apk.lanmsg.ui.convs.ConversationListScreen
+import name.apk.lanmsg.ui.onboarding.OnboardingScreen
+import name.apk.lanmsg.ui.onboarding.OnboardingViewModel
 import name.apk.lanmsg.ui.theme.LanMsgColors
 
 private class Tab(val route: String, val label: Int, val icon: ImageVector)
@@ -99,8 +104,16 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String) {
             startDestination = startDestination,
             modifier = Modifier.padding(inner).consumeWindowInsets(inner),
         ) {
-            composable(Routes.ONBOARDING) { Placeholder(Routes.ONBOARDING) }
-            composable(Routes.CONVS) { Placeholder(Routes.CONVS) }
+            composable(Routes.ONBOARDING) {
+                OnboardingScreen { destination ->
+                    when (destination) {
+                        OnboardingViewModel.Destination.HOME ->
+                            nav.navigate(Routes.CONVS) { popUpTo(Routes.ONBOARDING) { inclusive = true } }
+                        OnboardingViewModel.Destination.PAIR_JOIN -> nav.navigate(Routes.PAIR_JOIN)
+                    }
+                }
+            }
+            composable(Routes.CONVS) { ConversationListScreen(onOpenChat = { nav.navigate(Routes.chat(it)) }) }
             composable(
                 Routes.FILES,
                 arguments = listOf(navArgument("conv") { type = NavType.StringType; nullable = true; defaultValue = null }),
@@ -115,8 +128,26 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String) {
             composable(Routes.SHARE) { Placeholder(Routes.SHARE) }
             composable(Routes.SEARCH) { Placeholder(Routes.SEARCH) }
             composable(Routes.FORWARD) { Placeholder(Routes.FORWARD) }
-            composable(Routes.CHAT) { Placeholder(Routes.CHAT) }
-            composable(Routes.IMAGE) { Placeholder(Routes.IMAGE) }
+            composable(Routes.CHAT, arguments = listOf(navArgument("conv") { type = NavType.StringType })) { entry ->
+                val conv = entry.arguments?.getString("conv") ?: return@composable
+                ChatScreen(
+                    conv = conv,
+                    onBack = { nav.popBackStack() },
+                    onOpenImage = { c, hash -> nav.navigate(Routes.image(c, hash)) },
+                    onForward = { nav.navigate(Routes.forward(it)) },
+                )
+            }
+            composable(
+                Routes.IMAGE,
+                arguments = listOf(
+                    navArgument("conv") { type = NavType.StringType },
+                    navArgument("hash") { type = NavType.StringType },
+                ),
+            ) { entry ->
+                val conv = entry.arguments?.getString("conv") ?: return@composable
+                val hash = entry.arguments?.getString("hash") ?: return@composable
+                ImageViewerScreen(conv, hash, onBack = { nav.popBackStack() })
+            }
             composable(Routes.CONTACT) { Placeholder(Routes.CONTACT) }
         }
     }
