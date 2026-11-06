@@ -223,11 +223,12 @@ impl ConnManager {
                 // 旧连接读循环退出时实例 ID 不匹配，不会重复发 Down。
                 existing.connection.shutdown();
                 inner.connections.remove(&device);
-                connection.set_up_sent();
                 if let (Some(down), Some(up)) = (down_permit, permit) {
                     down.send(ConnEvent::Down(device));
                     up.send(ConnEvent::Up(peer_info.clone()));
                 }
+                // 须在 Up 入队之后放行读循环，保证 Frame 事件排在 Up 之后。
+                connection.set_up_sent();
                 inner.connections.insert(
                     device,
                     ConnectionEntry {
@@ -267,10 +268,11 @@ impl ConnManager {
             }
         }
 
-        connection.set_up_sent();
         if let Some(permit) = permit {
             permit.send(ConnEvent::Up(peer_info.clone()));
         }
+        // 须在 Up 入队之后放行读循环，保证 Frame 事件排在 Up 之后。
+        connection.set_up_sent();
         inner.connections.insert(
             device,
             ConnectionEntry {
@@ -622,7 +624,6 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                     } else {
                         false
                     };
-                    connection.set_up_sent();
                     // 仅新登记才发 Up：替换路径上旧连接已发过 Up 且从未离线，
                     // 重复 Up 会破坏外层在线计数（被替换连接退出也不再发 Down）。
                     if !replaced || dead {
@@ -635,6 +636,8 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                             permit.send(ConnEvent::Up(peer_info.clone()));
                         }
                     }
+                    // 须在 Up 入队之后放行读循环，保证 Frame 事件排在 Up 之后。
+                    connection.set_up_sent();
                     guard.connections.insert(
                         device,
                         ConnectionEntry {

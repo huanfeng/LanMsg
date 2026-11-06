@@ -128,6 +128,8 @@ pub(crate) struct Connection {
     peer_info: PeerInfo,
     write_tx: mpsc::Sender<Frame>,
     up_sent: Arc<AtomicBool>,
+    /// `set_up_sent` 时唤醒读循环（读循环在 Up 发出前不上送对端的帧）。
+    up_notify: Arc<tokio::sync::Notify>,
     shutdown_tx: mpsc::Sender<()>,
     /// 连接实例 ID（同设备重连裁决后区分新旧连接）。
     conn_id: u64,
@@ -499,6 +501,7 @@ where
         peer_info,
         write_tx,
         up_sent: Arc::new(AtomicBool::new(false)),
+        up_notify: Arc::new(tokio::sync::Notify::new()),
         shutdown_tx,
         conn_id,
         clock: clock.clone(),
@@ -508,13 +511,14 @@ where
     let shutdown_tx_for_write = connection.shutdown_tx.clone();
     let device_for_events = connection.peer_info.device;
     let up_sent_flag = connection.up_sent.clone();
+    let up_notify = connection.up_notify.clone();
     // 读循环退出信号：写循环据此结束（避免对已死连接继续发心跳）。
     let (closed_tx, mut closed_rx) = tokio::sync::watch::channel(false);
 
     tokio::spawn(async move {
         let mut reader = framed_read;
         let mut shutdown_rx = shutdown_rx;
-        loop {
+        'read: loop {
             tokio::select! {
                 result = next_frame_or_idle(&mut reader, &clock, timing.idle_timeout) => {
                     let Some(result) = result else {
@@ -542,6 +546,15 @@ where
                                 continue;
                             }
                             if !matches!(frame, Frame::Pong(_)) {
+                                // 对端的帧不得先于本端 Up 上送：宽限窗口里先登记的一侧会立刻
+                                // 发 CertUpdate / SyncOffer，路由层查不到尚未登记的连接就会
+                                // 整帧丢弃。Up 发出前在此挂起（TCP 自带背压），关闭则退出。
+                                while !up_sent_flag.load(Ordering::SeqCst) {
+                                    tokio::select! {
+                                        _ = up_notify.notified() => {}
+                                        _ = shutdown_rx.recv() => break 'read,
+                                    }
+                                }
                                 let _ = event_tx.send(ConnEvent::Frame(device_for_events, frame)).await;
                             }
                         }
@@ -617,8 +630,10 @@ impl Connection {
         &self.peer_info
     }
 
+    /// 标记 Up 已发出（须在 Up 事件入队之后调用），放行读循环挂起的帧。
     pub(crate) fn set_up_sent(&self) {
         self.up_sent.store(true, Ordering::SeqCst);
+        self.up_notify.notify_one();
     }
 
     /// 连接实例 ID（管理器表登记与读循环退出自清理比对用）。
