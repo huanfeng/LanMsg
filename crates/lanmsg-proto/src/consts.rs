@@ -155,3 +155,8 @@ pub const DISPLAY_NAME_MAX_CHARS: usize = 32;
 
 /// 设备名最大字符数（trim 后，按 Unicode 标量值计）。
 pub const DEVICE_NAME_MAX_CHARS: usize = 32;
+
+/// 数据目录下的“后台已被用户主动退出”标记文件名。
+/// lanmsgd 因托盘“退出”或 IPC Shutdown 退出前写入、启动时删除；
+/// 界面进程连不上后台时若看到它，就不再自动拉起 lanmsgd。
+pub const DAEMON_QUIT_MARKER: &str = "lanmsgd.quit";
