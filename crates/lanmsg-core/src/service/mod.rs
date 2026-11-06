@@ -47,8 +47,7 @@ pub struct ServiceConfig {
     pub static_peers: Vec<SocketAddr>,
     /// 平台钩子（P1 为空）。
     pub platform: PlatformHooks,
-    /// LocalSend 监听端口（P1 仅定义，P5 使用）。
-    #[allow(dead_code)]
+    /// LocalSend 监听端口（P5 使用，当前仅占位）。
     pub localsend_port: u16,
 }
 
