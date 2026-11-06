@@ -124,6 +124,7 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     let dir_click = data_dir.clone();
     let service_quit = rt.service.clone();
     let handle_quit = handle.clone();
+    let dir_quit = data_dir.clone();
     let tray = tray
         .on_left_click(move |_ctx| open_gui_logged(&dir_left, None))
         .on_notification_click(move |_ctx, tag| {
@@ -146,6 +147,7 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
                 if let Err(e) = handle_quit.block_on(service_quit.handle(Request::Shutdown)) {
                     tracing::warn!("退出请求失败: {e:?}");
                 }
+                crate::runtime::write_quit_marker(&dir_quit);
                 ctx.quit();
             }),
         ]);

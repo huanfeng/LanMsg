@@ -1,3 +1,8 @@
+// Windows 发布版用 GUI 子系统：开机自启/界面拉起时不弹控制台窗口。
+// 无控制台时 stdout/stderr 句柄无效：Rust 标准库对无效句柄的写入按成功处理（不 panic），
+// 且 Tee 本就忽略 stdout 写错误，日志仍落到文件。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 // lanmsgd 守护进程入口（P1 Task 12；P3 Task 8 起线程模型见 runtime.rs）。
 // 无头时阻塞等待 Ctrl-C / SIGTERM / Request::Shutdown；有图形会话时走托盘（tray.rs）。
 // 注释中文，标识符英文。

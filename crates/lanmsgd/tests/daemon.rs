@@ -395,3 +395,53 @@ async fn sigterm_shuts_down_gracefully_and_removes_socket() {
     assert!(status.success(), "优雅关闭退出码应为 0，实际 {status}");
     assert!(!sock.exists(), "退出后 socket 文件应被清理");
 }
+
+/// IPC Shutdown 后数据目录出现主动退出标记；再次启动（IPC 绑定后）标记被删除。
+#[tokio::test]
+async fn shutdown_writes_quit_marker_and_restart_removes_it() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    isolate_runtime_dir(&dir);
+    let marker = dir.path().join(lanmsg_proto::consts::DAEMON_QUIT_MARKER);
+
+    let mut child = spawn_daemon(&dir);
+    let client = connect_with_retry(&dir).await;
+    assert!(!marker.exists(), "运行中不应有退出标记");
+    client.call(Request::Shutdown).await.unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("子进程未在 5 秒内退出")
+        .expect("等待子进程失败");
+    assert!(status.success());
+    assert!(marker.exists(), "Shutdown 退出后应写退出标记");
+
+    let mut child = spawn_daemon(&dir);
+    let client = connect_with_retry(&dir).await;
+    assert!(!marker.exists(), "再次启动成功后标记应被删除");
+    client.call(Request::Shutdown).await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+}
+
+/// SIGTERM 优雅关闭不写退出标记（系统关机后的自启不应被拦）。
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_does_not_write_quit_marker() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    isolate_runtime_dir(&dir);
+    let mut child = spawn_daemon(&dir);
+    let _client = connect_with_retry(&dir).await;
+    let pid = child.id().expect("子进程应有 pid");
+    std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("执行 kill 失败");
+    tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("子进程未在 5 秒内退出")
+        .expect("等待子进程失败");
+    assert!(!dir
+        .path()
+        .join(lanmsg_proto::consts::DAEMON_QUIT_MARKER)
+        .exists());
+}

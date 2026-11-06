@@ -3,6 +3,8 @@
 // 主线程留给托盘/界面消息循环（Task 9），无头时阻塞等待退出信号。
 // 注释中文，标识符英文。
 
+use std::path::Path;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +15,7 @@ use lanmsg_core::discovery::DiscoveryMode;
 use lanmsg_core::keystore_os::os_keystore;
 use lanmsg_core::thumb_cache::enforce_thumb_cache_limit;
 use lanmsg_core::{PlatformHooks, Service, ServiceConfig};
-use lanmsg_proto::consts::{LOCALSEND_PORT, THUMB_CACHE_LIMIT};
+use lanmsg_proto::consts::{DAEMON_QUIT_MARKER, LOCALSEND_PORT, THUMB_CACHE_LIMIT};
 
 use crate::thumbnailer::SubprocessThumbnailer;
 use crate::{ipc_server, Args};
@@ -43,6 +45,14 @@ pub struct DaemonRuntime {
     accept_task: tokio::task::JoinHandle<()>,
 }
 
+/// 写“主动退出”标记（托盘“退出”或 IPC Shutdown 路径调用）：界面进程见到它就不再自动拉起后台。
+/// SIGTERM/kill 路径刻意不写：那是系统关机等场景，下次开机自启不应被标记拦住。
+pub(crate) fn write_quit_marker(data_dir: &Path) {
+    if let Err(e) = std::fs::write(data_dir.join(DAEMON_QUIT_MARKER), b"") {
+        tracing::warn!("写主动退出标记失败: {e}");
+    }
+}
+
 /// 建 tokio 运行时、启动 Service 与 IPC 服务；返回时 IPC 已可用。
 /// IPC 端点被占用时返回 `AlreadyRunning`；系统密钥库不可用等错误带上下文返回。
 pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
@@ -64,6 +74,9 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
             }
             Err(e) => return Err(anyhow::Error::new(e).context("绑定 IPC 端点失败")),
         };
+
+        // IPC 已绑定即视为启动成功：删除上次主动退出留下的标记。
+        let _ = std::fs::remove_file(data_dir.join(DAEMON_QUIT_MARKER));
 
         let cache_dir = data_dir.join("cache");
         let service = Service::start(ServiceConfig {
@@ -90,6 +103,7 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
         let svc = service.clone();
         let tx = shutdown_tx.clone();
         let mut stop = shutdown_tx.subscribe();
+        let focus_owner = Arc::new(AtomicU64::new(0));
         let accept_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -100,6 +114,8 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
                                 svc.clone(),
                                 stream,
                                 tx.clone(),
+                                data_dir.clone(),
+                                focus_owner.clone(),
                             ));
                         }
                         Err(e) => {
