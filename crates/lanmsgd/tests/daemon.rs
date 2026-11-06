@@ -17,6 +17,7 @@ static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 fn spawn_daemon(dir: &tempfile::TempDir) -> tokio::process::Child {
     tokio::process::Command::new(env!("CARGO_BIN_EXE_lanmsgd"))
         .args([
+            "--headless",
             "--no-multicast",
             "--port",
             "0",
@@ -165,6 +166,7 @@ async fn two_daemons_transfer_file_via_cli_flow() {
     let mut a = spawn_daemon_env(
         &dir_a,
         &[
+            "--headless",
             "--no-multicast",
             "--port",
             port_a,
@@ -175,6 +177,7 @@ async fn two_daemons_transfer_file_via_cli_flow() {
     let mut b = spawn_daemon_env(
         &dir_b,
         &[
+            "--headless",
             "--no-multicast",
             "--port",
             port_b,

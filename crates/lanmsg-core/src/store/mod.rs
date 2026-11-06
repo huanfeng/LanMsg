@@ -63,6 +63,8 @@ impl Store {
     fn init_conn(conn: &mut Connection) -> Result<(), StoreError> {
         conn.pragma_update(None, "journal_mode", "wal")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // 页缓存限制为 2MB（负数单位为 KiB），控制常驻内存。
+        conn.pragma_update(None, "cache_size", -2048)?;
         Self::run_migrations(conn)?;
         Ok(())
     }
