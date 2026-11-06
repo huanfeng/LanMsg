@@ -371,3 +371,46 @@ async fn forward_unknown_hash_is_not_found() {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::NotFound);
 }
+
+#[tokio::test]
+async fn forward_deleted_or_recalled_file_is_not_found() {
+    let bus = MemoryBus::new();
+    let mut a = node(&bus).await;
+    a.init_first("A").await;
+    let mut b = node(&bus).await;
+    b.init_first("B").await;
+    befriend(&mut a, &mut b).await;
+    let conv = open_dm(&a, &b).await;
+    let src = tempfile::tempdir().unwrap();
+    for name in ["del.bin", "rec.bin"] {
+        a.call(Request::SendFiles {
+            conv: conv.clone(),
+            paths: vec![write(src.path(), name, name.as_bytes())],
+        })
+        .await;
+    }
+    eventually(|| async { query(&a, filter(FileKindFilter::All, 50)).await.len() == 2 }).await;
+    let rows = query(&a, filter(FileKindFilter::All, 50)).await;
+    let del = rows.iter().find(|r| r.item.name == "del.bin").unwrap();
+    let rec = rows.iter().find(|r| r.item.name == "rec.bin").unwrap();
+
+    a.call(Request::DeleteLocal {
+        msgs: vec![del.msg.clone()],
+        also_my_devices: false,
+    })
+    .await;
+    a.call(Request::Recall {
+        msg: rec.msg.clone(),
+    })
+    .await;
+    for hash in [&del.item.hash, &rec.item.hash] {
+        let err = a
+            .try_call(Request::ForwardFiles {
+                conv: conv.clone(),
+                hashes: vec![hash.clone()],
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+    }
+}

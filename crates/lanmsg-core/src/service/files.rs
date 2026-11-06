@@ -3,23 +3,28 @@
 
 use std::collections::HashMap;
 
-use lanmsg_api::types::{FileFilter, FileView, MessageView};
-use lanmsg_proto::ids::{BlobHash, ConvId, DeviceId};
+use lanmsg_api::types::{BlobState, FileFilter, FileView, MessageView};
+use lanmsg_proto::ids::{BlobHash, ConvId, DeviceId, UserId};
 use lanmsg_proto::types::{BlobMeta, MsgBody};
 
 use crate::error::CoreError;
-use crate::service::views::{conv_summary, file_item_view, message_view};
+use crate::net::PeerInfo;
+use crate::service::views::{conv_summary, file_item_view_with, message_view};
 use crate::service::Inner;
 use crate::store::file_index::kind_str;
-use crate::store::FileQuery;
+use crate::store::{FileQuery, Store};
 
 /// 文件页单次查询条数上限。
 const MAX_FILE_LIMIT: u32 = 500;
-/// 带状态筛选时最多追加查询的轮数。
-const MAX_FILTER_ROUNDS: u32 = 5;
+/// 带状态筛选时单次请求最多扫描的行数，防止病态数据（几乎无命中）长时间占用线程。
+const MAX_SCAN_ROWS: u32 = 20_000;
 
 /// 文件视图查询：按筛选条件分页，状态筛选在内存中做（状态是动态计算的，不入库）。
-pub(crate) fn query_files(svc: &Inner, filter: &FileFilter) -> Result<Vec<FileView>, CoreError> {
+/// 查询在 spawn_blocking 中执行，不占用 tokio worker。
+pub(crate) async fn query_files(
+    svc: &Inner,
+    filter: &FileFilter,
+) -> Result<Vec<FileView>, CoreError> {
     let conv = filter.conv.as_deref().map(parse_conv).transpose()?;
     let author = filter
         .source_device
@@ -38,52 +43,64 @@ pub(crate) fn query_files(svc: &Inner, filter: &FileFilter) -> Result<Vec<FileVi
         before_millis: filter.before_millis,
         limit,
     };
-
+    let state = filter.state.clone();
+    let store = svc.store.clone();
     let peers = svc.conns.peers();
+    let self_user = svc.state.read().unwrap().self_user;
+    tokio::task::spawn_blocking(move || scan_files(&store, &peers, self_user, base, state))
+        .await
+        .map_err(|e| CoreError::Io(std::io::Error::other(format!("文件查询任务失败: {e}"))))?
+}
+
+/// 阻塞扫描：无状态筛选时一轮；有状态筛选时持续翻页直到凑满 limit 或数据耗尽。
+/// 扫描行数达到 `MAX_SCAN_ROWS` 时返回已得结果——此时客户端按“满页=还有更多”
+/// 的约定会认为没有更多，这是对病态数据的有意取舍。
+fn scan_files(
+    store: &Store,
+    peers: &[PeerInfo],
+    self_user: Option<UserId>,
+    base: FileQuery,
+    state: Option<BlobState>,
+) -> Result<Vec<FileView>, CoreError> {
+    let limit = base.limit;
+    let preparing = store.list_preparing()?;
     let mut titles: HashMap<ConvId, String> = HashMap::new();
     let mut out: Vec<FileView> = Vec::new();
     let mut before = base.before_millis;
-    // 无状态筛选时一轮即可；有状态筛选时不足 limit 就以末行时间继续查。
-    let rounds = if filter.state.is_some() {
-        MAX_FILTER_ROUNDS
-    } else {
-        1
-    };
-    for _ in 0..rounds {
-        let rows = svc.store.query_file_rows(&FileQuery {
+    let mut scanned: u32 = 0;
+    loop {
+        let rows = store.query_file_rows(&FileQuery {
             before_millis: before,
             ..base.clone()
         })?;
         let Some(last) = rows.last() else { break };
         before = Some(last.hlc_millis);
         let full = rows.len() as u32 >= limit;
+        scanned = scanned.saturating_add(rows.len() as u32);
         for row in &rows {
-            let Some(stored) = svc.store.get_message(&row.msg)? else {
+            let Some(stored) = store.get_message(&row.msg)? else {
                 continue;
             };
-            let blobs = svc.store.message_blobs_of(&row.msg)?;
+            let blobs = store.message_blobs_of(&row.msg)?;
             let Some(mb) = blobs.into_iter().find(|b| b.idx == row.item_idx) else {
                 continue;
             };
-            let author_display = author_display_name(svc, &row.msg.author);
-            let item = file_item_view(
-                svc.store.as_ref(),
-                &peers,
+            let author_display = author_display_name(store, &row.msg.author);
+            let item = file_item_view_with(
+                store,
+                peers,
                 &row.msg.author,
                 &mb.meta,
                 &author_display,
+                &preparing,
             );
-            if filter.state.as_ref().is_some_and(|s| *s != item.state) {
+            if state.as_ref().is_some_and(|s| *s != item.state) {
                 continue;
             }
-            let title = match titles.get(&row.conv) {
-                Some(t) => t.clone(),
-                None => {
-                    let t = conv_title(svc, &row.conv);
-                    titles.insert(row.conv, t.clone());
-                    t
-                }
-            };
+            let title = titles
+                .entry(row.conv)
+                .or_insert_with(|| conv_title(store, self_user.as_ref(), &row.conv))
+                .clone();
             out.push(FileView {
                 item,
                 conv: row.conv.to_hex(),
@@ -92,7 +109,7 @@ pub(crate) fn query_files(svc: &Inner, filter: &FileFilter) -> Result<Vec<FileVi
                 hlc_millis: row.hlc_millis,
             });
         }
-        if out.len() as u32 >= limit || !full {
+        if state.is_none() || out.len() as u32 >= limit || !full || scanned >= MAX_SCAN_ROWS {
             break;
         }
     }
@@ -100,22 +117,30 @@ pub(crate) fn query_files(svc: &Inner, filter: &FileFilter) -> Result<Vec<FileVi
 }
 
 /// 消息文字搜索：先查索引拿 id，再逐条还原视图（取不到的跳过）。
-pub(crate) fn search_messages(
+/// 在 spawn_blocking 中执行。
+pub(crate) async fn search_messages(
     svc: &Inner,
     query: &str,
     conv: Option<&ConvId>,
     limit: u32,
 ) -> Result<Vec<MessageView>, CoreError> {
-    let ids = svc.store.search_messages(query, conv, limit)?;
+    let store = svc.store.clone();
     let self_device = svc.identity.read().unwrap().device_id();
     let peers = svc.conns.peers();
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        if let Some(m) = svc.store.get_message(&id)? {
-            out.push(message_view(svc.store.as_ref(), &self_device, &peers, &m));
+    let query = query.to_string();
+    let conv = conv.copied();
+    tokio::task::spawn_blocking(move || -> Result<Vec<MessageView>, CoreError> {
+        let ids = store.search_messages(&query, conv.as_ref(), limit)?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(m) = store.get_message(&id)? {
+                out.push(message_view(&store, &self_device, &peers, &m));
+            }
         }
-    }
-    Ok(out)
+        Ok(out)
+    })
+    .await
+    .map_err(|e| CoreError::Io(std::io::Error::other(format!("搜索任务失败: {e}"))))?
 }
 
 /// 把已有文件转发到会话：复用库中已有的 BlobMeta（名字、大小、mime、媒体信息、
@@ -133,7 +158,7 @@ pub(crate) async fn forward_files(
     }
     let mut items: Vec<BlobMeta> = Vec::with_capacity(hashes.len());
     for h in hashes {
-        let Some(row) = svc.store.message_blobs_by_hash(h)?.into_iter().next() else {
+        let Some(row) = svc.store.visible_blobs_by_hash(h)?.into_iter().next() else {
             return Err(CoreError::NotFound(format!("文件 {}", h.to_hex())));
         };
         items.push(row.meta);
@@ -147,11 +172,10 @@ fn parse_conv(s: &str) -> Result<ConvId, CoreError> {
 }
 
 /// 作者显示名：users 表显示名优先，无则设备名（与 message_view 一致）。
-fn author_display_name(svc: &Inner, author: &DeviceId) -> String {
-    let row = svc.store.get_device(author).ok().flatten();
+fn author_display_name(store: &Store, author: &DeviceId) -> String {
+    let row = store.get_device(author).ok().flatten();
     match row {
-        Some(r) => svc
-            .store
+        Some(r) => store
             .get_user(&r.user)
             .ok()
             .flatten()
@@ -162,12 +186,9 @@ fn author_display_name(svc: &Inner, author: &DeviceId) -> String {
 }
 
 /// 会话标题（规则同会话列表）；会话不存在时回退为空串。
-fn conv_title(svc: &Inner, conv: &ConvId) -> String {
-    match svc.store.get_conversation(conv) {
-        Ok(Some(row)) => {
-            let self_user = svc.state.read().unwrap().self_user;
-            conv_summary(svc.store.as_ref(), self_user.as_ref(), &row, false).title
-        }
+fn conv_title(store: &Store, self_user: Option<&UserId>, conv: &ConvId) -> String {
+    match store.get_conversation(conv) {
+        Ok(Some(row)) => conv_summary(store, self_user, &row, false).title,
         _ => String::new(),
     }
 }

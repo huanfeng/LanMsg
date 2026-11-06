@@ -78,12 +78,13 @@ pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiE
             Ok(Response::Ok)
         }
         Request::QueryFiles { filter } => Ok(Response::Files {
-            value: crate::service::files::query_files(inner, &filter)?,
+            value: crate::service::files::query_files(inner, &filter).await?,
         }),
         Request::SearchMessages { query, conv, limit } => {
             let conv = conv.as_deref().map(parse_conv).transpose()?;
             Ok(Response::Messages {
-                value: crate::service::files::search_messages(inner, &query, conv.as_ref(), limit)?,
+                value: crate::service::files::search_messages(inner, &query, conv.as_ref(), limit)
+                    .await?,
             })
         }
         Request::ForwardFiles { conv, hashes } => {

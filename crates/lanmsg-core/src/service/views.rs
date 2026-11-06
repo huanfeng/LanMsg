@@ -33,6 +33,26 @@ pub(crate) fn file_item_view(
     meta: &BlobMeta,
     author_display: &str,
 ) -> FileItemView {
+    let preparing = store.list_preparing().unwrap_or_default();
+    file_item_view_with(
+        store,
+        peers,
+        author_device,
+        meta,
+        author_display,
+        &preparing,
+    )
+}
+
+/// 同 `file_item_view`，但 preparing 行由调用方传入（批量构造时只查一次）。
+pub(crate) fn file_item_view_with(
+    store: &Store,
+    peers: &[PeerInfo],
+    author_device: &DeviceId,
+    meta: &BlobMeta,
+    author_display: &str,
+    preparing: &[PreparingRow],
+) -> FileItemView {
     let local = store.get_local(&meta.hash).ok().flatten();
     let online_holder = store
         .holders(&meta.hash)
@@ -40,17 +60,13 @@ pub(crate) fn file_item_view(
         .into_iter()
         .find(|d| peers.iter().any(|p| p.device == *d));
     // 会话内有同名条目的 preparing 行 → 正在准备（发送方重启场景兜底）。
-    let in_preparing = store
-        .list_preparing()
-        .unwrap_or_default()
-        .iter()
-        .any(|row| {
-            row.paths.iter().any(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy() == meta.name.as_str())
-                    .unwrap_or(false)
-            })
-        });
+    let in_preparing = preparing.iter().any(|row| {
+        row.paths.iter().any(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy() == meta.name.as_str())
+                .unwrap_or(false)
+        })
+    });
     let active_transfer = store
         .transfer_for_hash(&meta.hash)
         .ok()

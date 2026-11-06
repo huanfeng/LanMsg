@@ -611,6 +611,29 @@ impl Store {
         Ok(out)
     }
 
+    /// 同 `message_blobs_by_hash`，但只含对用户可见的消息（未隐藏、未删除、未撤回）的行，
+    /// 供文件转发校验。
+    pub fn visible_blobs_by_hash(
+        &self,
+        hash: &BlobHash,
+    ) -> Result<Vec<MessageBlobRow>, crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT b.author, b.seq, b.idx, b.conv_id, b.meta, b.rel_path, b.hlc_millis, b.hlc_counter
+             FROM message_blobs b JOIN messages m ON m.author = b.author AND m.seq = b.seq
+             WHERE b.hash = ?1 AND m.hidden = 0 AND m.deleted = 0 AND m.state != 'recalled'
+             ORDER BY b.hlc_millis ASC",
+        )?;
+        let rows = stmt.query_map([&hash.0[..]], message_blob_from_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
     /// 某消息引用的 Blob 行（idx 升序）。
     pub fn message_blobs_of(
         &self,

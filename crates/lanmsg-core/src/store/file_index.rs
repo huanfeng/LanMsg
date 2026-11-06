@@ -212,6 +212,7 @@ impl Store {
             return Ok(0);
         }
         let mut done = 0u64;
+        let mut skipped = 0u64;
         // 游标 (author, seq)：主键顺序，批间不持有连接锁。
         let mut cursor: (Vec<u8>, i64) = (Vec::new(), -1);
         loop {
@@ -233,14 +234,27 @@ impl Store {
                 break;
             }
             for (author, seq, envelope, hidden) in &batch {
-                let env: Envelope = lanmsg_proto::from_cbor(envelope)
-                    .map_err(|e| StoreError::Codec(e.to_string()))?;
+                cursor = (author.clone(), *seq);
+                // 单条信封损坏只跳过并记录，不中止整个回填。
+                let env: Envelope = match lanmsg_proto::from_cbor(envelope) {
+                    Ok(env) => env,
+                    Err(e) => {
+                        skipped += 1;
+                        tracing::warn!("回填索引：跳过无法解码的信封 (seq={seq}): {e}");
+                        continue;
+                    }
+                };
                 self.index_files(&tx, &env)?;
                 self.index_message_text(&tx, &env, *hidden)?;
-                cursor = (author.clone(), *seq);
                 done += 1;
             }
             tx.commit()?;
+            // 释放连接锁并让出片刻，避免回填长时间饿死其他读写。
+            drop(conn);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if skipped > 0 {
+            tracing::warn!("回填索引：共跳过 {skipped} 条无法解码的消息");
         }
         self.set_setting("search_index_v", "1")?;
         Ok(done)
@@ -666,6 +680,36 @@ mod tests {
         assert_eq!(s.search_messages("世界", None, 10).unwrap().len(), 1);
         assert_eq!(s.backfill_search_index().unwrap(), 0);
         assert_eq!(index_count(&s), 6);
+    }
+
+    #[test]
+    fn backfill_skips_undecodable_envelope() {
+        let s = Store::open_in_memory().unwrap();
+        let bad = files_env(1, 100, &[("bad.png", "image/png")]);
+        let good = files_env(2, 101, &[("good.png", "image/png")]);
+        put(&s, &bad);
+        put(&s, &good);
+        // 破坏第一条的信封，并清空索引模拟旧库。
+        s.conn()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET envelope = x'ff' WHERE author = ?1 AND seq = ?2",
+                rusqlite::params![&bad.id.author.0[..], bad.id.seq as i64],
+            )
+            .unwrap();
+        s.conn()
+            .unwrap()
+            .execute_batch("DELETE FROM file_index; DELETE FROM message_text_index; DELETE FROM settings WHERE key = 'search_index_v';")
+            .unwrap();
+        assert_eq!(s.backfill_search_index().unwrap(), 1);
+        let rows = s
+            .query_file_rows(&FileQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].msg, good.id);
     }
 
     #[test]

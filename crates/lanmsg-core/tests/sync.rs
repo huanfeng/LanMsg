@@ -372,9 +372,22 @@ async fn pending_stranger_messages_are_not_relayed() {
         .await;
 
     // B 重启并重连，触发一轮完整同步。
+    let b_dev = b.device_id().await;
     b.svc.shutdown().await;
     let TestNode { dir, .. } = b;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // 必须等 A 侧确认旧连接已断开再重连：B 重启后设备 ID 不变，若 A 仍持有旧连接，
+    // 重复连接裁决会丢弃新拨入的连接，而 AddManualPeer 是一次性拨号不重试，
+    // 双方永远互见不到（高负载下偶发）。
+    wait_until(
+        || async {
+            !matches!(
+                a.try_call(Request::ListPeers).await,
+                Ok(Response::Peers { value }) if value.iter().any(|p| p.device_id == b_dev)
+            )
+        },
+        10,
+    )
+    .await;
     let mut b2 = node_offline_with(dir, PlatformHooks::default()).await;
     link(&a, &b2).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
