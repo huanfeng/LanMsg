@@ -27,7 +27,13 @@ const REPLACE_IDLE: Duration = Duration::from_millis(600);
 fn init_timing() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        lanmsg_core::net::timing::set_timing_for_tests(HEARTBEAT, IDLE_TIMEOUT, REPLACE_IDLE)
+        lanmsg_core::net::timing::set_timing_for_tests(
+            HEARTBEAT,
+            IDLE_TIMEOUT,
+            REPLACE_IDLE,
+            lanmsg_proto::consts::DIAL_TIMEOUT,
+            lanmsg_proto::consts::ACCEPT_HANDSHAKE_TIMEOUT,
+        )
     });
 }
 

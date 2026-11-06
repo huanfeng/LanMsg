@@ -88,6 +88,8 @@ pub(crate) struct Inner {
     pub(crate) ui_focus: StdMutex<Option<ConvId>>,
     /// 已登记的静态对端地址（启动配置 + AddManualPeer；只存内存，每个地址一个重连任务）。
     pub(crate) static_peers: StdMutex<HashSet<SocketAddr>>,
+    /// 发现触发的在途拨号地址：同一地址拨号未结束时不重复发起。
+    dialing: StdMutex<HashSet<SocketAddr>>,
 }
 
 /// 核心服务（C6）。内部状态由 Arc 持有，Clone 廉价。
@@ -285,6 +287,7 @@ impl Service {
             platform,
             ui_focus: StdMutex::new(None),
             static_peers: StdMutex::new(HashSet::new()),
+            dialing: StdMutex::new(HashSet::new()),
         });
         let svc = Service {
             inner: inner.clone(),
@@ -619,7 +622,7 @@ async fn sync_worker(sync: crate::sync::SyncEngine, mut rx: mpsc::Receiver<SyncJ
 }
 
 /// 发现事件：未连接且自身设备 ID 较小时出站拨号；Invisible 不主动外联其他用户。
-async fn on_discovery(inner: &Inner, de: DiscoveryEvent) {
+async fn on_discovery(inner: &Arc<Inner>, de: DiscoveryEvent) {
     let peer_device = de.announce.cert.device;
     // 连接表里有但已长时间没收包的连接可能已死（对端无 FIN 消失后重启），仍要拨号，
     // 由连接管理器的裁决用新连接替换。
@@ -647,7 +650,16 @@ async fn on_discovery(inner: &Inner, de: DiscoveryEvent) {
         return;
     }
     let addr = SocketAddr::new(de.from.ip(), port);
-    let _ = inner.conns.connect(addr, de.via_multicast).await;
+    // 拨号放后台：对端沉默时最长等 DIAL_TIMEOUT，不能冻结路由循环；同地址在途则不重复发起。
+    if !inner.dialing.lock().unwrap().insert(addr) {
+        return;
+    }
+    let inner = inner.clone();
+    let via_multicast = de.via_multicast;
+    tokio::spawn(async move {
+        let _ = inner.conns.connect(addr, via_multicast).await;
+        inner.dialing.lock().unwrap().remove(&addr);
+    });
 }
 
 /// 登记静态对端并启动其后台重连任务；同一地址只启动一次。
@@ -660,22 +672,39 @@ pub(crate) fn register_static_peer(inner: &Arc<Inner>, addr: SocketAddr, connect
 }
 
 /// 静态对端后台拨号：失败按 RETRY_MIN..RETRY_MAX 指数退避，连上后断开再重试。
+/// 退避睡眠与进行中的拨号都会被关停信号打断。
 async fn static_peer_task(inner: Arc<Inner>, addr: SocketAddr, connected: bool) {
     let mut delay = RETRY_MIN;
-    if connected {
-        tokio::time::sleep(RETRY_MIN).await;
+    if connected && sleep_or_shutdown(&inner, RETRY_MIN).await {
+        return;
     }
     while !inner.conns.is_shut_down() {
-        match inner.conns.connect(addr, false).await {
+        let result = tokio::select! {
+            r = inner.conns.connect(addr, false) => r,
+            _ = inner.conns.wait_shutdown() => return,
+        };
+        match result {
             Ok(_) => {
                 delay = RETRY_MIN;
-                tokio::time::sleep(RETRY_MIN).await;
+                if sleep_or_shutdown(&inner, RETRY_MIN).await {
+                    return;
+                }
             }
             Err(_) => {
-                tokio::time::sleep(delay).await;
+                if sleep_or_shutdown(&inner, delay).await {
+                    return;
+                }
                 delay = (delay * 2).min(RETRY_MAX);
             }
         }
+    }
+}
+
+/// 睡眠 `d`；期间收到关停信号则提前返回 true。
+async fn sleep_or_shutdown(inner: &Inner, d: std::time::Duration) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(d) => false,
+        _ = inner.conns.wait_shutdown() => true,
     }
 }
 

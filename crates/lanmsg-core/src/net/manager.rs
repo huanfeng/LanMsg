@@ -46,6 +46,8 @@ pub struct ConnManager {
     inner: Arc<RwLock<Inner>>,
     /// 接受循环任务句柄：shutdown 时中止，真正关闭监听端口。
     accept_task: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
+    /// 关停信号（shutdown 置 true）：后台重连任务据此打断退避睡眠与进行中的拨号。
+    closed_tx: Arc<watch::Sender<bool>>,
 }
 
 struct Inner {
@@ -113,6 +115,7 @@ impl ConnManager {
             local_addr,
             inner: Arc::new(RwLock::new(inner)),
             accept_task: Arc::new(std::sync::Mutex::new(None)),
+            closed_tx: Arc::new(watch::channel(false).0),
         };
 
         // 启动 accept 循环。
@@ -137,6 +140,9 @@ impl ConnManager {
         addr: SocketAddr,
         _via_multicast: bool,
     ) -> Result<DeviceId, CoreError> {
+        if self.read_inner().closed {
+            return Err(CoreError::PeerOffline);
+        }
         // 快速路径：若已有连接到该地址且已上线，直接返回该设备。
         {
             let inner = self.read_inner();
@@ -155,15 +161,25 @@ impl ConnManager {
 
         let hello = self.build_hello();
         let cleanup = make_exit_cleanup(&self.inner);
-        let (peer_info, connection) = Connection::connect_outbound(
-            addr,
-            &self.device_key(),
-            self.self_device(),
-            &hello,
-            self.events_clone(),
-            cleanup,
+        // 整个拨号（TCP + TLS + Hello）限时：对端 TCP 已接受但应用层沉默时不能永久挂起。
+        let (peer_info, connection) = tokio::time::timeout(
+            timing::current().dial,
+            Connection::connect_outbound(
+                addr,
+                &self.device_key(),
+                self.self_device(),
+                &hello,
+                self.events_clone(),
+                cleanup,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| {
+            CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("拨号 {addr} 超时"),
+            ))
+        })??;
 
         let device = peer_info.device;
         let peer_addr = peer_info.addr;
@@ -354,6 +370,11 @@ impl ConnManager {
         let _ = inner.cert_overrides.lock().unwrap().remove(device);
     }
 
+    /// 等待 shutdown（已关闭则立即返回）。
+    pub async fn wait_shutdown(&self) {
+        let _ = self.closed_tx.subscribe().wait_for(|c| *c).await;
+    }
+
     /// 关闭所有连接与监听器。
     pub async fn shutdown(&self) {
         // 先停监听：否则对端的静态重连会立刻把刚关掉的连接又连回来。
@@ -362,6 +383,7 @@ impl ConnManager {
         }
         let mut inner = self.write_inner();
         inner.closed = true;
+        self.closed_tx.send_replace(true);
         for (_device, entry) in inner.connections.drain() {
             entry.connection.shutdown();
         }
@@ -521,19 +543,39 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                 }
             };
 
+            // 已 shutdown 后到达的数据连接不再交给处理器。
+            let data_handler = data_handler.map(|h| {
+                let inner = inner_clone.clone();
+                Arc::new(move |peer: PeerInfo, stream: DataStream| {
+                    if !inner.read().unwrap().closed {
+                        h(peer, stream);
+                    }
+                }) as DataHandler
+            });
+
             let events_for_up = events.clone();
-            match Connection::accept_channel(
-                stream,
-                &device_key,
-                self_device,
-                &hello_info,
-                accept_filter.as_ref(),
-                events,
-                data_handler,
-                cleanup,
+            // 入站握手限时：只连接不发数据的对端在时限后被关闭（丢弃 stream 释放 fd）。
+            let accepted = tokio::time::timeout(
+                timing::current().accept_handshake,
+                Connection::accept_channel(
+                    stream,
+                    &device_key,
+                    self_device,
+                    &hello_info,
+                    accept_filter.as_ref(),
+                    events,
+                    data_handler,
+                    cleanup,
+                ),
             )
             .await
-            {
+            .unwrap_or_else(|_| {
+                Err(CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "入站握手超时",
+                )))
+            });
+            match accepted {
                 Ok(Accepted::Control(peer_info, connection)) => {
                     let device = peer_info.device;
                     // 同时拨号：拨入方 DeviceId 较大时，本端若也在向其拨号，该拨入连接

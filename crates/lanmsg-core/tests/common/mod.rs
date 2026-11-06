@@ -30,6 +30,29 @@ pub struct TestNode {
     self_user: Mutex<Option<String>>,
 }
 
+/// 以 Disabled 发现启动测试节点，并带启动期静态对端（后台重连任务）。
+pub async fn node_offline_static(static_peers: Vec<std::net::SocketAddr>) -> TestNode {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Service::start(ServiceConfig {
+        data_dir: dir.path().to_path_buf(),
+        listen_port: 0,
+        discovery: DiscoveryMode::Disabled,
+        keystore: Arc::new(FileKeyStore::new(dir.path().join("keys"))),
+        static_peers,
+        platform: PlatformHooks::default(),
+        localsend_port: 0,
+    })
+    .await
+    .expect("Service 启动失败");
+    let events = svc.subscribe();
+    TestNode {
+        svc,
+        dir,
+        events,
+        self_user: Mutex::new(None),
+    }
+}
+
 /// 在共享 bus 上以临时目录启动测试节点（port 0、Memory 发现）。
 pub async fn node(bus: &MemoryBus) -> TestNode {
     node_with(bus, tempfile::tempdir().unwrap(), PlatformHooks::default()).await

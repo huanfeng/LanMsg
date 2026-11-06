@@ -42,6 +42,14 @@ pub const PING_TIMEOUT: Duration = Duration::from_secs(45);
 /// （对端无 FIN 消失后重启/换网重连的场景）。须大于 PING_INTERVAL 以免误伤存活连接。
 pub const RECONNECT_REPLACE_IDLE: Duration = Duration::from_secs(20);
 
+/// 出站拨号总时限（TCP 连接 + TLS 握手 + Hello 交换）：对端 TCP 已接受但应用层沉默时
+/// 不能让拨号方永久挂起。
+pub const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 入站握手总时限（TLS 握手 + 通道字节 + Hello / DataHello）：只连接不发数据的对端
+/// 在此时限后被关闭，释放 fd。
+pub const ACCEPT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// 网卡变化轮询间隔。
 pub const IFACE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 

@@ -41,6 +41,15 @@ impl MemoryBus {
     }
 }
 
+impl MemoryBus {
+    /// 测试专用：向总线注入任意一包（如伪造指向“沉默对端”端口的通告）。
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn inject_for_tests(&self, bytes: Vec<u8>, from: SocketAddr) {
+        self.broadcast(bytes, from);
+    }
+}
+
 /// 源任务：把总线上的包转发进发现主循环的收件箱。
 pub(crate) fn spawn_source(bus: &MemoryBus, inbox: mpsc::Sender<(Vec<u8>, SocketAddr)>) {
     let mut rx = bus.subscribe();

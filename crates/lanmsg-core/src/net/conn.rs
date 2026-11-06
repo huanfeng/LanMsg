@@ -6,13 +6,15 @@
 // 注释中文，标识符英文。
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
 use futures_util::{SinkExt, StreamExt, TryFutureExt};
-use tokio::io::{split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
@@ -28,7 +30,7 @@ use lanmsg_proto::types::{DeviceCert, PathClass};
 use rustls::pki_types::ServerName;
 
 use crate::error::CoreError;
-use crate::net::timing;
+use crate::net::timing::{self, NetTiming};
 use crate::net::tls::{make_tls_configs, peer_device_id, TLS_SNI};
 
 /// 对端连接信息。
@@ -71,6 +73,56 @@ static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 /// 返回是否确有移除（即退出时该连接仍是当前登记连接）。
 pub(crate) type ExitCleanup = Arc<dyn Fn(u64) -> BoxFuture<'static, bool> + Send + Sync>;
 
+/// 收包时钟：记录建立时刻与最近一次收到字节的时刻（相对 born 的毫秒）。
+/// 由 `ActivityReader` 在有字节到达时刷新，空闲超时与重连裁决都基于它。
+#[derive(Clone)]
+struct RecvClock {
+    born: Instant,
+    last_recv_ms: Arc<AtomicU64>,
+}
+
+impl RecvClock {
+    fn new() -> Self {
+        RecvClock {
+            born: Instant::now(),
+            last_recv_ms: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn touch(&self) {
+        self.last_recv_ms
+            .store(self.born.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// 距最近一次收到字节的时长（尚未收到时从建立时刻算起）。
+    fn idle(&self) -> Duration {
+        let last = Duration::from_millis(self.last_recv_ms.load(Ordering::Relaxed));
+        self.born.elapsed().saturating_sub(last)
+    }
+}
+
+/// 读侧包装：每次读到字节就刷新收包时钟。空闲判定因此按“字节到达”而非“整帧到达”，
+/// 慢链路上耗时超过空闲超时的大帧不会被误判断线。
+struct ActivityReader<R> {
+    inner: R,
+    clock: RecvClock,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ActivityReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if matches!(poll, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            self.clock.touch();
+        }
+        poll
+    }
+}
+
 /// 已建立并完成 Hello 校验的单条连接。
 pub(crate) struct Connection {
     peer_info: PeerInfo,
@@ -79,9 +131,8 @@ pub(crate) struct Connection {
     shutdown_tx: mpsc::Sender<()>,
     /// 连接实例 ID（同设备重连裁决后区分新旧连接）。
     conn_id: u64,
-    /// 建立时刻与最近一次收包时刻（相对 born 的毫秒），供重连裁决判断旧连接是否已死。
-    born: Instant,
-    last_recv_ms: Arc<AtomicU64>,
+    /// 收包时钟，供重连裁决判断旧连接是否已死。
+    clock: RecvClock,
 }
 
 impl Connection {
@@ -119,6 +170,11 @@ impl Connection {
             .map_err(CoreError::Io)?;
 
         let (read_half, write_half) = split(tls_stream);
+        let clock = RecvClock::new();
+        let read_half = ActivityReader {
+            inner: read_half,
+            clock: clock.clone(),
+        };
         let mut framed_read = FramedRead::new(read_half, FrameCodec);
         let mut framed_write = FramedWrite::new(write_half, FrameCodec);
 
@@ -212,6 +268,8 @@ impl Connection {
             event_tx,
             cleanup,
             false,
+            clock,
+            timing::current(),
         );
 
         Ok((peer_info, connection))
@@ -306,6 +364,11 @@ async fn accept_control(
     cleanup: ExitCleanup,
 ) -> Result<Accepted, CoreError> {
     let (read_half, write_half) = split(tls_stream);
+    let clock = RecvClock::new();
+    let read_half = ActivityReader {
+        inner: read_half,
+        clock: clock.clone(),
+    };
     let mut framed_read = FramedRead::new(read_half, FrameCodec);
     let mut framed_write = FramedWrite::new(write_half, FrameCodec);
 
@@ -400,6 +463,8 @@ async fn accept_control(
         event_tx,
         cleanup,
         uninit_peer,
+        clock,
+        timing::current(),
     );
 
     Ok(Accepted::Control(peer_info, connection))
@@ -412,6 +477,7 @@ async fn accept_control(
 ///   连接时通知外层 Down（被替换的旧连接不发，避免对存活的新连接误报离线）。
 /// - 写循环：发送队列中的帧；heartbeat 内无出帧则发 Ping；写失败调 shutdown 让读循环
 ///   一并退出，读循环退出后写循环随之结束。
+#[allow(clippy::too_many_arguments)] // 出站/入站共用的结构性入口。
 fn start_io<R, W>(
     peer_info: PeerInfo,
     framed_read: FramedRead<R, FrameCodec>,
@@ -419,25 +485,23 @@ fn start_io<R, W>(
     event_tx: mpsc::Sender<ConnEvent>,
     cleanup: ExitCleanup,
     uninit_peer: bool,
+    clock: RecvClock,
+    timing: NetTiming,
 ) -> Arc<Connection>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let timing = timing::current();
     let (write_tx, write_rx) = mpsc::channel(256);
     let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
     let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
-    let born = Instant::now();
-    let last_recv_ms = Arc::new(AtomicU64::new(0));
     let connection = Arc::new(Connection {
         peer_info,
         write_tx,
         up_sent: Arc::new(AtomicBool::new(false)),
         shutdown_tx,
         conn_id,
-        born,
-        last_recv_ms: last_recv_ms.clone(),
+        clock: clock.clone(),
     });
 
     let write_tx_for_pong = connection.write_tx.clone();
@@ -452,12 +516,11 @@ where
         let mut shutdown_rx = shutdown_rx;
         loop {
             tokio::select! {
-                result = tokio::time::timeout(timing.idle_timeout, reader.next()) => {
-                    let Ok(result) = result else {
+                result = next_frame_or_idle(&mut reader, &clock, timing.idle_timeout) => {
+                    let Some(result) = result else {
                         tracing::debug!(peer = %device_for_events, "对端空闲超时，关闭连接");
                         break;
                     };
-                    last_recv_ms.store(born.elapsed().as_millis() as u64, Ordering::Relaxed);
                     match result {
                         Some(Ok(Frame::Ping(_n))) => {
                             // try_send：写队列满时丢弃 Pong，避免读循环被写侧拖住而失去超时检测。
@@ -524,6 +587,23 @@ where
     connection
 }
 
+/// 等待下一帧；距最近一次收到字节超过 idle_timeout 才算空闲（返回 None）。
+/// 大帧还在持续到达时只续等，不判超时。
+async fn next_frame_or_idle<R: AsyncRead + Unpin>(
+    reader: &mut FramedRead<R, FrameCodec>,
+    clock: &RecvClock,
+    idle_timeout: Duration,
+) -> Option<Option<Result<Frame, lanmsg_proto::frame::CodecError>>> {
+    loop {
+        let wait = idle_timeout.saturating_sub(clock.idle());
+        match tokio::time::timeout(wait, reader.next()).await {
+            Ok(result) => return Some(result),
+            Err(_) if clock.idle() >= idle_timeout => return None,
+            Err(_) => {}
+        }
+    }
+}
+
 impl Connection {
     /// 发送一帧到对端。
     pub(crate) async fn send(&self, _device: &DeviceId, frame: Frame) -> Result<(), CoreError> {
@@ -548,8 +628,7 @@ impl Connection {
 
     /// 距最近一次收到对端任意帧的时长（刚建立未收包时从建立时刻算起）。
     pub(crate) fn idle(&self) -> Duration {
-        let last = Duration::from_millis(self.last_recv_ms.load(Ordering::Relaxed));
-        self.born.elapsed().saturating_sub(last)
+        self.clock.idle()
     }
 
     /// 关闭连接：通知读循环退出。
@@ -666,13 +745,22 @@ mod tests {
                 true
             })
         });
+        let clock = RecvClock::new();
         let connection = start_io(
             info,
-            FramedRead::new(quiet_local, FrameCodec),
+            FramedRead::new(
+                ActivityReader {
+                    inner: quiet_local,
+                    clock: clock.clone(),
+                },
+                FrameCodec,
+            ),
             FramedWrite::new(FailWriter, FrameCodec),
             event_tx,
             cleanup,
             false,
+            clock,
+            timing::current(),
         );
         connection.set_up_sent();
         connection
@@ -689,6 +777,83 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await,
             Ok(Some(ConnEvent::Down(_)))
         ));
+    }
+
+    /// 慢链路上的大帧：整帧耗时远超空闲超时，但字节持续到达，不得被判断线；
+    /// 帧到齐后照常上报，且无 Down。
+    #[tokio::test]
+    async fn slow_large_frame_is_not_idle_timeout() {
+        let idle_timeout = Duration::from_millis(300);
+        let timing = NetTiming {
+            heartbeat: Duration::from_secs(60),
+            idle_timeout,
+            replace_idle: Duration::from_secs(60),
+            dial: Duration::from_secs(10),
+            accept_handshake: Duration::from_secs(10),
+        };
+        let (local, mut remote) = tokio::io::duplex(64 * 1024);
+        let (local_read, local_write) = split(local);
+        let info = PeerInfo {
+            device: DeviceId([8u8; 32]),
+            cert: None,
+            display_name: "慢链路".into(),
+            addr: "127.0.0.1:1".parse().unwrap(),
+            dial_addr: "127.0.0.1:1".parse().unwrap(),
+            path: lanmsg_proto::types::PathClass::Lan,
+            caps: vec![],
+            outbound: false,
+            tls_exporter: [0u8; 32],
+        };
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let cleanup: ExitCleanup = Arc::new(|_| Box::pin(async { true }));
+        let clock = RecvClock::new();
+        let connection = start_io(
+            info,
+            FramedRead::new(
+                ActivityReader {
+                    inner: local_read,
+                    clock: clock.clone(),
+                },
+                FrameCodec,
+            ),
+            FramedWrite::new(local_write, FrameCodec),
+            event_tx,
+            cleanup,
+            false,
+            clock,
+            timing,
+        );
+        connection.set_up_sent();
+
+        let mut encoder = FramedWrite::new(Vec::new(), FrameCodec);
+        encoder
+            .send(Frame::Error {
+                code: 1,
+                message: "x".repeat(20_000),
+            })
+            .await
+            .unwrap();
+        let wire = encoder.into_inner();
+        // 20 块 × 40ms ≈ 800ms，超过空闲超时 300ms 的两倍多；块间隔远小于空闲超时。
+        let sender = tokio::spawn(async move {
+            for chunk in wire.chunks(1_000) {
+                remote.write_all(chunk).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+            remote
+        });
+
+        let first = tokio::time::timeout(Duration::from_secs(3), event_rx.recv())
+            .await
+            .expect("大帧应在 3 秒内到齐");
+        assert!(
+            matches!(
+                first,
+                Some(ConnEvent::Frame(_, Frame::Error { code: 1, .. }))
+            ),
+            "慢大帧应被完整上报而非断线: {first:?}"
+        );
+        let _remote = sender.await.unwrap();
     }
 
     #[test]
