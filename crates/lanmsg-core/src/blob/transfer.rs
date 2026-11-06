@@ -649,10 +649,7 @@ impl TransferEngine {
             .conns
             .peers()
             .into_iter()
-            .filter(|p| {
-                let u = p.cert.as_ref().map(|c| c.user);
-                u == self_user || u == peer_user
-            })
+            .filter(|p| solicit_wants(p.cert.as_ref().map(|c| c.user), self_user, peer_user))
             .map(|p| p.device)
             .collect();
         for t in targets {
@@ -986,8 +983,28 @@ pub fn unique_path(p: &Path) -> PathBuf {
     p.to_path_buf()
 }
 
+/// solicit 的目标判定：对端必须有证书，且用户是自己或会话对端用户。
+/// SelfDevices 会话 peer_user 为 None，此时只匹配自己的设备（无证书对端不会因 None == None 误中）。
+fn solicit_wants(
+    peer: Option<lanmsg_proto::ids::UserId>,
+    self_user: Option<lanmsg_proto::ids::UserId>,
+    conv_peer: Option<lanmsg_proto::ids::UserId>,
+) -> bool {
+    peer.is_some_and(|u| Some(u) == self_user || Some(u) == conv_peer)
+}
+
+/// Windows 保留设备名（不区分大小写，且带扩展名也保留）。
+fn is_windows_reserved(stem: &str) -> bool {
+    let up = stem.to_ascii_uppercase();
+    matches!(up.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((up.starts_with("COM") || up.starts_with("LPT"))
+            && up.len() == 4
+            && matches!(up.as_bytes()[3], b'1'..=b'9'))
+}
+
 /// 文件名段清洗：替换 \ / : * ? " < > | 与控制字符为 _，去掉首尾空格与点，
-/// 空则 "_"（同时天然阻断了 "." / ".." 路径穿越）。
+/// 空则 "_"（同时天然阻断了 "." / ".." 路径穿越）；Windows 保留名
+/// （CON、PRN、AUX、NUL、COM1-9、LPT1-9，含 `con.txt`）前加下划线。
 pub fn sanitize_component(s: &str) -> String {
     let replaced: String = s
         .chars()
@@ -1002,6 +1019,8 @@ pub fn sanitize_component(s: &str) -> String {
     let trimmed: String = replaced.trim_matches(|c| c == ' ' || c == '.').to_string();
     if trimmed.is_empty() {
         "_".into()
+    } else if is_windows_reserved(trimmed.split('.').next().unwrap_or("").trim_end()) {
+        format!("_{trimmed}")
     } else {
         trimmed
     }
@@ -1045,6 +1064,40 @@ mod tests {
         assert!(read_segment(&mut r, 100, &expect, &mut out, 0)
             .await
             .is_err());
+    }
+
+    #[test]
+    fn sanitize_windows_reserved_names() {
+        assert_eq!(sanitize_component("CON"), "_CON");
+        assert_eq!(sanitize_component("con.txt"), "_con.txt");
+        assert_eq!(sanitize_component("Nul.tar.gz"), "_Nul.tar.gz");
+        assert_eq!(sanitize_component("com1"), "_com1");
+        assert_eq!(sanitize_component("LPT9.log"), "_LPT9.log");
+        assert_eq!(sanitize_component("COM0"), "COM0");
+        assert_eq!(sanitize_component("COM10"), "COM10");
+        assert_eq!(sanitize_component("console.txt"), "console.txt");
+        assert_eq!(sanitize_component("a.con"), "a.con");
+        // 文件夹相对路径段与会话标题经同一函数。
+        let segs: Vec<String> = "aux/ok/PRN.d".split('/').map(sanitize_component).collect();
+        assert_eq!(segs, ["_aux", "ok", "_PRN.d"]);
+    }
+
+    #[test]
+    fn solicit_skips_certless_and_strangers() {
+        use lanmsg_proto::ids::UserId;
+        let me = Some(UserId([1u8; 32]));
+        let other = Some(UserId([2u8; 32]));
+        let stranger = Some(UserId([3u8; 32]));
+        // SelfDevices 会话（conv_peer = None）：仅自己的设备。
+        assert!(solicit_wants(me, me, None));
+        assert!(!solicit_wants(None, me, None));
+        assert!(!solicit_wants(other, me, None));
+        // Dm 会话：自己与对端用户，陌生人与无证书对端排除。
+        assert!(solicit_wants(other, me, other));
+        assert!(!solicit_wants(stranger, me, other));
+        assert!(!solicit_wants(None, me, other));
+        // 自身未初始化时无证书对端同样不命中。
+        assert!(!solicit_wants(None, None, None));
     }
 
     #[test]
