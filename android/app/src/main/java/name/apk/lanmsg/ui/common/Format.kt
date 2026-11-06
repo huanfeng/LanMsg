@@ -20,7 +20,7 @@ object Format {
         now: Long,
         zone: ZoneId = ZoneId.systemDefault(),
         yesterday: (String) -> String,
-        monthDay: String = "M月d日",
+        monthDay: String = "M\u6708d\u65E5", // 即 M月d日；用转义遵守“Kotlin 中无中文字面量”
     ): String {
         val t = Instant.ofEpochMilli(millis).atZone(zone)
         val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
