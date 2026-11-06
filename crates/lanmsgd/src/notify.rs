@@ -302,4 +302,12 @@ mod tests {
         assert_eq!(n.body, "张三 想要加你为联系人");
         assert_eq!(n.conv, None);
     }
+
+    #[test]
+    fn title_falls_back_to_device_name_without_cache() {
+        let ev = added(msg("c1", text("hi")));
+        let n = notice_for(&ev, None, &StatusDto::Online, &TitleCache::default()).unwrap();
+        assert_eq!(n.title, "手机");
+        assert_eq!(n.body, "hi");
+    }
 }

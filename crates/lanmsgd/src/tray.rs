@@ -6,11 +6,11 @@
 use std::path::PathBuf;
 
 use lanmsg_api::{Event, Request, Response, StatusDto};
-use windui::platform::tray_supported;
+use windui::platform::{resident_available, tray_supported};
 use windui::prelude::*;
 
 use crate::launch::{conv_from_tag, open_gui};
-use crate::notify::{notice_for, TitleCache};
+use crate::notify::{notice_for, Notice, TitleCache};
 use crate::runtime::DaemonRuntime;
 
 /// 托盘图标（32x32 PNG，编译期内嵌）。
@@ -69,6 +69,27 @@ fn status_item(
     })
 }
 
+/// 弹通知前同步最新在线状态：仅 `MessageAdded` / `IncomingRequest` 才取（其余事件不会弹通知）。
+/// 取到则覆盖 `status`（CLI/界面/Android 改状态时托盘本地值会过期），取不到沿用旧值。
+fn notice_with_fresh_status(
+    ev: &Event,
+    focus: Option<&str>,
+    status: &mut StatusDto,
+    titles: &TitleCache,
+    fetch_status: impl Fn() -> Option<StatusDto>,
+) -> Option<Notice> {
+    if matches!(
+        ev,
+        Event::MessageAdded { .. } | Event::IncomingRequest { .. }
+    ) {
+        match fetch_status() {
+            Some(fresh) => *status = fresh,
+            None => tracing::debug!("取当前状态失败，沿用托盘本地状态"),
+        }
+    }
+    notice_for(ev, focus, status, titles)
+}
+
 /// 运行托盘（主线程阻塞）。显示服务不可用时转为无头继续服务，不退出进程。
 pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     let handle = rt.handle();
@@ -83,6 +104,12 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     // 托盘配置始终传入：Linux 上没有 Watcher 时 windui 自行降级，通知照常发出。
     let supported = tray_supported();
     if !supported {
+        // 没有显示服务：拉起界面也会失败，直接走无头。
+        if !resident_available() {
+            tracing::warn!("显示服务不可用，转为无头模式");
+            rt.block_until_shutdown();
+            return;
+        }
         // 此刻没有托盘入口：开一次界面，让用户看得到界面。
         tracing::info!("托盘宿主不可用，直接打开界面");
         open_gui_logged(&data_dir, None);
@@ -126,13 +153,24 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     let mut app = App::resident("LanMsg").tray(tray);
     let tray_handle = app.tray_handle();
     let service = rt.service.clone();
+    let handle_ev = handle.clone();
     let mut titles = TitleCache::default();
     let tx = app.channel::<UiMsg>(move |_ctx, msg| match msg {
         UiMsg::Quit => tray_handle.quit(),
         UiMsg::Event(ev) => {
             titles.observe(&ev);
             let focus = service.ui_focus().map(|c| c.to_hex());
-            if let Some(n) = notice_for(&ev, focus.as_deref(), &status.get(), &titles) {
+            let mut current = status.get();
+            // 回调跑在 UI 线程（非 tokio 线程），可 block_on。
+            let fetch = || match handle_ev.block_on(service.handle(Request::GetSelf)) {
+                Ok(Response::SelfInfo { value }) => Some(value.status),
+                _ => None,
+            };
+            let n = notice_with_fresh_status(&ev, focus.as_deref(), &mut current, &titles, fetch);
+            if current != status.get() {
+                status.set(current);
+            }
+            if let Some(n) = n {
                 tray_handle.notify_tagged(n.title, n.body, n.conv.unwrap_or_default());
             }
         }
@@ -158,6 +196,60 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lanmsg_api::{MessageBodyView, MessageState, MessageView};
+
+    fn added() -> Event {
+        Event::MessageAdded {
+            msg: MessageView {
+                id: "m1".into(),
+                conv: "c1".into(),
+                author_user: "u".into(),
+                author_device: "d".into(),
+                author_device_name: "手机".into(),
+                is_mine: false,
+                hlc_millis: 0,
+                body: MessageBodyView::Text { text: "hi".into() },
+                state: MessageState::Delivered,
+            },
+        }
+    }
+
+    #[test]
+    fn fresh_busy_suppresses_notice_and_updates_local_status() {
+        let mut status = StatusDto::Online;
+        let n =
+            notice_with_fresh_status(&added(), None, &mut status, &TitleCache::default(), || {
+                Some(StatusDto::Busy)
+            });
+        assert_eq!(n, None);
+        assert_eq!(status, StatusDto::Busy);
+    }
+
+    #[test]
+    fn fetch_failure_keeps_old_status() {
+        let mut status = StatusDto::Busy;
+        let n =
+            notice_with_fresh_status(&added(), None, &mut status, &TitleCache::default(), || None);
+        assert_eq!(n, None);
+        assert_eq!(status, StatusDto::Busy);
+        let mut status = StatusDto::Online;
+        let n =
+            notice_with_fresh_status(&added(), None, &mut status, &TitleCache::default(), || None);
+        assert!(n.is_some());
+    }
+
+    #[test]
+    fn other_events_do_not_fetch_status() {
+        let mut status = StatusDto::Online;
+        let n = notice_with_fresh_status(
+            &Event::PeerOffline { device: "d".into() },
+            None,
+            &mut status,
+            &TitleCache::default(),
+            || panic!("不应取状态"),
+        );
+        assert_eq!(n, None);
+    }
 
     #[test]
     fn embedded_tray_icon_decodes_to_32x32_rgba() {
