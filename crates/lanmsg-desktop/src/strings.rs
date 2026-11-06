@@ -38,6 +38,8 @@ pub const WIZARD_JOIN_EXISTING: &str = "加入我已有的设备";
 pub const WIZARD_JOIN_HINT: &str = "把这台电脑加入你已有的 LanMsg 身份，共享同一份联系人。";
 pub const WIZARD_JOINING: &str = "已记录设备名，请在你已有的设备上选择“添加我的设备”完成配对。";
 pub const WIZARD_NAME_INVALID: &str = "名字需要 1–32 个字符";
+pub const WIZARD_DEVICE_INVALID: &str = "设备名称需要 1–32 个字符";
+pub const WIZARD_BACK: &str = "返回";
 pub const AUTOSTART_FAILED: &str = "设置开机自启失败：";
 /// 设备名输入为空且取不到主机名时的兜底。
 pub const DEFAULT_DEVICE_NAME: &str = "我的电脑";

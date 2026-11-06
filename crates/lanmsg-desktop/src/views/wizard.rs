@@ -31,6 +31,14 @@ fn field(label: &'static str, input: Element) -> Element {
         .child(input.width_match())
 }
 
+/// 输入框下的红字校验提示，条件为真时才显示。
+fn error_hint(text: &'static str, show: Signal<bool>) -> Element {
+    Element::label(text)
+        .font_size(12.0)
+        .fg_role(Role::Danger)
+        .visible_signal(show)
+}
+
 /// 一个选项块：大按钮 + 下方一行说明。
 fn choice(button: Element, hint: &'static str) -> Element {
     Element::col()
@@ -48,14 +56,19 @@ fn choice(button: Element, hint: &'static str) -> Element {
 pub fn wizard(ui: &UiState) -> Element {
     let name = signal(String::new());
     let device = signal(default_device_name());
-    let can_submit = name.map(|n| wizard_name_ok(n));
+    // 设备名允许留空（用默认值），非空则限 1–32 个字符
+    let name_bad = name.map(|n| !n.is_empty() && !wizard_name_ok(n));
+    let device_bad = device.map(|d| !d.trim().is_empty() && !wizard_name_ok(d));
+    let in_flight = ui.derive(|m| m.init_in_flight);
+    // 名字合法、设备名合法、且没有在途的 Init 才允许提交
+    let can_submit = move || wizard_name_ok(&name.get()) && !device_bad.get() && !in_flight.get();
     let joining = ui.derive(|m| m.wizard_joining);
     let not_joining = joining.map(|j| !*j);
 
     let ui_first = ui.clone();
     let first = Element::button(strings::WIZARD_FIRST_DEVICE)
         .intent(Intent::Primary)
-        .enabled_signal(can_submit)
+        .enabled_when(can_submit)
         .on_click(move |_| {
             let (n, d) = (name.get(), device.get());
             ui_first.act(|m| m.submit_init(&n, &d, InitMode::FirstDevice));
@@ -63,7 +76,7 @@ pub fn wizard(ui: &UiState) -> Element {
     let ui_join = ui.clone();
     let join = Element::button(strings::WIZARD_JOIN_EXISTING)
         .intent(Intent::Neutral)
-        .enabled_signal(can_submit)
+        .enabled_when(can_submit)
         .on_click(move |_| {
             let (n, d) = (name.get(), device.get());
             ui_join.act(|m| m.submit_init(&n, &d, InitMode::JoinExisting));
@@ -77,19 +90,34 @@ pub fn wizard(ui: &UiState) -> Element {
             strings::WIZARD_NAME_LABEL,
             Element::text_input(name, strings::WIZARD_NAME_PLACEHOLDER).autofocus(),
         ))
+        .child(error_hint(strings::WIZARD_NAME_INVALID, name_bad))
         .child(field(
             strings::WIZARD_DEVICE_LABEL,
             Element::text_input(device, strings::WIZARD_DEVICE_PLACEHOLDER),
         ))
+        .child(error_hint(strings::WIZARD_DEVICE_INVALID, device_bad))
         .child(Element::divider())
         .child(choice(first, strings::WIZARD_FIRST_DEVICE_HINT))
         .child(choice(join, strings::WIZARD_JOIN_HINT));
 
     // 加入流程的配对界面由 Task 14 提供；此前只提示用户到已有设备上操作
-    let waiting = Element::label(strings::WIZARD_JOINING)
-        .font_size(14.0)
-        .fg_role(Role::TextMuted)
-        .visible_signal(joining);
+    let ui_back = ui.clone();
+    let waiting = Element::col()
+        .width_match()
+        .spacing(14)
+        .visible_signal(joining)
+        .child(
+            Element::label(strings::WIZARD_JOINING)
+                .font_size(14.0)
+                .fg_role(Role::TextMuted),
+        )
+        .child(
+            Element::button(strings::WIZARD_BACK)
+                .intent(Intent::Neutral)
+                .on_click(move |_| {
+                    ui_back.act(|m| m.wizard_back());
+                }),
+        );
 
     let card = Element::col()
         .width(460)

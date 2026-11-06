@@ -436,6 +436,30 @@ mod tests {
     }
 
     #[test]
+    fn format_time_day_boundaries() {
+        // 2026-03-15 00:00:00 UTC
+        let midnight = 1_773_532_800_000;
+        // 当天 00:00 与 23:59 仍是今天
+        assert_eq!(format_time(midnight, midnight + 12 * H, 0), "00:00");
+        assert_eq!(
+            format_time(midnight + D - 60_000, midnight + D - 1, 0),
+            "23:59"
+        );
+        // 前 1 毫秒属于昨天，次日 00:00 起今天变昨天
+        assert_eq!(format_time(midnight - 1, midnight + 12 * H, 0), "昨天");
+        assert_eq!(format_time(midnight + D - 1, midnight + D, 0), "昨天");
+        assert_eq!(format_time(midnight + D - 1, midnight + D - 1, 0), "23:59");
+        // 负时区（UTC-5）：UTC 03:00 在本地是前一日 22:00
+        let tz = -5 * 3600;
+        assert_eq!(format_time(midnight + 3 * H, midnight + 3 * H, tz), "22:00");
+        assert_eq!(format_time(midnight + 3 * H, midnight + 6 * H, tz), "昨天");
+        // 跨年：12-31 相对 01-01 为昨天，更早为 MM-DD
+        let jan1 = 1_767_225_600_000; // 2026-01-01 00:00:00 UTC
+        assert_eq!(format_time(jan1 - 1, jan1, 0), "昨天");
+        assert_eq!(format_time(jan1 - D - 1, jan1, 0), "12-30");
+    }
+
+    #[test]
     fn unread_badge_cases() {
         assert_eq!(unread_badge(0), None);
         assert_eq!(unread_badge(5), Some("5".to_string()));

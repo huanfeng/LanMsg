@@ -89,6 +89,8 @@ pub struct Model {
     pub init_mode: Option<InitMode>,
     /// 以“加入已有设备”方式完成了 Init，等待配对（Task 14 接管）。
     pub wizard_joining: bool,
+    /// Init 已发出、尚未得到回复（期间禁用向导按钮，防重复提交）。
+    pub init_in_flight: bool,
 }
 
 impl Default for Model {
@@ -130,6 +132,7 @@ impl Model {
             search_results: Vec::new(),
             init_mode: None,
             wizard_joining: false,
+            init_in_flight: false,
         }
     }
 
@@ -150,6 +153,11 @@ impl Model {
                         e.code == ErrorCode::Io && matches!(self.conn, ConnState::Disconnected(_));
                     if !offline_io {
                         self.toast = Some(e.message);
+                    }
+                    if tag == ReplyTag::Init {
+                        // Init 失败：回到可重新提交的状态
+                        self.init_mode = None;
+                        self.init_in_flight = false;
                     }
                     Vec::new()
                 }
@@ -210,11 +218,17 @@ impl Model {
             (ReplyTag::SelfInfo, Response::SelfInfo { value }) => {
                 if !value.initialized {
                     self.page = Page::Wizard;
-                } else if self.page == Page::Wizard {
+                    self.me = Some(value);
+                    return Vec::new();
+                }
+                let mut fx = Vec::new();
+                if self.page == Page::Wizard {
+                    // 向导完成：补拉会话列表（初始化前的拉取可能为空）
                     self.page = Page::Chats;
+                    fx.push(call(Request::ListConversations, ReplyTag::Conversations));
                 }
                 self.me = Some(value);
-                Vec::new()
+                fx
             }
             (ReplyTag::Conversations, Response::Conversations { value }) => {
                 self.convs = value;
@@ -285,7 +299,8 @@ impl Model {
                 }
                 Vec::new()
             }
-            (ReplyTag::Init, _) => {
+            (ReplyTag::Init, Response::Ok) => {
+                self.init_in_flight = false;
                 let mut fx = Vec::new();
                 match self.init_mode.take() {
                     Some(InitMode::FirstDevice) => fx.push(Effect::EnableAutostart),
@@ -491,8 +506,16 @@ impl Model {
         device_name: &str,
         mode: InitMode,
     ) -> Vec<Effect> {
+        if self.init_in_flight {
+            return Vec::new();
+        }
         if !wizard_name_ok(display_name) {
             self.toast = Some(strings::WIZARD_NAME_INVALID.to_string());
+            return Vec::new();
+        }
+        // 设备名留空用默认值；非空则同样限 1–32 个字符
+        if !device_name.trim().is_empty() && !wizard_name_ok(device_name) {
+            self.toast = Some(strings::WIZARD_DEVICE_INVALID.to_string());
             return Vec::new();
         }
         let device = device_name.trim();
@@ -502,6 +525,7 @@ impl Model {
             device
         };
         self.init_mode = Some(mode.clone());
+        self.init_in_flight = true;
         vec![call(
             Request::Init {
                 display_name: display_name.trim().to_string(),
@@ -510,6 +534,13 @@ impl Model {
             },
             ReplyTag::Init,
         )]
+    }
+
+    /// 加入等待界面点“返回”：回到填写表单。
+    pub fn wizard_back(&mut self) -> Vec<Effect> {
+        self.wizard_joining = false;
+        self.init_mode = None;
+        Vec::new()
     }
 
     /// 会话列表的展示顺序：“我的设备”置顶，其余保持 `convs` 的时间降序。
@@ -1129,6 +1160,88 @@ mod tests {
         assert!(!fx.contains(&Effect::EnableAutostart));
         assert!(has(&fx, |r| matches!(r, Request::GetSelf)));
         assert!(m.wizard_joining);
+    }
+
+    #[test]
+    fn wizard_back_returns_to_form() {
+        let mut m = Model::new();
+        m.submit_init("小李", "pc", InitMode::JoinExisting);
+        m.apply(reply(ReplyTag::Init, Response::Ok));
+        assert!(m.wizard_joining);
+        let fx = m.wizard_back();
+        assert!(fx.is_empty());
+        assert!(!m.wizard_joining);
+        assert_eq!(m.init_mode, None);
+    }
+
+    #[test]
+    fn init_error_reply_clears_state_without_autostart() {
+        for mode in [InitMode::FirstDevice, InitMode::JoinExisting] {
+            let mut m = Model::new();
+            m.submit_init("小李", "pc", mode);
+            let fx = m.apply(UiMsg::Reply {
+                tag: ReplyTag::Init,
+                result: Err(ApiError {
+                    code: ErrorCode::Io,
+                    message: "初始化失败".into(),
+                }),
+            });
+            assert!(fx.is_empty());
+            assert!(!m.wizard_joining);
+            assert!(!m.init_in_flight);
+            assert_eq!(m.init_mode, None);
+            assert_eq!(m.toast.as_deref(), Some("初始化失败"));
+        }
+    }
+
+    #[test]
+    fn init_in_flight_blocks_duplicate_submit_until_reply() {
+        let mut m = Model::new();
+        assert_eq!(m.submit_init("小李", "pc", InitMode::FirstDevice).len(), 1);
+        assert!(m.init_in_flight);
+        assert!(m
+            .submit_init("小李", "pc", InitMode::FirstDevice)
+            .is_empty());
+        m.apply(reply(ReplyTag::Init, Response::Ok));
+        assert!(!m.init_in_flight);
+        assert_eq!(m.submit_init("小李", "pc", InitMode::FirstDevice).len(), 1);
+    }
+
+    #[test]
+    fn submit_init_rejects_too_long_device_name() {
+        let mut m = Model::new();
+        let fx = m.submit_init("小李", &"长".repeat(33), InitMode::FirstDevice);
+        assert!(fx.is_empty());
+        assert!(!m.init_in_flight);
+        assert_eq!(m.toast.as_deref(), Some(strings::WIZARD_DEVICE_INVALID));
+    }
+
+    #[test]
+    fn wizard_to_chats_requests_conversations() {
+        let mut m = Model::new();
+        m.apply(reply(
+            ReplyTag::SelfInfo,
+            Response::SelfInfo {
+                value: self_info(false),
+            },
+        ));
+        assert_eq!(m.page, Page::Wizard);
+        let fx = m.apply(reply(
+            ReplyTag::SelfInfo,
+            Response::SelfInfo {
+                value: self_info(true),
+            },
+        ));
+        assert_eq!(m.page, Page::Chats);
+        assert!(has(&fx, |r| matches!(r, Request::ListConversations)));
+        // 已在会话页时再收到 SelfInfo 不重复拉取
+        let fx = m.apply(reply(
+            ReplyTag::SelfInfo,
+            Response::SelfInfo {
+                value: self_info(true),
+            },
+        ));
+        assert!(fx.is_empty());
     }
 
     #[test]
