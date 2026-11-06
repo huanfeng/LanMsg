@@ -1,0 +1,50 @@
+package name.apk.lanmsg.core
+
+import android.content.Context
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringSetPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+
+private val Context.dataStore by preferencesDataStore(name = "lanmsg_local")
+
+/** 只属于本机、不进 core 的偏好（免打扰、相册保存、可信 Wi-Fi、通知开关）。 */
+class LocalPrefs(ctx: Context) {
+    private val store = ctx.applicationContext.dataStore
+
+    val mutedConversations: Flow<Set<String>> = store.data.map { it[MUTED] ?: emptySet() }
+
+    suspend fun setMuted(conv: String, muted: Boolean) {
+        store.edit { p ->
+            val cur = p[MUTED] ?: emptySet()
+            p[MUTED] = if (muted) cur + conv else cur - conv
+        }
+    }
+
+    val saveMediaToGallery: Flow<Boolean> = store.data.map { it[SAVE_GALLERY] ?: true }
+
+    suspend fun setSaveMediaToGallery(v: Boolean) {
+        store.edit { it[SAVE_GALLERY] = v }
+    }
+
+    val trustedWifi: Flow<Set<String>> = store.data.map { it[TRUSTED_WIFI] ?: emptySet() }
+
+    suspend fun setTrustedWifi(ssids: Set<String>) {
+        store.edit { it[TRUSTED_WIFI] = ssids }
+    }
+
+    val notificationsEnabled: Flow<Boolean> = store.data.map { it[NOTIFY] ?: true }
+
+    suspend fun setNotificationsEnabled(v: Boolean) {
+        store.edit { it[NOTIFY] = v }
+    }
+
+    private companion object {
+        val MUTED = stringSetPreferencesKey("muted_conversations")
+        val SAVE_GALLERY = booleanPreferencesKey("save_media_to_gallery")
+        val TRUSTED_WIFI = stringSetPreferencesKey("trusted_wifi")
+        val NOTIFY = booleanPreferencesKey("notifications_enabled")
+    }
+}

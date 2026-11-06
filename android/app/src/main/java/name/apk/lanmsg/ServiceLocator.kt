@@ -2,11 +2,15 @@ package name.apk.lanmsg
 
 import android.app.Application
 import android.content.Context
+import name.apk.lanmsg.core.CoreApi
+import name.apk.lanmsg.core.FfiCoreApi
+import name.apk.lanmsg.core.LocalPrefs
 
 object ServiceLocator {
     lateinit var app: Application
 
-    // 骨架阶段的占位：返回类型暂为 Any，Task 3 引入 CoreApi 后改为 (Context) -> CoreApi，
-    // 默认值改为 FfiCoreApi.create；测试中替换为 Fake。
-    var coreFactory: (Context) -> Any = { throw IllegalStateException("core 未就绪") }
+    /** 测试中替换为 FakeCoreApi 工厂，Robolectric 下不得加载本地库。 */
+    var coreFactory: (Context) -> CoreApi = { FfiCoreApi.create(it) }
+
+    val localPrefs: LocalPrefs by lazy { LocalPrefs(app) }
 }
