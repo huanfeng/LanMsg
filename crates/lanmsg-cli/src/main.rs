@@ -293,7 +293,13 @@ async fn main() -> Result<()> {
                 match tokio::time::timeout(Duration::from_secs(3600), rx.recv()).await {
                     Ok(Ok(e)) => println!("{}", serde_json::to_string(&e)?),
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
-                    _ => break,
+                    // 事件流关闭 = 后台服务已断开：以非零码退出，脚本才能区分于超时正常结束
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        eprintln!("后台服务已断开");
+                        exit(WATCH_DISCONNECTED_EXIT);
+                    }
+                    // 一小时无事件：正常结束
+                    Err(_) => break,
                 }
             }
         }
@@ -659,6 +665,9 @@ fn blob_state_str(s: &BlobState) -> &'static str {
     }
 }
 
+/// `watch` 因后台服务断开（事件流关闭）而退出的退出码；超时正常结束为 0。
+const WATCH_DISCONNECTED_EXIT: i32 = 2;
+
 /// 打印设置。
 fn print_settings(s: &SettingsDto) {
     println!("device_name: {}", s.device_name);
@@ -720,7 +729,8 @@ async fn watch_pair_status(mut rx: EventRx, session: &str) {
     }
 }
 
-/// 打印任意 PairStatus 直至 Done/Failed（PairJoin 后无 session 时使用）。
+/// 打印任意会话的 PairStatus 直至 Done/Failed（不按 session 过滤；
+/// 加入方同一时刻只有一个配对在进行，PairJoin 用它等待结果）。
 async fn watch_pair_any(mut rx: EventRx) {
     loop {
         match rx.recv().await {
