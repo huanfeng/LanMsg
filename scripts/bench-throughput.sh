@@ -23,8 +23,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN_D="$ROOT/target/debug/lanmsgd"
-BIN_CLI="$ROOT/target/debug/lanmsg-cli"
+BIN_DIR="${LANMSG_BIN_DIR:-$ROOT/target/debug}"  # 可用 LANMSG_BIN_DIR 覆盖二进制目录
+BIN_D="$BIN_DIR/lanmsgd"
+BIN_CLI="$BIN_DIR/lanmsg-cli"
 
 print_result() {
     # $1 = 平均速度 MB/s

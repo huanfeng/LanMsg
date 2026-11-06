@@ -10,8 +10,9 @@ DIR_B="$ROOT/b"
 PORT_A=53330
 PORT_B=53331
 
-BIN_A="$(dirname "$0")/../target/debug/lanmsgd"
-BIN_CLI="$(dirname "$0")/../target/debug/lanmsg-cli"
+BIN_DIR="${LANMSG_BIN_DIR:-$(dirname "$0")/../target/debug}"  # 可用 LANMSG_BIN_DIR 覆盖二进制目录
+BIN_A="$BIN_DIR/lanmsgd"
+BIN_CLI="$BIN_DIR/lanmsg-cli"
 
 cleanup() {
     cli_a shutdown >/dev/null 2>&1 || true

@@ -18,8 +18,9 @@ set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 REPO="${REPO:-$(cd "$(dirname "$SELF")/.." && pwd)}"
-BIN_D="$REPO/target/debug/lanmsgd"
-BIN_CLI="$REPO/target/debug/lanmsg-cli"
+BIN_DIR="${LANMSG_BIN_DIR:-$REPO/target/debug}"  # 可用 LANMSG_BIN_DIR 覆盖二进制目录
+BIN_D="$BIN_DIR/lanmsgd"
+BIN_CLI="$BIN_DIR/lanmsg-cli"
 
 ALL_SCENARIOS=(text_chat pair_qr pair_profile pair_sas offline_catchup sibling_dm_sync stranger_request file_transfer folder_transfer file_resume revoke recall_read bench_local)
 
