@@ -4,6 +4,8 @@ pub mod error;
 pub mod hlc;
 pub mod identity;
 pub mod keystore;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod keystore_os;
 pub mod msg;
 pub mod net;
 pub mod pairing;

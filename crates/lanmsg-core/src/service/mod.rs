@@ -9,7 +9,7 @@ pub mod views;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::SystemTime;
 
 use tokio::sync::{broadcast, mpsc, watch};
@@ -83,6 +83,8 @@ pub(crate) struct Inner {
     pub(crate) transfer: Arc<crate::blob::transfer::TransferEngine>,
     /// 平台钩子：自动下载策略查询网络状态（P2 Task 13）。
     pub(crate) platform: PlatformHooks,
+    /// 界面当前正在看的会话（SetUiFocus 设置，只存内存不落库）。
+    pub(crate) ui_focus: StdMutex<Option<ConvId>>,
 }
 
 /// 核心服务（C6）。内部状态由 Arc 持有，Clone 廉价。
@@ -278,6 +280,7 @@ impl Service {
             blob,
             transfer,
             platform,
+            ui_focus: StdMutex::new(None),
         });
         let svc = Service {
             inner: inner.clone(),
@@ -349,6 +352,16 @@ impl Service {
     #[doc(hidden)]
     pub fn store_for_test(&self) -> Arc<Store> {
         self.inner.store.clone()
+    }
+
+    /// 界面当前正在看的会话（SetUiFocus 设置的值），供 lanmsgd 判断是否弹通知。
+    pub fn ui_focus(&self) -> Option<ConvId> {
+        // 锁中毒时取内部值：该值只是 Copy 的 Option，不存在半更新状态。
+        *self
+            .inner
+            .ui_focus
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// 实际监听地址（测试用）。

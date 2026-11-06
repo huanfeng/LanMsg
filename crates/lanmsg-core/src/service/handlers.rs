@@ -71,6 +71,12 @@ pub(crate) async fn handle(inner: &Inner, req: Request) -> Result<Response, ApiE
         Request::PairJoin { target } => pair_join(inner, target).await,
         Request::PairConfirm { session, matches } => pair_confirm(inner, session, matches).await,
         Request::PairCancel { session } => pair_cancel(inner, session).await,
+        Request::SetUiFocus { conv } => {
+            // 先解析再赋值：非法输入不改变现有焦点。
+            let conv = conv.as_deref().map(parse_conv).transpose()?;
+            *inner.ui_focus.lock().unwrap_or_else(|e| e.into_inner()) = conv;
+            Ok(Response::Ok)
+        }
         Request::Shutdown => {
             inner.discovery.shutdown();
             inner.conns.shutdown().await;
