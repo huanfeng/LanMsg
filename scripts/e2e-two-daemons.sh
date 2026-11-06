@@ -25,9 +25,9 @@ cli_b() { XDG_RUNTIME_DIR="$DIR_B/run" "$BIN_CLI" --data-dir "$DIR_B" "$@"; }
 trap cleanup EXIT
 
 # 启动两个守护进程（A 无对端；B 静态指向 A），各自隔离 XDG 端点。
-XDG_RUNTIME_DIR="$DIR_A/run" "$BIN_A" --no-multicast --port "$PORT_A" --data-dir "$DIR_A" &
+XDG_RUNTIME_DIR="$DIR_A/run" "$BIN_A" --headless --no-multicast --port "$PORT_A" --data-dir "$DIR_A" &
 PID_A=$!
-XDG_RUNTIME_DIR="$DIR_B/run" "$BIN_A" --no-multicast --port "$PORT_B" --data-dir "$DIR_B" --peer "127.0.0.1:$PORT_A" &
+XDG_RUNTIME_DIR="$DIR_B/run" "$BIN_A" --headless --no-multicast --port "$PORT_B" --data-dir "$DIR_B" --peer "127.0.0.1:$PORT_A" &
 PID_B=$!
 
 # 等待 A 的 IPC 就绪。

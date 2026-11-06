@@ -1,5 +1,5 @@
 // lanmsgd 守护进程入口（P1 Task 12；P3 Task 8 起线程模型见 runtime.rs）。
-// 无头时阻塞等待 Ctrl-C / Request::Shutdown；有图形会话时由 Task 9 接入托盘。
+// 无头时阻塞等待 Ctrl-C / SIGTERM / Request::Shutdown；有图形会话时走托盘（tray.rs）。
 // 注释中文，标识符英文。
 
 use std::io::Write;
@@ -13,8 +13,11 @@ use tracing_subscriber::fmt::writer::MakeWriter;
 use lanmsg_proto::consts::SERVICE_PORT;
 
 mod ipc_server;
+mod launch;
+mod notify;
 mod runtime;
 mod thumbnailer;
+mod tray;
 
 /// 同时写 stdout 与日志文件的 tracing writer。
 struct MakeTee(Arc<Mutex<std::fs::File>>);
@@ -114,8 +117,9 @@ fn run() -> Result<()> {
     let env = |k: &str| std::env::var(k).ok();
     if runtime::is_headless(&env, args.headless) {
         tracing::info!("无头模式运行");
+        rt.block_until_shutdown();
+    } else {
+        tray::run_tray(rt, data_dir);
     }
-    // Task 9 在此接入 tray::run_tray(rt, data_dir)；目前无论是否无头都阻塞等待退出。
-    rt.block_until_shutdown();
     Ok(())
 }

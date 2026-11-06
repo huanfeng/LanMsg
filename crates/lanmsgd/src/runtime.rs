@@ -37,6 +37,10 @@ impl std::error::Error for AlreadyRunning {}
 pub struct DaemonRuntime {
     pub service: Service,
     rt: tokio::runtime::Runtime,
+    /// 退出通知：IPC `Shutdown`、信号或托盘退出时置 true。
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// IPC 接入循环任务；退出时等它结束以便监听器 Drop 清理 socket。
+    accept_task: tokio::task::JoinHandle<()>,
 }
 
 /// 建 tokio 运行时、启动 Service 与 IPC 服务；返回时 IPC 已可用。
@@ -49,7 +53,8 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
         .build()
         .context("创建 tokio 运行时失败")?;
 
-    let service = rt.block_on(async {
+    let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+    let (service, accept_task) = rt.block_on(async {
         // 先占 IPC 端点：已有实例在运行时尽早退出，不去动数据库与端口。
         let endpoint = endpoint_name(&data_dir);
         let listener = match IpcListener::bind(&endpoint) {
@@ -83,18 +88,28 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
 
         // IPC 接入循环。
         let svc = service.clone();
-        tokio::spawn(async move {
+        let tx = shutdown_tx.clone();
+        let mut stop = shutdown_tx.subscribe();
+        let accept_task = tokio::spawn(async move {
             loop {
-                match listener.accept().await {
-                    Ok(stream) => {
-                        tokio::spawn(ipc_server::serve_connection(svc.clone(), stream));
-                    }
-                    Err(e) => {
-                        tracing::warn!("IPC accept 失败: {e}");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
+                tokio::select! {
+                    _ = async { let _ = stop.wait_for(|v| *v).await; } => break,
+                    res = listener.accept() => match res {
+                        Ok(stream) => {
+                            tokio::spawn(ipc_server::serve_connection(
+                                svc.clone(),
+                                stream,
+                                tx.clone(),
+                            ));
+                        }
+                        Err(e) => {
+                            tracing::warn!("IPC accept 失败: {e}");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    },
                 }
             }
+            // listener 在此 Drop，Unix 下清理 socket 文件。
         });
 
         // 缩略图缓存清理：启动一次，之后每小时一次。
@@ -116,29 +131,49 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
             }
         });
 
-        Ok(service)
+        Ok((service, accept_task))
     })?;
 
-    Ok(DaemonRuntime { service, rt })
+    Ok(DaemonRuntime {
+        service,
+        rt,
+        shutdown_tx,
+        accept_task,
+    })
 }
 
 impl DaemonRuntime {
-    /// 阻塞当前线程直到收到 Ctrl-C，然后关闭服务。
-    /// （`Request::Shutdown` 由 IPC 层直接关闭服务并退出进程。）
+    /// 阻塞当前线程直到收到 Ctrl-C / SIGTERM（Unix）/ `Request::Shutdown`，然后关闭服务。
+    /// 返回后 IPC 监听器已 Drop（socket 文件被清理）。
     pub fn block_until_shutdown(self) {
         let service = self.service.clone();
+        let tx = self.shutdown_tx.clone();
+        let mut rx = self.shutdown_tx.subscribe();
         self.rt.block_on(async move {
-            if let Err(e) = tokio::signal::ctrl_c().await {
-                tracing::warn!("监听 Ctrl-C 失败: {e}");
-                // 无法监听信号时不退出，继续常驻服务。
-                std::future::pending::<()>().await;
+            tokio::select! {
+                _ = wait_signal() => {}
+                _ = async { let _ = rx.wait_for(|v| *v).await; } => {}
             }
+            tx.send_replace(true);
             service.shutdown().await;
         });
-        self.rt.shutdown_background();
+        self.finish();
     }
 
-    #[allow(dead_code)] // 供 Task 9 的托盘模块使用，接入前主流程尚未调用。
+    /// tokio 运行时句柄：界面线程用 `handle.block_on` 调用 `Service::handle`。
+    pub fn handle(&self) -> tokio::runtime::Handle {
+        self.rt.handle().clone()
+    }
+
+    /// 退出通知触发时在运行时线程上执行一次 `f`（托盘据此经 channel 回界面线程退出）。
+    pub fn on_shutdown(&self, f: impl FnOnce() + Send + 'static) {
+        let mut rx = self.shutdown_tx.subscribe();
+        self.rt.spawn(async move {
+            let _ = rx.wait_for(|v| *v).await;
+            f();
+        });
+    }
+
     /// 把核心事件转发给回调（在运行时线程上调用 `f`，回调需自行跨线程投递到界面线程）。
     pub fn spawn_event_forwarder(&self, f: impl Fn(lanmsg_api::Event) + Send + 'static) {
         let mut events = self.service.subscribe();
@@ -153,12 +188,45 @@ impl DaemonRuntime {
         });
     }
 
-    #[allow(dead_code)] // 供 Task 9 的托盘模块使用，接入前主流程尚未调用。
-    /// 关闭服务并停止运行时（界面主动退出时使用）。
+    /// 关闭服务并停止运行时（托盘退出后使用）。
     pub fn shutdown(self) {
         let service = self.service.clone();
+        self.shutdown_tx.send_replace(true);
         self.rt.block_on(async move { service.shutdown().await });
+        self.finish();
+    }
+
+    /// 等 IPC 接入循环结束（监听器 Drop），再停运行时。
+    fn finish(self) {
+        let _ = self.rt.block_on(self.accept_task);
         self.rt.shutdown_background();
+    }
+}
+
+/// 等待进程终止信号：Ctrl-C，Unix 另含 SIGTERM。监听失败时永不返回（继续常驻）。
+async fn wait_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    r = tokio::signal::ctrl_c() => {
+                        if let Err(e) = r {
+                            tracing::warn!("监听 Ctrl-C 失败: {e}");
+                            term.recv().await;
+                        }
+                    }
+                    _ = term.recv() => {}
+                }
+                return;
+            }
+            Err(e) => tracing::warn!("监听 SIGTERM 失败: {e}"),
+        }
+    }
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        tracing::warn!("监听 Ctrl-C 失败: {e}");
+        std::future::pending::<()>().await;
     }
 }
 

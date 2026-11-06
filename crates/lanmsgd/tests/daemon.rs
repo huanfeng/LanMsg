@@ -344,3 +344,54 @@ async fn two_daemons_transfer_file_via_cli_flow() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), a.wait()).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), b.wait()).await;
 }
+
+/// 收到 IPC Shutdown 后进程正常退出（码 0），且 Unix socket 文件由 Drop 清理。
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_request_removes_socket_file() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    isolate_runtime_dir(&dir);
+    let mut child = spawn_daemon(&dir);
+    let client = connect_with_retry(&dir).await;
+    let sock = std::path::PathBuf::from(endpoint_name(dir.path()));
+    assert!(sock.exists(), "运行中 socket 文件应存在");
+
+    client.call(Request::Shutdown).await.unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("子进程未在 5 秒内退出")
+        .expect("等待子进程失败");
+    assert!(status.success(), "退出码应为 0，实际 {status}");
+    assert!(
+        !sock.exists(),
+        "退出后 socket 文件应被清理: {}",
+        sock.display()
+    );
+}
+
+/// 收到 SIGTERM 后优雅关闭：进程退出且 socket 文件被清理。
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_shuts_down_gracefully_and_removes_socket() {
+    let _serial = SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    isolate_runtime_dir(&dir);
+    let mut child = spawn_daemon(&dir);
+    let _client = connect_with_retry(&dir).await;
+    let sock = std::path::PathBuf::from(endpoint_name(dir.path()));
+    assert!(sock.exists(), "运行中 socket 文件应存在");
+
+    let pid = child.id().expect("子进程应有 pid");
+    let st = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("执行 kill 失败");
+    assert!(st.success());
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("子进程未在 5 秒内退出")
+        .expect("等待子进程失败");
+    assert!(status.success(), "优雅关闭退出码应为 0，实际 {status}");
+    assert!(!sock.exists(), "退出后 socket 文件应被清理");
+}

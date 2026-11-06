@@ -13,8 +13,13 @@ use lanmsg_api::types::{ApiResponse, IpcFrame, Request};
 use lanmsg_core::Service;
 
 /// 服务单个 IPC 连接：转发事件 + 处理请求。
-/// 收到 `Request::Shutdown` 时执行 `service.shutdown()` 并退出进程（0）。
-pub(crate) async fn serve_connection(service: Service, stream: IpcStream) {
+/// 收到 `Request::Shutdown` 时执行 `service.shutdown()`，再经 `shutdown_tx` 通知主线程退出
+/// （不直接 `exit`：让 Drop 清理 IPC socket、托盘正常退出）。
+pub(crate) async fn serve_connection(
+    service: Service,
+    stream: IpcStream,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+) {
     let mut events = service.subscribe();
     let (sink, mut source) = Framed::new(stream, IpcCodec).split();
     // sink 由事件任务与请求循环共享（发送互斥，保证帧完整）。
@@ -59,8 +64,9 @@ pub(crate) async fn serve_connection(service: Service, stream: IpcStream) {
         if is_shutdown {
             ev_task.abort();
             service.shutdown().await;
-            tracing::info!("收到 Shutdown 请求，进程退出");
-            std::process::exit(0);
+            tracing::info!("收到 Shutdown 请求，通知主线程退出");
+            shutdown_tx.send_replace(true);
+            return;
         }
     }
     ev_task.abort();
