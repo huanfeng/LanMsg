@@ -162,6 +162,7 @@
 | msg_unsupported | 不支持的消息类型，请升级 LanMsg |
 | msg_resend | 重新发送 |
 | time_yesterday | 昨天 %1$s |
+| time_month_day | M月d日 |
 | file_not_downloaded | 未下载 |
 | file_source_offline | 源设备离线 |
 | file_preparing | 准备中 |
@@ -210,6 +211,7 @@
 | devices_remove | 移除此设备 |
 | devices_remove_confirm | 移除后，这台设备将无法再收发你的消息。确定移除“%1$s”吗？ |
 | pair_host_title | 添加我的设备 |
+| pair_qr_desc | 配对二维码 |
 | pair_host_hint | 在另一台设备上打开 LanMsg，选择“加入我已有的设备”并扫描此二维码 |
 | pair_use_sas | 改用数字比对 |
 | pair_sas_hint | 请确认两台设备上显示的数字一致 |

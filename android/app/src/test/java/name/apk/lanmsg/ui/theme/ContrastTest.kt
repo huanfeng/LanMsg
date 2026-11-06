@@ -60,6 +60,15 @@ class ContrastTest {
         assertTrue(fails.toString(), fails.isEmpty())
     }
 
+    @Test fun signal_text_on_signal_soft() {
+        val fails = mutableListOf<String>()
+        for ((n, t) in themes) {
+            val r = contrast(t.signal, t.signalSoft)
+            if (r < 4.5) fails += "$n signal x signal_soft = $r"
+        }
+        assertTrue(fails.toString(), fails.isEmpty())
+    }
+
     @Test fun white_on_light_danger_fill_and_avatars() {
         assertTrue(contrast(LightTokens.onFill, LightTokens.danger) >= 4.5)
         for (c in AvatarPalette) assertTrue("$c", contrast(Color.White, c) >= 4.5)

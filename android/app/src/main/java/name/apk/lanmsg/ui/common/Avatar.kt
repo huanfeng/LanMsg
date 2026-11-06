@@ -1,7 +1,6 @@
 package name.apk.lanmsg.ui.common
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -28,10 +27,13 @@ fun Avatar(name: String, userIdHex: String, size: Dp = 40.dp, online: Boolean = 
             Text(initial, color = c.onFill, fontSize = (size.value * 0.42f).sp)
         }
         if (online) {
-            StatusDot(
-                online = true,
-                modifier = Modifier.align(Alignment.BottomEnd).border(1.5.dp, c.surface, CircleShape),
-            )
+            // 外圈 8dp + 2×1.5dp 描边 = 11dp：可见圆点保持 8dp，描边在其外侧
+            Box(
+                Modifier.align(Alignment.BottomEnd).size(11.dp).background(c.surface, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                StatusDot(online = true)
+            }
         }
     }
 }

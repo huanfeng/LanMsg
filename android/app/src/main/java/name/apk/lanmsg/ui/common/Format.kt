@@ -9,16 +9,18 @@ import java.util.Locale
 object Format {
     private val hhmm = DateTimeFormatter.ofPattern("HH:mm")
 
-    // "M月d日"；中文用 Unicode 转义，避免 Kotlin 代码里出现中文字面量。
-    private val monthDay = DateTimeFormatter.ofPattern("M月d日")
     private val full = DateTimeFormatter.ofPattern("yyyy/M/d")
 
-    /** 今天 HH:mm；昨天由 [yesterday] 拼接（来自 time_yesterday）；今年 M月d日；更早 yyyy/M/d。 */
+    /**
+     * 今天 HH:mm；昨天由 [yesterday] 拼接（来自 time_yesterday）；今年用 [monthDay] 模式；更早 yyyy/M/d。
+     * [monthDay] 的默认值只给测试与无 Context 场景兜底；界面调用方必须传 stringResource(R.string.time_month_day)。
+     */
     fun time(
         millis: Long,
         now: Long,
         zone: ZoneId = ZoneId.systemDefault(),
         yesterday: (String) -> String,
+        monthDay: String = "M月d日",
     ): String {
         val t = Instant.ofEpochMilli(millis).atZone(zone)
         val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
@@ -26,7 +28,7 @@ object Format {
         return when {
             day == today -> hhmm.format(t)
             day == today.minusDays(1) -> yesterday(hhmm.format(t))
-            day.year == today.year -> monthDay.format(t)
+            day.year == today.year -> DateTimeFormatter.ofPattern(monthDay).format(t)
             else -> full.format(t)
         }
     }

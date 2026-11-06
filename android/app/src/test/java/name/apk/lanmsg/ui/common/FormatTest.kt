@@ -18,6 +18,11 @@ class FormatTest {
         assertEquals("2025/12/31", Format.time(ms("2025-12-31T10:00:00"), now, zone, y))
     }
 
+    @Test fun time_month_day_pattern_is_injectable() {
+        val now = ms("2026-10-28T15:00:00")
+        assertEquals("03-01", Format.time(ms("2026-03-01T10:00:00"), now, zone, y, "MM-dd"))
+    }
+
     @Test fun size_units() {
         assertEquals("512 B", Format.size(512)); assertEquals("1 KB", Format.size(1024))
         assertEquals("1.5 MB", Format.size(1572864)); assertEquals("2 GB", Format.size(2L shl 30))

@@ -10,8 +10,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import name.apk.lanmsg.R
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
@@ -39,8 +41,9 @@ object QrEncoder {
 
 @Composable
 fun QrImage(text: String, size: Dp = 240.dp) {
+    val desc = stringResource(R.string.pair_qr_desc)
     val px = with(LocalDensity.current) { size.roundToPx() }
     val bitmap = remember(text, px) { QrEncoder.encode(text, px).asImageBitmap() }
     // 白色底板保证暗色主题下也能扫
-    Image(bitmap, contentDescription = null, modifier = Modifier.size(size).background(Color.White))
+    Image(bitmap, contentDescription = desc, modifier = Modifier.size(size).background(Color.White))
 }
