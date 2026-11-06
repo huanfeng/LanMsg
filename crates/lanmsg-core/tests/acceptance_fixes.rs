@@ -99,3 +99,103 @@ async fn online_sibling_receives_third_party_dm_in_realtime() {
     )
     .await;
 }
+
+/// 递归收集目录下所有文件的 (相对路径, 内容)，按路径排序。
+fn collect_tree(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(base, &p, out);
+            } else {
+                let rel = p
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// 缺陷 2：含两级子目录的文件夹下载后，落地为
+/// `<下载目录>/<会话标题>/<文件夹名>/<相对路径>`，结构与内容完全一致。
+#[tokio::test]
+async fn folder_download_preserves_structure() {
+    use lanmsg_api::types::BlobState;
+
+    let mut a = node_offline().await;
+    a.init_first("A").await;
+    let mut x = node_offline().await;
+    x.init_first("X").await;
+    befriend(&mut a, &mut x).await;
+
+    let src = tempfile::tempdir().unwrap();
+    let root = src.path().join("项目目录");
+    std::fs::create_dir_all(root.join("sub/deep")).unwrap();
+    std::fs::write(root.join("top.txt"), b"top").unwrap();
+    std::fs::write(root.join("sub/s1.bin"), vec![1u8; 4096]).unwrap();
+    std::fs::write(root.join("sub/deep/d1.bin"), vec![2u8; 8192]).unwrap();
+    std::fs::write(root.join("sub/deep/d2.bin"), vec![3u8; 100]).unwrap();
+
+    let dl = tempfile::tempdir().unwrap();
+    let Response::Settings { mut value } = x.call(Request::GetSettings).await else {
+        panic!("期望 Settings")
+    };
+    value.download_dir = dl.path().to_string_lossy().into_owned();
+    x.call(Request::SetSettings { settings: value }).await;
+
+    let conv = match a.call(Request::OpenDm { user: x.user_id() }).await {
+        Response::ConvId { value } => value,
+        other => panic!("期望 ConvId，实际 {other:?}"),
+    };
+    a.call(Request::SendFolder {
+        conv: conv.clone(),
+        path: root.to_string_lossy().into_owned(),
+    })
+    .await;
+
+    // X 收到 4 个条目后逐个下载（已自动下载的忽略错误），等全部落地。
+    wait_until(
+        || async {
+            let Ok(Response::Messages { value }) = x
+                .try_call(Request::ListMessages {
+                    conv: conv.clone(),
+                    before: None,
+                    limit: 50,
+                })
+                .await
+            else {
+                return false;
+            };
+            for m in value {
+                if let MessageBodyView::Folder { items, .. } = m.body {
+                    if items.len() != 4 {
+                        return false;
+                    }
+                    for it in &items {
+                        if it.state != BlobState::Local {
+                            let _ = x
+                                .try_call(Request::DownloadBlob {
+                                    hash: it.hash.clone(),
+                                })
+                                .await;
+                        }
+                    }
+                    return items.iter().all(|it| it.state == BlobState::Local);
+                }
+            }
+            false
+        },
+        20,
+    )
+    .await;
+
+    let got = collect_tree(&dl.path().join("A").join("项目目录"));
+    assert_eq!(got, collect_tree(&root), "落地结构应与源文件夹一致");
+}

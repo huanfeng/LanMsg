@@ -30,7 +30,7 @@ use lanmsg_proto::consts::{
 use lanmsg_proto::data::{read_data_frame, write_data_frame, DataFrame};
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{BlobHash, ConvId, DeviceId};
-use lanmsg_proto::types::{BlobHave, BlobMeta, BlobQuery, PathClass};
+use lanmsg_proto::types::{BlobHave, BlobMeta, BlobQuery, MsgBody, PathClass};
 
 use crate::blob::hash::hash_file;
 use crate::error::CoreError;
@@ -148,7 +148,24 @@ impl TransferEngine {
         };
         let settings = load_settings(&self.store)?;
         let title = self.conv_title(&mb.conv);
-        let dest = self.dest_path_for(&settings, &title, &mb.meta.name, mb.rel_path.as_deref());
+        // 文件夹条目：wire/库中的 rel_path 是含文件名的条目路径（相对文件夹根），
+        // 落地目录 = <文件夹名>/<条目所在子目录>（文件名由 dest_path_for 追加）。
+        let rel_dir = match mb.rel_path.as_deref() {
+            Some(rel) => {
+                let folder_name = match self.store.get_message(&mb.msg)?.map(|m| m.env.body) {
+                    Some(MsgBody::Folder { name, .. }) => name,
+                    _ => String::new(),
+                };
+                let sub = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
+                Some(if sub.is_empty() {
+                    folder_name
+                } else {
+                    format!("{folder_name}/{sub}")
+                })
+            }
+            None => None,
+        };
+        let dest = self.dest_path_for(&settings, &title, &mb.meta.name, rel_dir.as_deref());
         let mut part = dest.clone().into_os_string();
         part.push(".part");
         let row = TransferRow {
