@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="primary">#5B8FF9</color>
+    <!-- 仅供窗口背景使用（避免启动闪白），与 canvas 令牌一致；界面颜色走 ui/theme/Color.kt -->
+    <color name="window_background">#F4F6F7</color>
 </resources>
