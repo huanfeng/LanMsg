@@ -67,6 +67,15 @@ async fn settings_roundtrip_and_device_rename_reissues_cert() {
     assert!(!s.download_dir.is_empty());
     assert!(!s.device_name.is_empty());
 
+    // 非法设备名（超长）→ InvalidArgument。
+    let mut bad = s.clone();
+    bad.device_name = "x".repeat(33);
+    let err = a
+        .try_call(Request::SetSettings { settings: bad })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+
     // SetSettings 改设备名。
     let mut s2 = s.clone();
     s2.device_name = "新名字".into();
@@ -125,6 +134,15 @@ async fn set_profile_rejects_empty_and_updates_peers() {
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
+
+    // 过长或含控制字符的显示名同样拒绝。
+    for bad in ["字".repeat(33), "a\nb".to_string()] {
+        let err = a
+            .try_call(Request::SetProfile { display_name: bad })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
 
     // 改显示名。
     a.call(Request::SetProfile {

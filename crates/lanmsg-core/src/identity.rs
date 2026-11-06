@@ -9,6 +9,34 @@ use lanmsg_proto::ids::{ConvId, DeviceId, UserId};
 use lanmsg_proto::sign::{DeviceKey, UserKey};
 use lanmsg_proto::types::{DeviceCert, DeviceType};
 
+/// 校验名称：trim 后 1..=max 个字符且无控制字符，返回 trim 后的值。
+fn validate_name(raw: &str, what: &str, max: usize) -> Result<String, CoreError> {
+    let name = raw.trim();
+    let n = name.chars().count();
+    if n == 0 {
+        return Err(CoreError::InvalidArgument(format!("{what}不能为空")));
+    }
+    if n > max {
+        return Err(CoreError::InvalidArgument(format!(
+            "{what}不能超过 {max} 个字符"
+        )));
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err(CoreError::InvalidArgument(format!("{what}含有控制字符")));
+    }
+    Ok(name.to_string())
+}
+
+/// 校验用户显示名（C 约束：1–32 字符、无控制字符）。
+pub(crate) fn validate_display_name(raw: &str) -> Result<String, CoreError> {
+    validate_name(raw, "显示名", lanmsg_proto::consts::DISPLAY_NAME_MAX_CHARS)
+}
+
+/// 校验设备名（规则同显示名，上限 DEVICE_NAME_MAX_CHARS）。
+pub(crate) fn validate_device_name(raw: &str) -> Result<String, CoreError> {
+    validate_name(raw, "设备名", lanmsg_proto::consts::DEVICE_NAME_MAX_CHARS)
+}
+
 pub const KEY_DEVICE: &str = "device.key";
 pub const KEY_USER: &str = "user.key";
 const SETTING_SELF_CERT: &str = "self_cert";
@@ -270,6 +298,19 @@ fn hex_val(c: u8) -> Result<u8, CoreError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn name_validation() {
+        assert_eq!(validate_display_name("  小明 ").unwrap(), "小明");
+        assert!(validate_display_name("   ").is_err());
+        assert!(validate_display_name("a\nb").is_err());
+        assert!(validate_display_name("a\u{7f}").is_err());
+        assert!(validate_display_name(&"字".repeat(32)).is_ok());
+        assert!(validate_display_name(&"字".repeat(33)).is_err());
+        assert!(validate_device_name("").is_err());
+        assert!(validate_device_name(&"x".repeat(33)).is_err());
+        assert_eq!(validate_device_name("手机").unwrap(), "手机");
+    }
+
     use super::*;
     use crate::keystore::FileKeyStore;
     use crate::store::Store;

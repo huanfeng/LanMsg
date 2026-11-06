@@ -255,8 +255,11 @@ async fn on_profile_updated(svc: &Inner, m: &StoredMessage, display_name: &str) 
         return;
     }
 
+    let Ok(display) = crate::identity::validate_display_name(display_name) else {
+        tracing::warn!("忽略非法的对端资料更新显示名");
+        return;
+    };
     let now = now_millis();
-    let display = display_name.to_string();
 
     // users 表自己行（is_self 保持）。
     let is_self = svc

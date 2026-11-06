@@ -139,6 +139,7 @@ async fn init(
     device_name: String,
     mode: InitMode,
 ) -> Result<Response, ApiError> {
+    let device_name = crate::identity::validate_device_name(&device_name)?;
     match mode {
         InitMode::JoinExisting => {
             // 已初始化 → AlreadyInitialized；未初始化 → 记录待接入标记。
@@ -161,6 +162,7 @@ async fn init(
         }
         InitMode::FirstDevice => {}
     }
+    let display_name = crate::identity::validate_display_name(&display_name)?;
     let device_type = default_device_type();
     let now = now_millis();
 
@@ -603,6 +605,8 @@ async fn set_settings(inner: &Inner, settings: SettingsDto) -> Result<Response, 
         return Err(invalid_arg("下载目录不能为空".into()));
     }
 
+    let mut settings = settings;
+    settings.device_name = crate::identity::validate_device_name(&settings.device_name)?;
     crate::settings::save_settings(&inner.store, &settings)?;
 
     // 设备名写入独立 setting。
@@ -663,11 +667,7 @@ async fn apply_cert_and_broadcast(inner: &Inner, new_cert: &lanmsg_proto::types:
 /// SetProfile：空名 → InvalidArgument；更新 users 自己行、display_name setting、
 /// HelloInfo、announce，并在 SelfDevices 会话发 ProfileUpdated 隐藏消息（同步到本人其他设备）。
 async fn set_profile(inner: &Inner, display_name: String) -> Result<Response, ApiError> {
-    let name = display_name.trim();
-    if name.is_empty() {
-        return Err(invalid_arg("显示名不能为空".into()));
-    }
-    let name = name.to_string();
+    let name = crate::identity::validate_display_name(&display_name)?;
 
     let self_user = inner
         .state

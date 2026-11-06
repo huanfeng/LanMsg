@@ -141,3 +141,9 @@ pub const KEYSTORE_BACKEND_FILE: &str = "file";
 
 /// 探测系统密钥库可用性时读写的临时条目名。
 pub const KEYSTORE_PROBE_NAME: &str = "lanmsg-probe";
+
+/// 用户显示名最大字符数（trim 后，按 Unicode 标量值计）。
+pub const DISPLAY_NAME_MAX_CHARS: usize = 32;
+
+/// 设备名最大字符数（trim 后，按 Unicode 标量值计）。
+pub const DEVICE_NAME_MAX_CHARS: usize = 32;

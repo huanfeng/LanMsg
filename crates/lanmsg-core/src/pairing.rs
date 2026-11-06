@@ -771,6 +771,8 @@ impl Pairing {
             Some(reject("证书验签失败"))
         } else if UserKey::from_bytes(&bundle.user_secret).user_id() != bundle.device_cert.user {
             Some(reject("用户身份不符"))
+        } else if crate::identity::validate_display_name(&bundle.display_name).is_err() {
+            Some(reject("显示名非法"))
         } else {
             None
         };
