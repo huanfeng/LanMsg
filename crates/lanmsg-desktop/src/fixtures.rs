@@ -267,6 +267,20 @@ fn demo_messages() -> Vec<MessageView> {
             BlobState::Preparing,
         )],
     ));
+    // 多行长文本：验证自动换行与 560 宽上限
+    v.push(text(
+        22,
+        false,
+        "关于下周的评审安排：周二上午先过一遍整体方案，周三下午逐页核对预算表格和排期，\
+         周四预留给各组补充材料；如果需求方临时调整范围，请提前一天在群里同步，\
+         我会据此重新排会议室和参会名单，避免临时冲突。\n另外，现场演示用的设备请自带转接头。",
+    ));
+    v.push(text(
+        23,
+        true,
+        "收到。我这边把预算表格的修订版和排期草稿放在共享目录里了，评审前大家先各自看一遍，\
+         有问题直接在文档里批注，不用等到会上再提。\n演示设备我来协调，转接头会多带两个。",
+    ));
     v
 }
 
@@ -480,7 +494,7 @@ mod tests {
     #[test]
     fn demo_chat_has_mixed_messages() {
         let m = demo_model(DemoPage::Chat);
-        assert_eq!(m.messages.len(), 22);
+        assert_eq!(m.messages.len(), 24);
         assert_eq!(m.convs.len(), 3);
         assert_eq!(m.files.len(), 15);
         assert_eq!(m.contacts.len(), 2);

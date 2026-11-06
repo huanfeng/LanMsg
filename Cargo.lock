@@ -1667,6 +1667,7 @@ dependencies = [
  "lanmsg-api",
  "lanmsg-core",
  "lanmsg-media",
+ "lanmsg-proto",
  "qrcode",
  "tempfile",
  "tokio",

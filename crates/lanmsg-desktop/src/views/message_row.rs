@@ -7,14 +7,11 @@ use lanmsg_api::types::*;
 use windui::event::MenuItem;
 use windui::prelude::*;
 
-use crate::model::TransferInfo;
+use crate::model::{effective_state, Model, TransferInfo};
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
 
-/// 撤回时限（毫秒）；与 `lanmsg_proto::consts::RECALL_WINDOW`（2 分钟）同值，
-/// 界面只用它决定是否提供菜单项，最终以 core 校验为准。
-const RECALL_WINDOW_MS: i64 = 120_000;
 /// 气泡最大宽度（规范：正文最大行宽约 560px）。
 pub const BUBBLE_MAX_W: i32 = 560;
 /// 缩略图最长边与最短边下限。
@@ -60,7 +57,9 @@ pub fn duration_label(ms: u64) -> String {
 
 /// 是否可撤回：自己发的、未撤回、仍在时限内。
 pub fn can_recall(m: &MessageView, now_millis: i64) -> bool {
-    m.is_mine && m.state != MessageState::Recalled && now_millis - m.hlc_millis < RECALL_WINDOW_MS
+    m.is_mine
+        && m.state != MessageState::Recalled
+        && now_millis - m.hlc_millis < lanmsg_proto::consts::RECALL_WINDOW.as_millis() as i64
 }
 
 /// 文件类型图标分类。
@@ -144,7 +143,20 @@ pub fn thumb_size(w: Option<u32>, h: Option<u32>) -> (i32, i32) {
 
 /// 一组文件的聚合状态：准备中 > 下载中 > 待下载 > 源离线 > 已在本地。
 pub fn aggregate_state(items: &[FileItemView]) -> BlobState {
-    let any = |s: BlobState| items.iter().any(|i| i.state == s);
+    aggregate_with(items, |i| i.state.clone())
+}
+
+/// 同 `aggregate_state`，但用模型推导每项的有效状态（点击下载后立刻显示“下载中”）。
+fn aggregate_effective(items: &[FileItemView], model: &Model) -> BlobState {
+    aggregate_with(items, |i| effective_state(i, model))
+}
+
+fn aggregate_with(
+    items: &[FileItemView],
+    state_of: impl Fn(&FileItemView) -> BlobState,
+) -> BlobState {
+    let states: Vec<BlobState> = items.iter().map(state_of).collect();
+    let any = |s: BlobState| states.contains(&s);
     if any(BlobState::Preparing) {
         BlobState::Preparing
     } else if any(BlobState::Downloading) {
@@ -291,6 +303,27 @@ fn progress_text(transfers: &BTreeMap<String, TransferInfo>, hashes: &[String]) 
     )
 }
 
+/// switcher 的键要 Eq + Hash，而 `BlobState` 没有：用数字码往返。
+fn state_key(s: &BlobState) -> u8 {
+    match s {
+        BlobState::Remote => 0,
+        BlobState::Downloading => 1,
+        BlobState::Local => 2,
+        BlobState::SourceOffline => 3,
+        BlobState::Preparing => 4,
+    }
+}
+
+fn state_from_key(k: u8) -> BlobState {
+    match k {
+        0 => BlobState::Remote,
+        1 => BlobState::Downloading,
+        2 => BlobState::Local,
+        3 => BlobState::SourceOffline,
+        _ => BlobState::Preparing,
+    }
+}
+
 /// 文件的状态区：待下载 -> 下载按钮；下载中 -> 进度条 + 百分比与速率 + 取消；
 /// 已在本地 -> 打开 / 打开所在文件夹；源离线、准备中 -> 文字。
 /// 文件视图页复用（单个文件）。
@@ -299,12 +332,23 @@ pub fn file_state_area(ui: &UiState, item: &FileItemView) -> Element {
 }
 
 fn state_area(ui: &UiState, items: &[FileItemView]) -> Element {
+    // 状态随模型变化（下载请求发出、进度到达），所以按派生状态重建
+    let list = items.to_vec();
+    let l = list.clone();
+    let key = ui.derive(move |m| state_key(&aggregate_effective(&l, m)));
+    let ui = ui.clone();
+    Element::switcher(key, move |st| {
+        state_area_for(&ui, &list, state_from_key(st))
+    })
+}
+
+fn state_area_for(ui: &UiState, items: &[FileItemView], state: BlobState) -> Element {
     let meta = |t: &'static str| {
         Element::label(t)
             .font_size(style::FONT_META)
             .fg_role(Role::TextMuted)
     };
-    match aggregate_state(items) {
+    match state {
         BlobState::Remote => {
             let hashes: Vec<String> = items
                 .iter()
@@ -467,6 +511,102 @@ fn chip_label(text: impl Into<TextContent>) -> Element {
         .fg_role(Role::OnAccent)
 }
 
+/// 缩略图上的状态标注与视频时长。
+/// 视频的时长靠右下；与左下“点击下载”等标注并排时至少隔 8px，
+/// 缩略图太窄放不下两块时，时长挪到右上角，保证不重叠。
+fn thumb_overlay(
+    ui: &UiState,
+    item: &FileItemView,
+    video: bool,
+    w: i32,
+    state: BlobState,
+) -> Element {
+    /// 并排放下左下标注与时长所需的最小缩略图宽度。
+    const SIDE_BY_SIDE_MIN_W: i32 = 200;
+    let duration = if video {
+        item.duration_ms
+            .map(|ms| scrim_chip(chip_label(duration_label(ms))))
+    } else {
+        None
+    };
+    let note = |chip: Element| {
+        chip.align_xy(Align::Start, Align::End)
+            .margin(style::SPACE_SM)
+    };
+    let mut layer = Element::stack().fill();
+    let left_chip = match state {
+        BlobState::Remote => Some(scrim_chip(
+            Element::row()
+                .spacing(style::SPACE_XS)
+                .cross(Align::Center)
+                .child(style::icon(style::ICON_DOWNLOAD, 16, Role::OnAccent))
+                .child(chip_label(format!(
+                    "{} {}",
+                    strings::FILE_CLICK_TO_DOWNLOAD,
+                    human_size(item.size)
+                ))),
+        )),
+        BlobState::SourceOffline => Some(scrim_chip(chip_label(strings::FILE_SOURCE_OFFLINE))),
+        BlobState::Preparing => Some(scrim_chip(chip_label(strings::FILE_PREPARING))),
+        BlobState::Downloading => {
+            let hashes = vec![item.hash.clone()];
+            let hs = hashes.clone();
+            let frac = ui.derive(move |m| aggregate_progress(&m.transfers, &hs).0);
+            let text = ui.derive(move |m| progress_text(&m.transfers, &hashes));
+            let hash = item.hash.clone();
+            let ui = ui.clone();
+            layer = layer.child(
+                Element::col()
+                    .width_match()
+                    .padding(style::SPACE_SM)
+                    .spacing(style::SPACE_XS)
+                    .bg_role(Role::Scrim)
+                    .align_xy(Align::Start, Align::End)
+                    .child(Element::progress(frac).width_match())
+                    .child(
+                        Element::row()
+                            .width_match()
+                            .cross(Align::Center)
+                            .child(chip_label(text).weight(1.0))
+                            .child(
+                                Element::link(strings::FILE_CANCEL)
+                                    .on_click(move |_| ui.act(|m| m.cancel_transfer(&hash))),
+                            ),
+                    ),
+            );
+            None
+        }
+        BlobState::Local => None,
+    };
+    match (left_chip, duration) {
+        (Some(chip), Some(d)) if w >= SIDE_BY_SIDE_MIN_W => {
+            layer = layer.child(
+                Element::row()
+                    .width_match()
+                    .padding(style::SPACE_SM)
+                    .spacing(style::SPACE_SM)
+                    .cross(Align::Center)
+                    .align_xy(Align::Start, Align::End)
+                    .child(chip)
+                    .child(Element::flex_spacer())
+                    .child(d),
+            );
+        }
+        (chip, d) => {
+            if let Some(chip) = chip {
+                layer = layer.child(note(chip));
+            }
+            if let Some(d) = d {
+                // 下载中底部被进度条占用、窄缩略图放不下并排：时长放右上
+                let busy = state != BlobState::Local;
+                let pos = if busy { Align::Start } else { Align::End };
+                layer = layer.child(d.align_xy(Align::End, pos).margin(style::SPACE_SM));
+            }
+        }
+    }
+    layer
+}
+
 /// 单张图片 / 视频：缩略图 + 状态标注；点击打开原文件或开始下载。
 fn media_thumb(ui: &UiState, item: &FileItemView, video: bool) -> Element {
     let (w, h) = thumb_size(item.width, item.height);
@@ -501,58 +641,19 @@ fn media_thumb(ui: &UiState, item: &FileItemView, video: bool) -> Element {
                 .align(Align::Center)
                 .child(style::icon(style::ICON_PLAY, 24, Role::OnAccent).align(Align::Center)),
         );
-        if let Some(ms) = item.duration_ms {
-            stack = stack.child(
-                scrim_chip(chip_label(duration_label(ms)))
-                    .align_xy(Align::End, Align::End)
-                    .margin(style::SPACE_SM),
-            );
-        }
     }
-    let corner_note = |chip: Element| {
-        chip.align_xy(Align::Start, Align::End)
-            .margin(style::SPACE_SM)
+    // 状态标注随派生状态重建；铺满缩略图，内部再按角落定位
+    let key = {
+        let it = item.clone();
+        ui.derive(move |m| state_key(&effective_state(&it, m)))
     };
-    match item.state {
-        BlobState::Remote => {
-            stack = stack.child(corner_note(scrim_chip(
-                Element::row()
-                    .spacing(style::SPACE_XS)
-                    .cross(Align::Center)
-                    .child(style::icon(style::ICON_DOWNLOAD, 16, Role::OnAccent))
-                    .child(chip_label(format!(
-                        "{} {}",
-                        strings::FILE_CLICK_TO_DOWNLOAD,
-                        human_size(item.size)
-                    ))),
-            )));
-        }
-        BlobState::Downloading => {
-            let hashes = vec![item.hash.clone()];
-            let hs = hashes.clone();
-            let frac = ui.derive(move |m| aggregate_progress(&m.transfers, &hs).0);
-            let text = ui.derive(move |m| progress_text(&m.transfers, &hashes));
-            stack = stack.child(
-                Element::col()
-                    .width_match()
-                    .padding(style::SPACE_SM)
-                    .spacing(style::SPACE_XS)
-                    .bg_role(Role::Scrim)
-                    .align_xy(Align::Start, Align::End)
-                    .child(Element::progress(frac).width_match())
-                    .child(chip_label(text)),
-            );
-        }
-        BlobState::SourceOffline => {
-            stack = stack.child(corner_note(scrim_chip(chip_label(
-                strings::FILE_SOURCE_OFFLINE,
-            ))));
-        }
-        BlobState::Preparing => {
-            stack = stack.child(corner_note(scrim_chip(chip_label(strings::FILE_PREPARING))));
-        }
-        BlobState::Local => {}
-    }
+    let (ui_o, it_o) = (ui.clone(), item.clone());
+    stack = stack.child(
+        Element::switcher(key, move |st| {
+            thumb_overlay(&ui_o, &it_o, video, w, state_from_key(st))
+        })
+        .fill(),
+    );
     let (state, hash, local) = (
         item.state.clone(),
         item.hash.clone(),
@@ -572,6 +673,11 @@ fn is_media(item: &FileItemView) -> Option<bool> {
         FileIcon::Video => Some(true),
         _ => None,
     }
+}
+
+/// 是否为单张图片 / 视频缩略图消息（用于决定与相邻气泡的间距）。
+pub fn is_thumb_message(m: &MessageView) -> bool {
+    matches!(&m.body, MessageBodyView::Files { items } if matches!(items.as_slice(), [one] if is_media(one).is_some()))
 }
 
 fn files_body(ui: &UiState, items: &[FileItemView]) -> Element {

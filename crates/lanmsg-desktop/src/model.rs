@@ -1,7 +1,7 @@
 // 界面状态模型：纯数据，不依赖 windui，所有状态迁移逻辑在此单测。
 // 注释中文，标识符英文。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lanmsg_api::types::*;
 
@@ -62,6 +62,19 @@ pub enum Effect {
     EnableAutostart,
 }
 
+/// 文件项的有效状态：核心报告待下载，但本地已发出请求或正在传输时按“下载中”显示。
+/// 消息行与文件页共用。
+pub fn effective_state(item: &FileItemView, model: &Model) -> BlobState {
+    if item.state == BlobState::Remote
+        && (model.pending_downloads.contains(&item.hash)
+            || model.transfers.contains_key(&item.hash))
+    {
+        BlobState::Downloading
+    } else {
+        item.state.clone()
+    }
+}
+
 /// 界面全部可观察状态。
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -84,6 +97,13 @@ pub struct Model {
     pub transfer_ids: BTreeMap<String, String>,
     /// 加载更早消息的请求已发出、尚未得到回复（防止到顶回调连发造成重复合并）。
     pub older_in_flight: bool,
+    /// 窗口之外还有更新的消息（前插导致从末尾截断时置真）；为真时新消息不追加，
+    /// 滚到底部再重新拉取最新一页。
+    pub has_newer: bool,
+    /// 已发出下载请求、尚未结束的文件哈希：点击后立刻显示“下载中”，并防止重复请求。
+    pub pending_downloads: BTreeSet<String>,
+    /// 用户已取消的哈希：对应的失败结束事件不再弹“下载失败”。
+    pub cancelled_downloads: BTreeSet<String>,
     pub pair: Option<PairUi>,
     pub toast: Option<String>,
     pub window_focused: bool,
@@ -131,6 +151,9 @@ impl Model {
             transfers: BTreeMap::new(),
             transfer_ids: BTreeMap::new(),
             older_in_flight: false,
+            has_newer: false,
+            pending_downloads: BTreeSet::new(),
+            cancelled_downloads: BTreeSet::new(),
             pair: None,
             toast: None,
             window_focused: true,
@@ -163,6 +186,10 @@ impl Model {
                     if matches!(tag, ReplyTag::Messages { older: true, .. }) {
                         self.older_in_flight = false;
                     }
+                    if let ReplyTag::Transfer { hash } = &tag {
+                        // 下载请求失败：恢复为可再次下载
+                        self.pending_downloads.remove(hash);
+                    }
                     if tag == ReplyTag::Init {
                         // Init 失败：回到可重新提交的状态
                         self.init_mode = None;
@@ -178,6 +205,9 @@ impl Model {
     /// 连接（重连）后的全量刷新。
     fn refresh_all(&mut self) -> Vec<Effect> {
         self.conn = ConnState::Connected;
+        // 后台服务可能重启过，旧的下载请求不会再有结束事件
+        self.pending_downloads.clear();
+        self.cancelled_downloads.clear();
         let mut fx = vec![
             call(Request::GetSelf, ReplyTag::SelfInfo),
             call(Request::ListConversations, ReplyTag::Conversations),
@@ -255,11 +285,16 @@ impl Model {
                     self.older_in_flight = false;
                     let mut merged = value;
                     merged.append(&mut self.messages);
-                    merged.truncate(MESSAGE_WINDOW_MAX);
+                    if merged.len() > MESSAGE_WINDOW_MAX {
+                        // 截掉的是最新的消息：窗口与最新消息之间出现缺口
+                        merged.truncate(MESSAGE_WINDOW_MAX);
+                        self.has_newer = true;
+                    }
                     self.messages = merged;
                     Vec::new()
                 } else {
                     self.messages = value;
+                    self.has_newer = false;
                     if self.window_focused {
                         self.mark_read_last().into_iter().collect()
                     } else {
@@ -346,6 +381,10 @@ impl Model {
                 {
                     return Vec::new();
                 }
+                if self.has_newer {
+                    // 窗口末尾不是最新消息：不追加以免造成缺口，滚到底部时重新拉取
+                    return Vec::new();
+                }
                 let id = msg.id.clone();
                 let conv = msg.conv.clone();
                 self.messages.push(msg);
@@ -401,7 +440,9 @@ impl Model {
             } => {
                 self.transfers.remove(&hash);
                 self.transfer_ids.remove(&hash);
-                if !ok {
+                self.pending_downloads.remove(&hash);
+                let cancelled = self.cancelled_downloads.remove(&hash);
+                if !ok && !cancelled {
                     let why = error.unwrap_or_else(|| strings::UNKNOWN_ERROR.to_string());
                     self.toast = Some(format!("{}{}", strings::DOWNLOAD_FAILED_PREFIX, why));
                 }
@@ -452,6 +493,7 @@ impl Model {
         self.current_conv = Some(conv.clone());
         self.messages.clear();
         self.has_older = false;
+        self.has_newer = false;
         self.older_in_flight = false;
         let mut fx = Vec::new();
         if self.window_focused {
@@ -476,6 +518,18 @@ impl Model {
         }
         self.older_in_flight = true;
         vec![self.list_messages_call(conv, Some(first.id.clone()), true)]
+    }
+
+    /// 滚到底部时：窗口缺最新消息则重新拉取最新一页（回复会替换窗口）。
+    pub fn reload_latest(&mut self) -> Vec<Effect> {
+        let Some(conv) = self.current_conv.clone() else {
+            return Vec::new();
+        };
+        if !self.has_newer {
+            return Vec::new();
+        }
+        self.has_newer = false;
+        vec![self.list_messages_call(conv, None, false)]
     }
 
     /// 切换主页面并拉取该页所需数据。
@@ -600,6 +654,10 @@ impl Model {
 
     /// 下载一个文件；回复里的传输 id 用于取消。
     pub fn download(&mut self, hash: String) -> Vec<Effect> {
+        if self.pending_downloads.contains(&hash) || self.transfers.contains_key(&hash) {
+            return Vec::new();
+        }
+        self.pending_downloads.insert(hash.clone());
         vec![call(
             Request::DownloadBlob { hash: hash.clone() },
             ReplyTag::Transfer { hash },
@@ -614,12 +672,15 @@ impl Model {
     /// 取消某个文件的传输；还不知道传输 id（请求尚未回复）时不发请求。
     pub fn cancel_transfer(&mut self, hash: &str) -> Vec<Effect> {
         match self.transfer_ids.get(hash) {
-            Some(t) => vec![call(
-                Request::CancelTransfer {
-                    transfer: t.clone(),
-                },
-                ReplyTag::Generic,
-            )],
+            Some(t) => {
+                self.cancelled_downloads.insert(hash.to_string());
+                vec![call(
+                    Request::CancelTransfer {
+                        transfer: t.clone(),
+                    },
+                    ReplyTag::Generic,
+                )]
+            }
             None => Vec::new(),
         }
     }
@@ -872,6 +933,7 @@ mod tests {
         assert_eq!(m.messages.len(), MESSAGE_WINDOW_MAX);
         assert_eq!(m.messages[0].id, "o0");
         assert!(m.has_older);
+        assert!(m.has_newer, "截掉了最新消息，窗口与最新之间有缺口");
         // 其它会话的回复被丢弃
         let before = m.messages.clone();
         m.apply(reply(
@@ -916,6 +978,55 @@ mod tests {
         assert_eq!(m.messages[0].id, "m1");
         assert_eq!(m.messages.last().map(|x| x.id.as_str()), Some("new"));
         assert!(m.has_older);
+    }
+
+    #[test]
+    fn prepend_overflow_sets_has_newer_and_suppresses_append() {
+        let mut m = model_in_conv("c1", MESSAGE_WINDOW_MAX);
+        assert!(!m.has_newer);
+        let older: Vec<_> = (0..MESSAGE_PAGE as usize)
+            .map(|i| msg(&format!("o{i}"), "c1", "x"))
+            .collect();
+        m.apply(reply(
+            ReplyTag::Messages {
+                conv: "c1".into(),
+                older: true,
+            },
+            Response::Messages { value: older },
+        ));
+        assert!(m.has_newer);
+        let fx = m.apply(UiMsg::Event(Event::MessageAdded {
+            msg: msg("fresh", "c1", "hi"),
+        }));
+        assert!(fx.is_empty());
+        assert!(
+            m.messages.iter().all(|x| x.id != "fresh"),
+            "不追加到有缺口的窗口"
+        );
+    }
+
+    #[test]
+    fn scroll_bottom_with_has_newer_reloads_latest() {
+        let mut m = model_in_conv("c1", 3);
+        assert!(m.reload_latest().is_empty(), "无缺口不重载");
+        m.has_newer = true;
+        let fx = m.reload_latest();
+        assert!(!m.has_newer);
+        assert!(has(&fx, |r| matches!(r,
+            Request::ListMessages { conv, before: None, limit } if conv == "c1" && *limit == MESSAGE_PAGE)));
+        assert!(m.reload_latest().is_empty(), "不重复请求");
+        // 回复（older:false）替换窗口
+        m.apply(reply(
+            ReplyTag::Messages {
+                conv: "c1".into(),
+                older: false,
+            },
+            Response::Messages {
+                value: vec![msg("latest", "c1", "x")],
+            },
+        ));
+        assert_eq!(m.messages.len(), 1);
+        assert!(!m.has_newer);
     }
 
     #[test]
@@ -1411,6 +1522,80 @@ mod tests {
             error: None,
         }));
         assert!(m.cancel_transfer("h1").is_empty());
+    }
+
+    #[test]
+    fn duplicate_download_sends_one_request() {
+        let mut m = Model::new();
+        assert_eq!(m.download("h1".into()).len(), 1);
+        assert!(m.download("h1".into()).is_empty(), "已在等待中");
+        m.apply(progress_event("t1", "h2"));
+        assert!(m.download("h2".into()).is_empty(), "已在传输中");
+    }
+
+    fn remote_item(hash: &str) -> FileItemView {
+        FileItemView {
+            hash: hash.into(),
+            name: "a.bin".into(),
+            size: 10,
+            mime: "application/octet-stream".into(),
+            state: BlobState::Remote,
+            local_path: None,
+            thumb_path: None,
+            width: None,
+            height: None,
+            duration_ms: None,
+            source_label: String::new(),
+        }
+    }
+
+    #[test]
+    fn effective_state_follows_pending_and_transfers() {
+        let mut m = Model::new();
+        let item = remote_item("h1");
+        assert_eq!(effective_state(&item, &m), BlobState::Remote);
+        m.download("h1".into());
+        assert_eq!(effective_state(&item, &m), BlobState::Downloading);
+        // 下载请求被拒：恢复待下载
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::Transfer { hash: "h1".into() },
+            result: Err(ApiError {
+                code: ErrorCode::Io,
+                message: "x".into(),
+            }),
+        });
+        assert_eq!(effective_state(&item, &m), BlobState::Remote);
+        // 进度事件到达
+        m.apply(progress_event("t1", "h1"));
+        assert_eq!(effective_state(&item, &m), BlobState::Downloading);
+        // 失败结束：恢复待下载
+        m.apply(UiMsg::Event(Event::TransferFinished {
+            transfer: "t1".into(),
+            hash: "h1".into(),
+            ok: false,
+            error: Some("断开".into()),
+        }));
+        assert_eq!(effective_state(&item, &m), BlobState::Remote);
+        // 其它状态不被覆盖
+        let mut local = remote_item("h1");
+        local.state = BlobState::Local;
+        m.download("h1".into());
+        assert_eq!(effective_state(&local, &m), BlobState::Local);
+    }
+
+    #[test]
+    fn cancelled_transfer_finish_does_not_toast() {
+        let mut m = Model::new();
+        m.apply(progress_event("t1", "h1"));
+        m.cancel_transfer("h1");
+        m.apply(UiMsg::Event(Event::TransferFinished {
+            transfer: "t1".into(),
+            hash: "h1".into(),
+            ok: false,
+            error: Some("已取消".into()),
+        }));
+        assert_eq!(m.toast, None);
+        assert!(m.cancelled_downloads.is_empty());
     }
 
     #[test]

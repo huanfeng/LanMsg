@@ -30,6 +30,8 @@ pub enum ChatRow {
         /// 与上一行的间距：同一作者连续 4，换作者 12，首行 0。
         gap: i32,
     },
+    /// 列表尾部固定留白：stick_to_bottom 贴底时不计容器 padding，用占位元素保证与输入区的间距一致。
+    Tail,
 }
 
 impl ChatRow {
@@ -37,6 +39,7 @@ impl ChatRow {
         match self {
             ChatRow::Sep { key, .. } => key.clone(),
             ChatRow::Msg { m, .. } => format!("m:{}", m.id),
+            ChatRow::Tail => "tail".to_string(),
         }
     }
 }
@@ -83,6 +86,16 @@ pub fn build_rows(
                 style::SPACE_XS
             }
             _ => style::SPACE_MD,
+        };
+        // 缩略图与文字气泡等不同类型相邻：至少隔 8
+        let gap = match prev {
+            Some(p)
+                if gap > 0
+                    && message_row::is_thumb_message(p) != message_row::is_thumb_message(m) =>
+            {
+                gap.max(style::SPACE_SM)
+            }
+            _ => gap,
         };
         rows.push(ChatRow::Msg {
             m: m.clone(),
@@ -248,6 +261,7 @@ fn separator_row(label: String) -> Element {
 fn list_row(ui: &UiState, row: ChatRow) -> Element {
     match row {
         ChatRow::Sep { label, .. } => separator_row(label),
+        ChatRow::Tail => Element::leaf().width_match().height(style::SPACE_MD),
         ChatRow::Msg {
             m,
             show_author,
@@ -272,12 +286,14 @@ fn message_list(ui: &UiState) -> Element {
             .as_deref()
             .and_then(|id| m.convs.iter().find(|c| c.conv == id))
             .is_some_and(|c| c.kind == ConvKind::SelfDevices);
-        build_rows(
+        let mut rows = build_rows(
             &m.messages,
             self_devices,
             now_millis(),
             tz::local_offset_secs(),
-        )
+        );
+        rows.push(ChatRow::Tail);
+        rows
     });
     let ui_row = ui.clone();
     let ui_edge = ui.clone();
@@ -287,8 +303,10 @@ fn message_list(ui: &UiState) -> Element {
         // 到顶且还有更早消息时加载；Model 内部防重复请求。
         // 初始页是满页（50 条）时内容必然超出一屏，用户滚到顶才会触发
         .on_scroll_edge(move |_ctx, edge| {
-            if edge == ScrollEdge::Top {
-                ui_edge.act(|m| m.load_older());
+            match edge {
+                ScrollEdge::Top => ui_edge.act(|m| m.load_older()),
+                // 窗口缺最新消息时，滚到底部重新拉取最新一页
+                ScrollEdge::Bottom => ui_edge.act(|m| m.reload_latest()),
             }
         })
         // 首尾留白，最后一条不贴着输入区
