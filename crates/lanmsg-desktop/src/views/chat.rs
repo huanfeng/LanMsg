@@ -10,7 +10,7 @@ use crate::style;
 use crate::tz;
 use crate::ui_state::UiState;
 use crate::views::chats::{format_time, now_millis};
-use crate::views::{forward, message_row};
+use crate::views::{composer, forward, message_row};
 
 /// 超过此间隔插入时间分隔行（规范第 8 节）。
 const SEPARATOR_GAP_MS: i64 = 5 * 60_000;
@@ -315,22 +315,42 @@ fn message_list(ui: &UiState) -> Element {
         .width_match()
 }
 
-/// 底部输入区占位（Task 13 替换为真实输入区）。
-fn composer_placeholder() -> Element {
-    Element::col()
+/// 窗口缺最新消息时的提示条：点击重新拉取最新一页并回到底部。
+/// 不依赖滚动边缘回调，覆盖“已在底部、不会再触发 Bottom”的情形。
+fn new_messages_banner(ui: &UiState) -> Element {
+    let has_newer = ui.derive(|m| m.has_newer);
+    let ui = ui.clone();
+    Element::stack()
         .width_match()
-        .bg_role(Role::Surface)
-        .child(Element::divider())
+        .padding_xy(0, style::SPACE_SM)
+        .visible_signal(has_newer)
         .child(
-            Element::label(strings::COMPOSER_PLACEHOLDER)
-                .font_size(style::FONT_BODY)
-                .fg_role(Role::TextSubtle)
-                .padding(style::SPACE_LG),
+            Element::stack()
+                .height(28)
+                .padding_xy(style::SPACE_MD, 0)
+                .corner(style::RADIUS_PILL)
+                .bg_role(Role::Surface)
+                .align(Align::Center)
+                .clickable()
+                .on_click(move |_| {
+                    ui.act(|m| m.reload_latest());
+                    ui.jump_to_bottom();
+                })
+                .child(
+                    Element::label(strings::NEW_MESSAGES_BANNER)
+                        .font_size(style::FONT_META)
+                        .fg_role(Role::AccentText)
+                        .align(Align::Center),
+                ),
         )
 }
 
-fn conversation(ui: &UiState) -> Element {
+fn conversation(ui: &UiState, conv: String) -> Element {
     let info = ui.derive(header_info);
+    let ui_drop = ui.clone();
+    // 列表按“回到底部”序号重建，首次布局即滚到底
+    let ui_list = ui.clone();
+    let list = Element::switcher(ui.bottom_epoch, move |_| message_list(&ui_list)).weight(1.0);
     Element::stack()
         .fill()
         .bg_role(Role::Bg)
@@ -339,10 +359,14 @@ fn conversation(ui: &UiState) -> Element {
                 .fill()
                 .child(header(info))
                 .child(Element::divider())
-                .child(message_list(ui))
-                .child(composer_placeholder()),
+                .child(list)
+                .child(new_messages_banner(ui))
+                .child(composer::composer(ui, conv)),
         )
         .child(forward::forward_host(ui))
+        .child(composer::paste_host(ui))
+        // 整个聊天区接收拖入的文件
+        .on_drop_files(move |_ctx, paths| composer::on_drop(&ui_drop, paths))
 }
 
 /// 右侧聊天区：未选会话显示空状态，选中后按会话重建（滚动位置自然回到底部）。
@@ -360,7 +384,7 @@ pub fn chat_pane(ui: &UiState) -> Element {
                 Some(go),
             )
         }
-        Some(_) => conversation(&ui),
+        Some(conv) => conversation(&ui, conv),
     })
     .fill()
 }

@@ -100,6 +100,8 @@ pub struct Model {
     /// 窗口之外还有更新的消息（前插导致从末尾截断时置真）；为真时新消息不追加，
     /// 滚到底部再重新拉取最新一页。
     pub has_newer: bool,
+    /// 重新拉取最新一页的请求已发出、尚未得到回复（防重；失败时 has_newer 保持为真）。
+    pub reload_in_flight: bool,
     /// 已发出下载请求、尚未结束的文件哈希：点击后立刻显示“下载中”，并防止重复请求。
     pub pending_downloads: BTreeSet<String>,
     /// 用户已取消的哈希：对应的失败结束事件不再弹“下载失败”。
@@ -152,6 +154,7 @@ impl Model {
             transfer_ids: BTreeMap::new(),
             older_in_flight: false,
             has_newer: false,
+            reload_in_flight: false,
             pending_downloads: BTreeSet::new(),
             cancelled_downloads: BTreeSet::new(),
             pair: None,
@@ -183,8 +186,10 @@ impl Model {
                     if !offline_io {
                         self.toast = Some(e.message);
                     }
-                    if matches!(tag, ReplyTag::Messages { older: true, .. }) {
-                        self.older_in_flight = false;
+                    match &tag {
+                        ReplyTag::Messages { older: true, .. } => self.older_in_flight = false,
+                        ReplyTag::Messages { older: false, .. } => self.reload_in_flight = false,
+                        _ => {}
                     }
                     if let ReplyTag::Transfer { hash } = &tag {
                         // 下载请求失败：恢复为可再次下载
@@ -295,6 +300,7 @@ impl Model {
                 } else {
                     self.messages = value;
                     self.has_newer = false;
+                    self.reload_in_flight = false;
                     if self.window_focused {
                         self.mark_read_last().into_iter().collect()
                     } else {
@@ -494,6 +500,7 @@ impl Model {
         self.messages.clear();
         self.has_older = false;
         self.has_newer = false;
+        self.reload_in_flight = false;
         self.older_in_flight = false;
         let mut fx = Vec::new();
         if self.window_focused {
@@ -525,10 +532,11 @@ impl Model {
         let Some(conv) = self.current_conv.clone() else {
             return Vec::new();
         };
-        if !self.has_newer {
+        if !self.has_newer || self.reload_in_flight {
             return Vec::new();
         }
-        self.has_newer = false;
+        // has_newer 在成功回复后才清除：请求失败时提示条仍在，可再次点击
+        self.reload_in_flight = true;
         vec![self.list_messages_call(conv, None, false)]
     }
 
@@ -699,6 +707,75 @@ impl Model {
             },
             ReplyTag::Deleted { msg },
         )]
+    }
+
+    /// 发送前的公共前缀：窗口缺最新消息时先重新拉取最新一页，否则自己发出的消息不会出现。
+    fn send_prefix(&mut self) -> Vec<Effect> {
+        self.reload_latest()
+    }
+
+    /// 发送文字（调用方已做空白规整）；结果经 MessageAdded 事件与错误 toast 到达。
+    pub fn send_text(&mut self, conv: String, text: String) -> Vec<Effect> {
+        let mut fx = self.send_prefix();
+        fx.push(call(
+            Request::SendText {
+                conv: conv.clone(),
+                text,
+            },
+            ReplyTag::Sent { conv },
+        ));
+        fx
+    }
+
+    /// 发送一组文件（一条消息）。
+    pub fn send_files(&mut self, conv: String, paths: Vec<String>) -> Vec<Effect> {
+        let mut fx = self.send_prefix();
+        fx.push(call(
+            Request::SendFiles {
+                conv: conv.clone(),
+                paths,
+            },
+            ReplyTag::Sent { conv },
+        ));
+        fx
+    }
+
+    /// 拖入：文件合并为一条 SendFiles，每个目录各一条 SendFolder。
+    pub fn send_dropped(
+        &mut self,
+        conv: String,
+        files: Vec<String>,
+        dirs: Vec<String>,
+    ) -> Vec<Effect> {
+        if files.is_empty() && dirs.is_empty() {
+            return Vec::new();
+        }
+        let mut fx = self.send_prefix();
+        let tag = || ReplyTag::Sent { conv: conv.clone() };
+        if !files.is_empty() {
+            fx.push(call(
+                Request::SendFiles {
+                    conv: conv.clone(),
+                    paths: files,
+                },
+                tag(),
+            ));
+        }
+        for path in dirs {
+            fx.push(call(
+                Request::SendFolder {
+                    conv: conv.clone(),
+                    path,
+                },
+                tag(),
+            ));
+        }
+        fx
+    }
+
+    /// 发送一个文件夹。
+    pub fn send_folder(&mut self, conv: String, path: String) -> Vec<Effect> {
+        self.send_dropped(conv, Vec::new(), vec![path])
     }
 
     /// 把已有文件转发到会话。
@@ -1011,7 +1088,7 @@ mod tests {
         assert!(m.reload_latest().is_empty(), "无缺口不重载");
         m.has_newer = true;
         let fx = m.reload_latest();
-        assert!(!m.has_newer);
+        assert!(m.has_newer, "回复成功前保持缺口标记");
         assert!(has(&fx, |r| matches!(r,
             Request::ListMessages { conv, before: None, limit } if conv == "c1" && *limit == MESSAGE_PAGE)));
         assert!(m.reload_latest().is_empty(), "不重复请求");
@@ -1721,5 +1798,77 @@ mod tests {
         let mut m = Model::new();
         let fx = m.apply(UiMsg::Connected);
         assert!(has(&fx, |r| matches!(r, Request::ListPeers)));
+    }
+
+    fn latest_reply(conv: &str) -> UiMsg {
+        reply(
+            ReplyTag::Messages {
+                conv: conv.into(),
+                older: false,
+            },
+            Response::Messages {
+                value: vec![msg("latest", conv, "x")],
+            },
+        )
+    }
+
+    #[test]
+    fn reload_failure_keeps_has_newer_and_allows_retry() {
+        let mut m = model_in_conv("c1", 3);
+        m.has_newer = true;
+        assert!(!m.reload_latest().is_empty());
+        assert!(m.reload_in_flight);
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::Messages {
+                conv: "c1".into(),
+                older: false,
+            },
+            result: Err(ApiError {
+                code: ErrorCode::Io,
+                message: "失败".into(),
+            }),
+        });
+        assert!(m.has_newer, "失败后仍提示有新消息");
+        assert!(!m.reload_in_flight);
+        assert!(!m.reload_latest().is_empty(), "可再次点击重试");
+        m.apply(latest_reply("c1"));
+        assert!(!m.has_newer && !m.reload_in_flight);
+    }
+
+    #[test]
+    fn send_with_has_newer_reloads_latest() {
+        let mut m = model_in_conv("c1", 3);
+        m.has_newer = true;
+        let fx = m.send_text("c1".into(), "hi".into());
+        let reqs = calls(&fx);
+        assert!(matches!(
+            reqs[0],
+            Request::ListMessages { before: None, .. }
+        ));
+        assert!(matches!(reqs[1], Request::SendText { text, .. } if text == "hi"));
+        // 无缺口时只发送
+        let mut m = model_in_conv("c1", 3);
+        let fx = m.send_files("c1".into(), vec!["/a".into()]);
+        assert_eq!(calls(&fx).len(), 1);
+        assert!(matches!(calls(&fx)[0], Request::SendFiles { paths, .. } if paths == &["/a"]));
+    }
+
+    #[test]
+    fn send_dropped_files_once_and_each_dir_once() {
+        let mut m = model_in_conv("c1", 1);
+        let fx = m.send_dropped(
+            "c1".into(),
+            vec!["/a.txt".into(), "/b.png".into()],
+            vec!["/d1".into(), "/d2".into()],
+        );
+        let reqs = calls(&fx);
+        assert_eq!(reqs.len(), 3);
+        assert!(matches!(reqs[0], Request::SendFiles { paths, .. } if paths.len() == 2));
+        assert!(matches!(reqs[1], Request::SendFolder { path, .. } if path == "/d1"));
+        assert!(matches!(reqs[2], Request::SendFolder { path, .. } if path == "/d2"));
+        // 只有目录：不发空的 SendFiles
+        let fx = m.send_dropped("c1".into(), vec![], vec!["/d1".into()]);
+        assert_eq!(calls(&fx).len(), 1);
+        assert!(m.send_dropped("c1".into(), vec![], vec![]).is_empty());
     }
 }

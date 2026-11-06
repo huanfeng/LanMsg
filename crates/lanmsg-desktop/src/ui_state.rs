@@ -3,7 +3,7 @@
 // 注释中文，标识符英文。
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -14,6 +14,7 @@ use crate::bridge::{Bridge, ReplyTag, UiMsg};
 use crate::debounce::Debouncer;
 use crate::model::{ConnState, Effect, Model, Page};
 use crate::strings;
+use crate::views::composer::PastedImage;
 use lanmsg_api::types::Response;
 
 /// 界面共享状态句柄（可克隆，仅限 UI 线程使用）。
@@ -30,6 +31,10 @@ pub struct UiState {
     /// 转发对话框请求：(第几次打开, 要转发的文件哈希)，哈希为空表示关闭。
     /// 带序号是为了让对话框被 ESC 隐藏后，对同一批文件再次转发也能重建。
     pub forward: Signal<(u64, Vec<String>)>,
+    /// 等待确认发送的粘贴图片；None 表示没有确认小窗。
+    pub paste: Signal<Option<PastedImage>>,
+    /// 回到列表底部的请求序号：消息列表按它重建，首次布局即滚到底。
+    pub bottom_epoch: Signal<u64>,
     debouncer: Rc<RefCell<Debouncer>>,
     started: Instant,
     /// 数据目录：登记开机自启时决定是否带 `--data-dir`。
@@ -48,10 +53,22 @@ impl UiState {
             pending_open: Rc::new(RefCell::new(None)),
             search_text: signal(String::new()),
             forward: signal((0u64, Vec::new())),
+            paste: signal(None),
+            bottom_epoch: signal(0u64),
             debouncer: Rc::new(RefCell::new(Debouncer::new(SEARCH_DEBOUNCE_MS))),
             started: Instant::now(),
             data_dir: lanmsg_core::paths::default_data_dir(),
         }
+    }
+
+    /// 数据目录（粘贴图片的临时目录等位于其下）。
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    /// 让消息列表回到底部（发送消息、点击“有新消息”提示条时）。
+    pub fn jump_to_bottom(&self) {
+        self.bottom_epoch.update(|v| *v += 1);
     }
 
     /// 指定实际使用的数据目录（非演示模式）。

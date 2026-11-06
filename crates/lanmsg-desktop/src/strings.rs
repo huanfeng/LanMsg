@@ -79,7 +79,19 @@ pub const FILE_SOURCE_OFFLINE: &str = "源设备离线";
 pub const FILE_PREPARING: &str = "准备中…";
 pub const FILE_DOWNLOADING: &str = "下载中";
 pub const FILE_COUNT_UNIT: &str = "个文件";
-pub const COMPOSER_PLACEHOLDER: &str = "消息输入区稍后提供";
+pub const COMPOSER_PLACEHOLDER: &str = "输入消息，Enter 发送，Shift+Enter 换行";
+pub const COMPOSER_SEND: &str = "发送";
+pub const COMPOSER_EMPTY_HINT: &str = "输入内容后才能发送";
+pub const COMPOSER_FILE: &str = "文件";
+pub const COMPOSER_FOLDER: &str = "文件夹";
+pub const PICK_FILES_TITLE: &str = "选择要发送的文件";
+pub const PICK_FOLDER_TITLE: &str = "选择要发送的文件夹";
+pub const PICK_UNAVAILABLE: &str = "无法打开选择框，可把文件拖入窗口发送";
+pub const PASTE_TITLE: &str = "发送这张图片？";
+pub const PASTE_SEND: &str = "发送";
+pub const PASTE_CANCEL: &str = "取消";
+pub const PASTE_SAVE_FAILED: &str = "保存粘贴的图片失败：";
+pub const NEW_MESSAGES_BANNER: &str = "有新消息，点击查看最新";
 
 /// 转发对话框。
 pub const FORWARD_TITLE: &str = "转发到";
