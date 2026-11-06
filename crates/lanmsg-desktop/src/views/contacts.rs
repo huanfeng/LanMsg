@@ -197,11 +197,6 @@ fn contact_card(ui: &UiState, c: &ContactView, expanded: Signal<String>) -> Elem
     let ask_ok = ask.map(|t| parse_ask_mb(t).is_some());
 
     let summary = format!("{} {}", c.devices.len(), strings::CONTACT_DEVICE_COUNT_UNIT);
-    let dot = Element::leaf().size(8, 8).corner(4.0).bg_role(if c.online {
-        Role::Success
-    } else {
-        Role::TextSubtle
-    });
     let toggle_id = id.clone();
     let ui_dm = ui.clone();
     let dm_user = id.clone();
@@ -230,13 +225,8 @@ fn contact_card(ui: &UiState, c: &ContactView, expanded: Signal<String>) -> Elem
                     Element::col()
                         .weight(1.0)
                         .spacing(style::SPACE_XS)
-                        .child(
-                            Element::row()
-                                .spacing(style::SPACE_SM)
-                                .cross(Align::Center)
-                                .child(name_label(c.display_name.clone()))
-                                .child(dot),
-                        )
+                        // 在线状态只由头像角标表示，名字旁不再重复画点
+                        .child(name_label(c.display_name.clone()))
                         .child(meta(summary)),
                 ),
         )
@@ -594,11 +584,23 @@ pub fn contacts_page(ui: &UiState) -> Element {
         .fill()
         .child(side_nav(ui))
         .child(style::vline())
-        .child(Element::scroll().weight(1.0).height_match().child(content(
-            ui,
-            confirm,
-            remove_confirm,
-        )));
+        .child(
+            // 右侧留出滚动条槽，滚动条不贴窗口边
+            Element::col()
+                .weight(1.0)
+                .height_match()
+                .padding_edges(Insets {
+                    top: 0,
+                    bottom: 0,
+                    left: 0,
+                    right: style::SPACE_XS,
+                })
+                .child(Element::scroll().width_match().weight(1.0).child(content(
+                    ui,
+                    confirm,
+                    remove_confirm,
+                ))),
+        );
     Element::stack()
         .fill()
         .bg_role(Role::Bg)

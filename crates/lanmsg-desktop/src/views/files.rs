@@ -246,8 +246,9 @@ fn state_code(s: &BlobState) -> u8 {
     }
 }
 
-/// 列表项第二行的信息段：大小、（视频）时长、时间、来源各段；
+/// 列表项第二行的信息段：大小、（视频）时长、时间、“来自 X”；
 /// 会话名已在来源里出现（如私聊“来自 张三”）时不再重复。
+/// 来源里其余的段（“存于 X”、状态）归右侧操作区，见 `status_parts`。
 pub fn meta_parts(f: &FileView, time_text: String) -> Vec<String> {
     let item = &f.item;
     let mut parts = vec![human_size(item.size)];
@@ -257,11 +258,20 @@ pub fn meta_parts(f: &FileView, time_text: String) -> Vec<String> {
         }
     }
     parts.push(time_text);
-    parts.extend(split_source(&item.source_label));
+    parts.extend(split_source(&item.source_label).into_iter().take(1));
     if !f.conv_title.is_empty() && !item.source_label.contains(&f.conv_title) {
         parts.push(strings::files_in_conv(&f.conv_title));
     }
     parts
+}
+
+/// 放在右侧操作区按钮下方的说明：来源里“来自 X”之后的各段（“存于 X”、“已下载”）。
+pub fn status_parts(f: &FileView) -> String {
+    split_source(&f.item.source_label)
+        .into_iter()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 fn meta_label(text: impl Into<TextContent>, role: Role) -> Element {
@@ -381,7 +391,7 @@ fn thumb_or_icon(item: &lanmsg_api::types::FileItemView, size: i32, radius: f32)
 
 /// 列表项右侧的操作区：待下载 -> 下载；下载中 -> 进度 + 取消；已在本地 -> 打开 / 打开所在文件夹；
 /// 源离线、准备中 -> 文字。按钮一律是小号描边按钮。
-fn file_actions(ui: &UiState, item: &lanmsg_api::types::FileItemView) -> Element {
+fn file_actions(ui: &UiState, item: &lanmsg_api::types::FileItemView, status: String) -> Element {
     let key = {
         let it = item.clone();
         ui.derive(move |m| state_code(&effective_state(&it, m)))
@@ -389,7 +399,7 @@ fn file_actions(ui: &UiState, item: &lanmsg_api::types::FileItemView) -> Element
     let (ui, item) = (ui.clone(), item.clone());
     Element::switcher(key, move |st| {
         let button = |text: &'static str| Element::button(text).outline().small();
-        match st {
+        let main = match st {
             0 => {
                 let (ui, hash) = (ui.clone(), item.hash.clone());
                 button(strings::FILE_DOWNLOAD)
@@ -442,7 +452,17 @@ fn file_actions(ui: &UiState, item: &lanmsg_api::types::FileItemView) -> Element
             }
             3 => meta_label(strings::FILE_SOURCE_OFFLINE, Role::TextMuted),
             _ => meta_label(strings::FILE_PREPARING, Role::TextMuted),
+        };
+        // 下载中的进度文字已说明状态；其余状态在按钮下方补一行说明。一律右对齐
+        let mut col = Element::col()
+            .width_match()
+            .cross(if st == 1 { Align::Start } else { Align::End })
+            .spacing(style::SPACE_XS)
+            .child(main);
+        if st != 1 && !status.is_empty() {
+            col = col.child(meta_label(status.clone(), Role::TextSubtle));
         }
+        col
     })
 }
 
@@ -494,16 +514,22 @@ fn list_row(ui: &UiState, f: &FileView, confirm: ConfirmState) -> Element {
             Element::row()
                 .width_match()
                 .height(ROW_H)
-                .padding_xy(style::SPACE_LG, style::SPACE_SM)
+                // 右侧多留一截：滚动条槽不压住操作区
+                .padding_edges(Insets {
+                    top: style::SPACE_SM,
+                    bottom: style::SPACE_SM,
+                    left: style::SPACE_LG,
+                    right: style::SPACE_XL,
+                })
                 .spacing(style::SPACE_MD)
                 .cross(Align::Center)
                 .child(thumb)
                 .child(info)
-                .child(
-                    Element::col()
-                        .width(ACTIONS_W)
-                        .child(file_actions(ui, item)),
-                ),
+                .child(Element::col().width(ACTIONS_W).child(file_actions(
+                    ui,
+                    item,
+                    status_parts(f),
+                ))),
         )
         .child(Element::divider())
         .on_context_menu(menu_builder(ui, f, confirm))
@@ -873,7 +899,8 @@ mod tests {
         f.item.source_label = "来自 张三 · 存于 我的台式机".into();
         f.conv_title = "张三".into();
         let p = meta_parts(&f, "昨天".into());
-        assert_eq!(p, vec!["1 B", "昨天", "来自 张三", "存于 我的台式机"]);
+        assert_eq!(p, vec!["1 B", "昨天", "来自 张三"]);
+        assert_eq!(status_parts(&f), "存于 我的台式机");
         // 会话名没出现在来源里时补一段
         f.conv_title = "项目群".into();
         let p = meta_parts(&f, "昨天".into());

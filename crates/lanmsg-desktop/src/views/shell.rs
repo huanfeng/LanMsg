@@ -40,7 +40,7 @@ fn nav_item(
     });
     let ui_click = ui.clone();
 
-    // 图标区 44x24：图标水平居中、贴底（上方 4px 留给角标探出），角标贴右上、只压住图标的右上角
+    // 图标区 48x30：图标水平居中、贴底（上方 10px 留给角标），角标贴右上、与图标仅在角上相接
     let mut holder = Element::stack()
         .size(style::NAV_ICON_BOX_W, style::NAV_ICON_BOX_H)
         .child(

@@ -104,7 +104,7 @@ pub const RADIUS_PILL: f32 = 999.0;
 /// 图标栏宽度、项宽与项高。
 pub const RAIL_WIDTH: i32 = 64;
 pub const NAV_ITEM_W: i32 = 48;
-pub const NAV_ITEM_H: i32 = 56;
+pub const NAV_ITEM_H: i32 = 62;
 /// 会话列表行高、头像直径、搜索框高。
 pub const CONV_ROW_H: i32 = 64;
 pub const AVATAR_SIZE: i32 = 40;
@@ -121,7 +121,7 @@ pub const LOGO_SIZE: i32 = 28;
 pub const ICON_EMPTY_SIZE: i32 = 48;
 /// 图标栏图标区（含角标探出的余量）。
 pub const NAV_ICON_BOX_W: i32 = 48;
-pub const NAV_ICON_BOX_H: i32 = 24;
+pub const NAV_ICON_BOX_H: i32 = 30;
 /// 徽章高度（同时是最小宽度）。
 pub const BADGE_H: i32 = 16;
 /// 图标栏选中指示条：贴图标栏左缘的 3px 竖条（signal），在 rail 上让选中项一眼可辨。

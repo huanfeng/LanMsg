@@ -96,14 +96,7 @@ pub fn wizard(ui: &UiState) -> Element {
         .child(field(
             strings::WIZARD_NAME_LABEL,
             Element::text_input(name, strings::WIZARD_NAME_PLACEHOLDER).autofocus(),
-            vec![
-                hint(strings::WIZARD_NAME_INVALID, Role::Danger, name_bad),
-                hint(
-                    strings::WIZARD_NAME_REQUIRED_HINT,
-                    Role::TextMuted,
-                    name_empty,
-                ),
-            ],
+            vec![hint(strings::WIZARD_NAME_INVALID, Role::Danger, name_bad)],
         ))
         .child(field(
             strings::WIZARD_DEVICE_LABEL,
@@ -115,6 +108,12 @@ pub fn wizard(ui: &UiState) -> Element {
             )],
         ))
         .child(Element::divider())
+        // 两个按钮禁用的原因就近说明（名字为空时）
+        .child(hint(
+            strings::WIZARD_BUTTONS_NEED_NAME,
+            Role::TextMuted,
+            name_empty,
+        ))
         .child(choice(first, strings::WIZARD_FIRST_DEVICE_HINT))
         .child(choice(join, strings::WIZARD_JOIN_HINT));
 

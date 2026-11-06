@@ -138,27 +138,42 @@ pub fn devices_panel(ui: &UiState, confirm: ConfirmState) -> Element {
 
     let (ui_qr, ui_sas) = (ui.clone(), ui.clone());
     let in_pair = ui.derive(|m| m.pair.is_some());
-    let actions = Element::row()
+    // 每个按钮下一行说明它做什么
+    let caption = |text: &'static str| {
+        Element::label(text)
+            .font_size(style::FONT_META)
+            .fg_role(Role::TextSubtle)
+    };
+    let actions = Element::col()
         .spacing(style::SPACE_SM)
-        .cross(Align::Center)
         .child(
-            Element::button(strings::DEVICES_ADD)
-                .enabled_when(move || !in_pair.get())
-                .on_click(move |_| ui_qr.act(|m| m.pair_start(PairMethod::Qr))),
+            Element::row()
+                .spacing(style::SPACE_LG)
+                .cross(Align::Start)
+                .child(
+                    Element::col()
+                        .spacing(style::SPACE_XS)
+                        .child(
+                            Element::button(strings::DEVICES_ADD)
+                                .enabled_when(move || !in_pair.get())
+                                .on_click(move |_| ui_qr.act(|m| m.pair_start(PairMethod::Qr))),
+                        )
+                        .child(caption(strings::DEVICES_ADD_HINT)),
+                )
+                .child(
+                    Element::col()
+                        .spacing(style::SPACE_XS)
+                        .child(
+                            Element::button(strings::DEVICES_ADD_SAS)
+                                .outline_soft()
+                                .intent(Intent::Neutral)
+                                .enabled_when(move || !in_pair.get())
+                                .on_click(move |_| ui_sas.act(|m| m.pair_start(PairMethod::Sas))),
+                        )
+                        .child(caption(strings::DEVICES_ADD_SAS_HINT)),
+                ),
         )
-        .child(
-            Element::button(strings::DEVICES_ADD_SAS)
-                .outline_soft()
-                .intent(Intent::Neutral)
-                .enabled_when(move || !in_pair.get())
-                .on_click(move |_| ui_sas.act(|m| m.pair_start(PairMethod::Sas))),
-        )
-        .child(
-            Element::label(strings::DEVICES_ADD_BUSY)
-                .font_size(style::FONT_META)
-                .fg_role(Role::TextSubtle)
-                .visible_signal(in_pair),
-        );
+        .child(caption(strings::DEVICES_ADD_BUSY).visible_signal(in_pair));
 
     Element::col()
         .width_match()

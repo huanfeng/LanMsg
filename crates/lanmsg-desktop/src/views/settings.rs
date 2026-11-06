@@ -625,7 +625,18 @@ pub fn settings_page(ui: &UiState) -> Element {
     Element::stack()
         .fill()
         .bg_role(Role::Bg)
-        .child(Element::scroll().fill().child(body))
+        .child(
+            // 右侧留出滚动条槽，滚动条不贴窗口边
+            Element::col()
+                .fill()
+                .padding_edges(Insets {
+                    top: 0,
+                    bottom: 0,
+                    left: 0,
+                    right: style::SPACE_XS,
+                })
+                .child(Element::scroll().fill().child(body)),
+        )
         .child(remove_confirm_host(ui, remove_confirm))
 }
 

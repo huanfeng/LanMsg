@@ -393,9 +393,21 @@ pub fn composer(ui: &UiState, conv: String) -> Element {
         .height(INPUT_H);
 
     let (ui_send, conv_send) = (ui.clone(), conv.clone());
-    let send = Element::button(strings::COMPOSER_SEND)
-        .enabled_when(move || normalize_outgoing(&text.get()).is_some())
-        .on_click(move |_| submit(&ui_send, &conv_send, text));
+    // 发送按钮禁用时说明原因（规范第 7 节）：悬停提示，不再常驻占位；
+    // 输入为空时把按钮包进带提示的容器，可用时直接放按钮，不会误弹提示
+    let send = Element::switcher(blank, move |is_blank| {
+        let (ui, conv) = (ui_send.clone(), conv_send.clone());
+        let button = Element::button(strings::COMPOSER_SEND)
+            .enabled_when(move || normalize_outgoing(&text.get()).is_some())
+            .on_click(move |_| submit(&ui, &conv, text));
+        if is_blank {
+            Element::stack()
+                .tooltip(strings::COMPOSER_EMPTY_HINT)
+                .child(button)
+        } else {
+            button
+        }
+    });
 
     let tools = Element::row()
         .width_match()
@@ -408,13 +420,6 @@ pub fn composer(ui: &UiState, conv: String) -> Element {
                 .font_size(style::FONT_META)
                 .fg_role(Role::TextSubtle)
                 .visible_signal(has_hint),
-        )
-        // 发送按钮禁用时说明原因（规范第 7 节）
-        .child(
-            Element::label(strings::COMPOSER_EMPTY_HINT)
-                .font_size(style::FONT_META)
-                .fg_role(Role::TextSubtle)
-                .visible_signal(blank),
         )
         .child(Element::flex_spacer())
         .child(send);
