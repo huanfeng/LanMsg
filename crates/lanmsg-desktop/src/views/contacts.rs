@@ -6,7 +6,7 @@ use lanmsg_api::types::{
 };
 use windui::prelude::*;
 
-use crate::model::{parse_ask_mb, CONTACTS_TABS};
+use crate::model::{normalize_peer_addr, parse_ask_mb, CONTACTS_TABS};
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
@@ -28,7 +28,7 @@ pub struct Nearby {
     pub name: String,
     /// 设备名列表。
     pub devices: Vec<String>,
-    /// 首台设备的指纹。
+    /// 首台设备的指纹（PeerView 没有用户指纹字段）。
     pub short: String,
     /// 最优路径的角标；局域网不标。
     pub badge: Option<&'static str>,
@@ -196,19 +196,12 @@ fn contact_card(ui: &UiState, c: &ContactView, expanded: Signal<String>) -> Elem
     let ask_bad = ask.map(|t| parse_ask_mb(t).is_none());
     let ask_ok = ask.map(|t| parse_ask_mb(t).is_some());
 
-    let status = if c.online {
-        strings::CHAT_ONLINE
+    let summary = format!("{} {}", c.devices.len(), strings::CONTACT_DEVICE_COUNT_UNIT);
+    let dot = Element::leaf().size(8, 8).corner(4.0).bg_role(if c.online {
+        Role::Success
     } else {
-        strings::CHAT_OFFLINE
-    };
-    let summary = format!(
-        "{} {} · {} · {}{}",
-        strings::CONTACT_FINGERPRINT,
-        c.user_short,
-        status,
-        c.devices.len(),
-        strings::CONTACT_DEVICE_COUNT_UNIT
-    );
+        Role::TextSubtle
+    });
     let toggle_id = id.clone();
     let ui_dm = ui.clone();
     let dm_user = id.clone();
@@ -237,7 +230,13 @@ fn contact_card(ui: &UiState, c: &ContactView, expanded: Signal<String>) -> Elem
                     Element::col()
                         .weight(1.0)
                         .spacing(style::SPACE_XS)
-                        .child(name_label(c.display_name.clone()))
+                        .child(
+                            Element::row()
+                                .spacing(style::SPACE_SM)
+                                .cross(Align::Center)
+                                .child(name_label(c.display_name.clone()))
+                                .child(dot),
+                        )
                         .child(meta(summary)),
                 ),
         )
@@ -306,7 +305,19 @@ fn contact_card(ui: &UiState, c: &ContactView, expanded: Signal<String>) -> Elem
                 .visible_signal(ask_bad),
         );
 
-    let mut details = Element::col().width_match().child(Element::divider());
+    let mut details = Element::col()
+        .width_match()
+        .child(Element::divider())
+        .child(
+            Element::col()
+                .width_match()
+                .padding_xy(style::SPACE_LG, style::SPACE_SM)
+                .child(meta(format!(
+                    "{} {}",
+                    strings::CONTACT_FINGERPRINT,
+                    c.user_short
+                ))),
+        );
     for d in &c.devices {
         details = details.child(device_row(d, None));
     }
@@ -387,18 +398,18 @@ fn request_card(ui: &UiState, r: &RequestView, confirm: ConfirmState) -> Element
             Element::row()
                 .spacing(style::SPACE_SM)
                 .cross(Align::Center)
-                .child(name_label(r.from_name.clone()))
-                .child(meta(format!(
-                    "{} {}",
-                    strings::CONTACT_FINGERPRINT,
-                    r.from_short
-                ))),
+                .child(name_label(r.from_name.clone())),
         )
         .child(
             Element::label(request_kind_label(&r.kind))
                 .font_size(style::FONT_META)
                 .fg_role(Role::TextMuted),
-        );
+        )
+        .child(meta(format!(
+            "{} {}",
+            strings::CONTACT_FINGERPRINT,
+            r.from_short
+        )));
     if !r.preview.is_empty() {
         info = info.child(
             Element::label(r.preview.clone())
@@ -452,6 +463,10 @@ fn requests_tab(ui: &UiState, confirm: ConfirmState) -> Element {
 fn manual_peer_card(ui: &UiState) -> Element {
     let addr = signal(String::new());
     let empty = addr.map(|a| a.trim().is_empty());
+    let valid = addr.map(|a| normalize_peer_addr(a).is_ok());
+    // 非空但不合法时显示具体原因（红字）；空输入时说明按钮为何不可用
+    let bad = addr.map(|a| !a.trim().is_empty() && normalize_peer_addr(a).is_err());
+    let bad_text = addr.map(|a| normalize_peer_addr(a).err().unwrap_or_default().to_string());
     let ui = ui.clone();
     card()
         .padding(style::SPACE_LG)
@@ -462,7 +477,7 @@ fn manual_peer_card(ui: &UiState) -> Element {
                 .font_weight(style::WEIGHT_STRONG)
                 .fg_role(Role::Text),
         )
-        .child(meta(strings::MANUAL_PEER_HINT))
+        .child(meta(strings::manual_peer_hint()))
         .child(
             Element::row()
                 .width_match()
@@ -474,12 +489,24 @@ fn manual_peer_card(ui: &UiState) -> Element {
                 )
                 .child(
                     Element::button(strings::MANUAL_PEER_BUTTON)
-                        .enabled_when(move || !empty.get())
+                        .enabled_when(move || valid.get())
                         .on_click(move |_| {
                             let a = addr.get();
                             ui.act(|m| m.add_manual_peer(a));
                         }),
                 ),
+        )
+        .child(
+            Element::label(bad_text)
+                .font_size(style::FONT_META)
+                .fg_role(Role::Danger)
+                .visible_signal(bad),
+        )
+        .child(
+            Element::label(strings::MANUAL_PEER_EMPTY_HINT)
+                .font_size(style::FONT_META)
+                .fg_role(Role::TextSubtle)
+                .visible_signal(empty),
         )
 }
 
@@ -504,12 +531,8 @@ fn nearby_card(ui: &UiState, n: &Nearby) -> Element {
                     .weight(1.0)
                     .spacing(style::SPACE_XS)
                     .child(title)
-                    .child(meta(format!(
-                        "{} · {} {}",
-                        n.devices.join("、"),
-                        strings::CONTACT_FINGERPRINT,
-                        n.short
-                    ))),
+                    .child(meta(n.devices.join("、")))
+                    .child(meta(format!("{} {}", strings::NEARBY_FINGERPRINT, n.short))),
             )
             .child(Element::button(strings::CONTACT_ADD).on_click(move |_| {
                 let u = user.clone();

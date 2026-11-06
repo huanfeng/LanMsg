@@ -58,6 +58,65 @@ pub enum PairUi {
     },
 }
 
+/// 配对链接是否合法：trim 后以 `lanmsg://` 开头且后缀非空。
+pub fn pair_link_ok(link: &str) -> bool {
+    link.trim()
+        .strip_prefix("lanmsg://")
+        .is_some_and(|rest| !rest.is_empty())
+}
+
+fn host_ok(host: &str) -> bool {
+    !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+fn port_ok(port: &str) -> bool {
+    !port.is_empty()
+        && port.chars().all(|c| c.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|p| p != 0)
+}
+
+/// 规范化手动添加的对端地址，缺端口时补默认服务端口。
+/// 接受 `host`、`host:port`、`IPv4`、`IPv4:port`、`[v6]:port`、`[v6]`（补默认端口）、裸 IPv6；
+/// 端口须在 1–65535。
+pub fn normalize_peer_addr(input: &str) -> Result<String, &'static str> {
+    let s = input.trim();
+    let port = lanmsg_proto::consts::SERVICE_PORT;
+    if s.is_empty() {
+        return Err(strings::MANUAL_PEER_EMPTY);
+    }
+    if let Some(rest) = s.strip_prefix('[') {
+        let (v6, tail) = rest.split_once(']').ok_or(strings::MANUAL_PEER_INVALID)?;
+        if v6.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(strings::MANUAL_PEER_INVALID);
+        }
+        return match tail {
+            "" => Ok(format!("[{v6}]:{port}")),
+            t => match t.strip_prefix(':') {
+                Some(p) if port_ok(p) => Ok(format!("[{v6}]:{p}")),
+                _ => Err(strings::MANUAL_PEER_PORT_INVALID),
+            },
+        };
+    }
+    match s.matches(':').count() {
+        0 if host_ok(s) => Ok(format!("{s}:{port}")),
+        1 => {
+            let (host, p) = s.split_once(':').unwrap_or_default();
+            if !host_ok(host) {
+                Err(strings::MANUAL_PEER_INVALID)
+            } else if !port_ok(p) {
+                Err(strings::MANUAL_PEER_PORT_INVALID)
+            } else {
+                Ok(s.to_string())
+            }
+        }
+        n if n >= 2 && s.parse::<std::net::Ipv6Addr>().is_ok() => Ok(format!("[{s}]:{port}")),
+        _ => Err(strings::MANUAL_PEER_INVALID),
+    }
+}
+
 /// 最近一次配对的发起意图：失败后“重试”据此重来。
 #[derive(Debug, Clone, PartialEq)]
 pub enum PairIntent {
@@ -123,10 +182,14 @@ pub struct Model {
     pub pair: Option<PairUi>,
     /// 最近一次配对意图（重试用）。
     pub pair_intent: Option<PairIntent>,
+    /// 先于 `PairSession` 回复到达的配对状态事件 `(会话, 状态)`：回复到达后应用。
+    pub pair_early_status: Option<(String, PairStateDto)>,
     /// 联系人页当前分类（0 联系人、1 新的请求、2 附近的人、3 我的设备）。
     pub contacts_tab: usize,
     /// 已发出处理请求、尚未回复的请求 id（防重复点击）。
     pub pending_requests: BTreeSet<String>,
+    /// 已发出联系人请求、尚未回复的用户 id（防重复点击）。
+    pub pending_contact_requests: BTreeSet<String>,
     pub toast: Option<String>,
     /// 发送失败待回填输入框的草稿 `(会话, 文字)`；由 UiState 在输入框存在时取走。
     pub draft_restore: Option<(String, String)>,
@@ -181,8 +244,10 @@ impl Model {
             cancelled_downloads: BTreeSet::new(),
             pair: None,
             pair_intent: None,
+            pair_early_status: None,
             contacts_tab: 0,
             pending_requests: BTreeSet::new(),
+            pending_contact_requests: BTreeSet::new(),
             toast: None,
             draft_restore: None,
             window_focused: true,
@@ -235,6 +300,9 @@ impl Model {
                     match &tag {
                         ReplyTag::Responded { request } => {
                             self.pending_requests.remove(request);
+                        }
+                        ReplyTag::Requested { user } => {
+                            self.pending_contact_requests.remove(user);
                         }
                         // 发起方启动失败：关闭对话框；加入方失败：回到选择界面可改选
                         ReplyTag::Pair => self.pair = None,
@@ -382,12 +450,33 @@ impl Model {
                 Vec::new()
             }
             (ReplyTag::Pair | ReplyTag::PairJoin, Response::PairSession { value }) => {
+                if self.pair != Some(PairUi::Starting) {
+                    // 等待期间用户已取消：迟到的会话不再弹框，并通知服务端收掉孤儿会话
+                    self.pair_early_status = None;
+                    return vec![call(
+                        Request::PairCancel {
+                            session: value.session,
+                        },
+                        ReplyTag::Generic,
+                    )];
+                }
+                // 状态事件可能先于回复到达：属于本会话的就地应用
+                let state = match self.pair_early_status.take() {
+                    Some((s, st)) if s == value.session => st,
+                    _ => PairStateDto::WaitingPeer,
+                };
+                let mut fx = Vec::new();
+                if state == PairStateDto::Done {
+                    self.wizard_joining = false;
+                    fx.push(call(Request::ListMyDevices, ReplyTag::Devices));
+                    fx.push(call(Request::GetSelf, ReplyTag::SelfInfo));
+                }
                 self.pair = Some(PairUi::Showing {
                     session: value.session,
                     qr_uri: value.qr_uri,
-                    state: PairStateDto::WaitingPeer,
+                    state,
                 });
-                Vec::new()
+                fx
             }
             (ReplyTag::Search { query }, Response::Messages { value }) => {
                 // 只接受与当前查询词一致的回复，丢弃过期回复
@@ -424,7 +513,8 @@ impl Model {
                 self.requests.retain(|r| r.request != request);
                 Vec::new()
             }
-            (ReplyTag::Requested, Response::Ok) => {
+            (ReplyTag::Requested { user }, Response::Ok) => {
+                self.pending_contact_requests.remove(&user);
                 self.toast = Some(strings::CONTACT_REQUEST_SENT.to_string());
                 Vec::new()
             }
@@ -550,6 +640,11 @@ impl Model {
             Event::DevicesChanged => vec![call(Request::ListMyDevices, ReplyTag::Devices)],
             Event::PairStatus { session, state } => {
                 let mut fx = Vec::new();
+                if self.pair == Some(PairUi::Starting) {
+                    // 回复尚未到达：缓存最近一次状态，回复到达后应用
+                    self.pair_early_status = Some((session, state));
+                    return fx;
+                }
                 if let Some(PairUi::Showing {
                     session: cur,
                     state: cur_state,
@@ -731,7 +826,13 @@ impl Model {
 
     /// 向附近的人发出联系人请求。
     pub fn request_contact(&mut self, user: String) -> Vec<Effect> {
-        vec![call(Request::RequestContact { user }, ReplyTag::Requested)]
+        if !self.pending_contact_requests.insert(user.clone()) {
+            return Vec::new();
+        }
+        vec![call(
+            Request::RequestContact { user: user.clone() },
+            ReplyTag::Requested { user },
+        )]
     }
 
     /// 保存联系人策略：先本地更新，失败时按服务端重新拉取。
@@ -779,11 +880,13 @@ impl Model {
 
     /// 手动添加对端地址（跨网段 / VPN）。
     pub fn add_manual_peer(&mut self, addr: String) -> Vec<Effect> {
-        let addr = addr.trim().to_string();
-        if addr.is_empty() {
-            self.toast = Some(strings::MANUAL_PEER_EMPTY.to_string());
-            return Vec::new();
-        }
+        let addr = match normalize_peer_addr(&addr) {
+            Ok(a) => a,
+            Err(msg) => {
+                self.toast = Some(msg.to_string());
+                return Vec::new();
+            }
+        };
         vec![call(Request::AddManualPeer { addr }, ReplyTag::ManualPeer)]
     }
 
@@ -804,6 +907,7 @@ impl Model {
             return Vec::new();
         }
         self.pair = Some(PairUi::Starting);
+        self.pair_early_status = None;
         self.pair_intent = Some(PairIntent::Start(method.clone()));
         vec![call(Request::PairStart { method }, ReplyTag::Pair)]
     }
@@ -819,7 +923,11 @@ impl Model {
         if self.pair != Some(PairUi::Picking) {
             return Vec::new();
         }
+        if matches!(&target, PairTarget::QrUri { uri } if !pair_link_ok(uri)) {
+            return Vec::new();
+        }
         self.pair = Some(PairUi::Starting);
+        self.pair_early_status = None;
         self.pair_intent = Some(PairIntent::Join(target.clone()));
         vec![call(Request::PairJoin { target }, ReplyTag::PairJoin)]
     }
@@ -830,11 +938,17 @@ impl Model {
             return Vec::new();
         };
         let session = session.clone();
-        if !matches {
-            *state = PairStateDto::Failed {
-                reason: strings::PAIR_SAS_MISMATCH.to_string(),
-            };
+        // 仅在等待比对时有效；点“一致”后本地置为验证中，避免先一致后又点不一致
+        if !matches!(state, PairStateDto::ShowSas { .. }) {
+            return Vec::new();
         }
+        *state = if matches {
+            PairStateDto::Verifying
+        } else {
+            PairStateDto::Failed {
+                reason: strings::PAIR_SAS_MISMATCH.to_string(),
+            }
+        };
         vec![call(
             Request::PairConfirm { session, matches },
             ReplyTag::Generic,
@@ -853,6 +967,7 @@ impl Model {
             _ => Vec::new(),
         };
         self.pair_intent = None;
+        self.pair_early_status = None;
         if self.wizard_joining {
             self.wizard_joining = false;
             self.init_mode = None;
@@ -864,6 +979,7 @@ impl Model {
     pub fn pair_close(&mut self) -> Vec<Effect> {
         self.pair = None;
         self.pair_intent = None;
+        self.pair_early_status = None;
         Vec::new()
     }
 
@@ -1457,6 +1573,7 @@ mod tests {
     #[test]
     fn rule10_pair_status_updates_state() {
         let mut m = Model::new();
+        m.pair_start(PairMethod::Qr);
         m.apply(reply(
             ReplyTag::Pair,
             Response::PairSession {
@@ -2253,13 +2370,112 @@ mod tests {
     }
 
     #[test]
-    fn request_contact_toasts_on_ok() {
+    fn request_contact_toasts_on_ok_and_dedups_in_flight() {
         let mut m = Model::new();
         let fx = m.request_contact("u1".into());
         assert!(has(&fx, |r| matches!(r,
             Request::RequestContact { user } if user == "u1")));
-        m.apply(reply(ReplyTag::Requested, Response::Ok));
+        assert!(m.request_contact("u1".into()).is_empty(), "在途时不重复发");
+        m.apply(reply(
+            ReplyTag::Requested { user: "u1".into() },
+            Response::Ok,
+        ));
         assert_eq!(m.toast.as_deref(), Some(strings::CONTACT_REQUEST_SENT));
+        assert!(!m.request_contact("u1".into()).is_empty(), "回复后可再发");
+        m.apply(err_reply(ReplyTag::Requested { user: "u1".into() }, "x"));
+        assert!(!m.request_contact("u1".into()).is_empty(), "失败后可重试");
+    }
+
+    #[test]
+    fn pair_link_ok_cases() {
+        assert!(pair_link_ok(" lanmsg://pair?x "));
+        assert!(!pair_link_ok("http://x"));
+        assert!(!pair_link_ok(""));
+        assert!(!pair_link_ok("lanmsg://"));
+    }
+
+    #[test]
+    fn pair_join_rejects_invalid_link() {
+        let mut m = Model::new();
+        m.pair_open_join();
+        let fx = m.pair_join(PairTarget::QrUri {
+            uri: "http://x".into(),
+        });
+        assert!(fx.is_empty());
+        assert_eq!(m.pair, Some(PairUi::Picking));
+    }
+
+    #[test]
+    fn normalize_peer_addr_cases() {
+        let p = lanmsg_proto::consts::SERVICE_PORT;
+        assert_eq!(normalize_peer_addr("10.8.0.5"), Ok(format!("10.8.0.5:{p}")));
+        assert_eq!(
+            normalize_peer_addr(" 10.8.0.5:7000 "),
+            Ok("10.8.0.5:7000".into())
+        );
+        assert_eq!(normalize_peer_addr("[::1]:7000"), Ok("[::1]:7000".into()));
+        assert_eq!(normalize_peer_addr("::1"), Ok(format!("[::1]:{p}")));
+        // 括号无端口：补默认端口
+        assert_eq!(normalize_peer_addr("[::1]"), Ok(format!("[::1]:{p}")));
+        assert_eq!(normalize_peer_addr("host:7000"), Ok("host:7000".into()));
+        assert_eq!(normalize_peer_addr("pc-1.lan"), Ok(format!("pc-1.lan:{p}")));
+        assert!(normalize_peer_addr(":7000").is_err());
+        assert!(normalize_peer_addr("host:99999").is_err());
+        assert!(normalize_peer_addr("host:0").is_err());
+        assert!(normalize_peer_addr("[::1]:99999").is_err());
+        assert!(normalize_peer_addr("a b").is_err());
+        assert!(normalize_peer_addr("").is_err());
+    }
+
+    #[test]
+    fn pair_cancel_during_starting_ignores_late_reply_and_cancels_session() {
+        let mut m = Model::new();
+        m.pair_start(PairMethod::Sas);
+        assert!(m.pair_cancel().is_empty(), "未拿到会话时无会话可取消");
+        let fx = m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        assert_eq!(m.pair, None);
+        assert!(has(&fx, |r| matches!(r,
+            Request::PairCancel { session } if session == "s1")));
+    }
+
+    #[test]
+    fn pair_status_before_reply_is_applied_after_reply() {
+        let mut m = Model::new();
+        m.pair_start(PairMethod::Sas);
+        m.apply(pair_event(
+            "s1",
+            PairStateDto::ShowSas {
+                code: "123456".into(),
+            },
+        ));
+        assert_eq!(m.pair, Some(PairUi::Starting));
+        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        assert!(matches!(&m.pair, Some(PairUi::Showing { state, .. })
+            if matches!(state, PairStateDto::ShowSas { .. })));
+        // 属于其他会话的缓存不应用
+        m.pair_cancel();
+        m.pair_start(PairMethod::Sas);
+        m.apply(pair_event("old", PairStateDto::Verifying));
+        m.apply(reply(ReplyTag::Pair, pair_info("s2", None)));
+        assert!(matches!(&m.pair, Some(PairUi::Showing { state, .. })
+            if *state == PairStateDto::WaitingPeer));
+    }
+
+    #[test]
+    fn pair_confirm_match_sets_verifying_once() {
+        let mut m = Model::new();
+        m.pair_start(PairMethod::Sas);
+        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        m.apply(pair_event(
+            "s1",
+            PairStateDto::ShowSas {
+                code: "123456".into(),
+            },
+        ));
+        assert!(!m.pair_confirm(true).is_empty());
+        assert!(matches!(&m.pair, Some(PairUi::Showing { state, .. })
+            if *state == PairStateDto::Verifying));
+        assert!(m.pair_confirm(false).is_empty(), "已确认后不再接受不一致");
     }
 
     #[test]
@@ -2414,6 +2630,16 @@ mod tests {
         let fx = m.pair_confirm(true);
         assert!(has(&fx, |r| matches!(r,
             Request::PairConfirm { session, matches: true } if session == "s1")));
+        // 已点“一致”后进入验证中；另起会话验证“不一致”
+        let mut m = Model::new();
+        m.pair_start(PairMethod::Sas);
+        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        m.apply(pair_event(
+            "s1",
+            PairStateDto::ShowSas {
+                code: "123456".into(),
+            },
+        ));
         let fx = m.pair_confirm(false);
         assert!(has(&fx, |r| matches!(
             r,

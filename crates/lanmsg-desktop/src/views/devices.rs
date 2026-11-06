@@ -60,9 +60,11 @@ pub fn device_row(d: &DeviceView, confirm: Option<ConfirmState>) -> Element {
     } else {
         Role::TextSubtle
     });
-    let meta = Element::label(format!(
-        "{} · {} {}",
-        device_type_label(&d.device_type),
+    let meta = Element::label(device_type_label(&d.device_type))
+        .font_size(style::FONT_META)
+        .fg_role(Role::TextSubtle);
+    let fingerprint = Element::label(format!(
+        "{} {}",
         strings::CONTACT_FINGERPRINT,
         d.device_short
     ))
@@ -82,6 +84,7 @@ pub fn device_row(d: &DeviceView, confirm: Option<ConfirmState>) -> Element {
                 .child(title)
                 .child(meta),
         )
+        .child(fingerprint)
         .child(
             Element::label(status)
                 .font_size(style::FONT_META)
@@ -130,6 +133,7 @@ pub fn devices_section(ui: &UiState) -> Element {
     let in_pair = ui.derive(|m| m.pair.is_some());
     let actions = Element::row()
         .spacing(style::SPACE_SM)
+        .cross(Align::Center)
         .child(
             Element::button(strings::DEVICES_ADD)
                 .enabled_when(move || !in_pair.get())
@@ -141,6 +145,12 @@ pub fn devices_section(ui: &UiState) -> Element {
                 .intent(Intent::Neutral)
                 .enabled_when(move || !in_pair.get())
                 .on_click(move |_| ui_sas.act(|m| m.pair_start(PairMethod::Sas))),
+        )
+        .child(
+            Element::label(strings::DEVICES_ADD_BUSY)
+                .font_size(style::FONT_META)
+                .fg_role(Role::TextSubtle)
+                .visible_signal(in_pair),
         );
 
     let ui_ok = ui.clone();

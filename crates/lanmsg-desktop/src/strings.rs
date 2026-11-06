@@ -134,8 +134,19 @@ pub const BLOCK_TITLE: &str = "屏蔽此人？";
 pub const BLOCK_MESSAGE_SUFFIX: &str = "屏蔽后将不再收到对方的任何消息和请求。";
 pub const CONFIRM_CANCEL: &str = "取消";
 pub const MANUAL_PEER_TITLE: &str = "手动添加地址";
-pub const MANUAL_PEER_HINT: &str = "跨网段或 VPN 时，输入对方的 IP 或主机名（可带端口）";
-pub const MANUAL_PEER_PLACEHOLDER: &str = "例如 10.8.0.5:7000";
+pub const MANUAL_PEER_PLACEHOLDER: &str = "例如 10.8.0.5 或 10.8.0.5:7000";
+pub const MANUAL_PEER_INVALID: &str = "地址格式不对，请输入 IP 或主机名";
+pub const MANUAL_PEER_PORT_INVALID: &str = "端口须在 1–65535 之间";
+pub const MANUAL_PEER_EMPTY_HINT: &str = "先输入对方地址才能连接";
+pub const NEARBY_FINGERPRINT: &str = "设备指纹";
+
+/// 手动添加地址的说明；默认端口取协议常量。
+pub fn manual_peer_hint() -> String {
+    format!(
+        "跨网段或 VPN 时，输入对方的 IP 或主机名，可带端口（默认 {}）",
+        lanmsg_proto::consts::SERVICE_PORT
+    )
+}
 pub const MANUAL_PEER_BUTTON: &str = "连接";
 pub const MANUAL_PEER_EMPTY: &str = "请先输入对方地址";
 pub const MANUAL_PEER_SENT: &str = "已连接，对方出现在“附近的人”后即可添加";
@@ -147,6 +158,7 @@ pub const DEVICES_ONLINE: &str = "在线";
 pub const DEVICES_OFFLINE: &str = "离线";
 pub const DEVICES_REMOVE: &str = "移除";
 pub const DEVICES_ADD: &str = "添加我的设备";
+pub const DEVICES_ADD_BUSY: &str = "正在配对，完成或取消后才能再添加";
 pub const DEVICES_ADD_SAS: &str = "用数字比对添加";
 pub const DEVICES_REMOVE_TITLE: &str = "移除这台设备？";
 pub const DEVICES_REMOVE_MESSAGE: &str = "移除后该设备将无法再收发你的消息";
@@ -172,5 +184,7 @@ pub const PAIR_JOIN_NONE: &str = "还没有发现可加入的设备";
 pub const PAIR_JOIN_NONE_HINT: &str = "确认已有设备在同一网络并已打开 LanMsg，或粘贴配对链接";
 pub const PAIR_JOIN_LINK_LABEL: &str = "或粘贴配对链接";
 pub const PAIR_JOIN_LINK_PLACEHOLDER: &str = "lanmsg://pair?…";
+pub const PAIR_JOIN_LINK_INVALID: &str = "请粘贴以 lanmsg:// 开头的配对链接";
+pub const PAIR_JOIN_LINK_EMPTY_HINT: &str = "先粘贴配对链接才能使用";
 pub const PAIR_JOIN_LINK_BUTTON: &str = "使用链接";
 pub const PAIR_JOIN_ACTION: &str = "加入";

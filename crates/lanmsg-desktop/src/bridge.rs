@@ -58,7 +58,9 @@ pub enum ReplyTag {
         request: String,
     },
     /// 发出联系人请求：成功后提示。
-    Requested,
+    Requested {
+        user: String,
+    },
     /// 联系人策略保存：失败后以服务端为准重新拉取。
     Policy,
     /// 移除本人设备：成功后刷新设备列表。

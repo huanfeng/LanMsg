@@ -5,7 +5,7 @@ use lanmsg_api::types::{PairStateDto, PairTarget, PeerView};
 use qrcode::{Color as QrColor, QrCode};
 use windui::prelude::*;
 
-use crate::model::PairUi;
+use crate::model::{pair_link_ok, PairUi};
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
@@ -279,6 +279,9 @@ fn picker(ui: &UiState) -> Element {
             .child(Element::col().width_match().children(rows))
     });
 
+    let link_ok = link.map(|l| pair_link_ok(l));
+    // 非空但不合法：红字提示；空输入：说明按钮为何不可用（共用输入框下方同一位置）
+    let link_bad = link.map(|l| !l.trim().is_empty() && !pair_link_ok(l));
     let ui_link = ui.clone();
     let link_row = Element::row()
         .width_match()
@@ -290,11 +293,25 @@ fn picker(ui: &UiState) -> Element {
         )
         .child(
             Element::button(strings::PAIR_JOIN_LINK_BUTTON)
-                .enabled_when(move || !link_empty.get())
+                .enabled_when(move || link_ok.get())
                 .on_click(move |_| {
                     let uri = link.get().trim().to_string();
                     ui_link.act(|m| m.pair_join(PairTarget::QrUri { uri }));
                 }),
+        );
+    let link_hint = Element::col()
+        .width_match()
+        .child(
+            Element::label(strings::PAIR_JOIN_LINK_INVALID)
+                .font_size(style::FONT_META)
+                .fg_role(Role::Danger)
+                .visible_signal(link_bad),
+        )
+        .child(
+            Element::label(strings::PAIR_JOIN_LINK_EMPTY_HINT)
+                .font_size(style::FONT_META)
+                .fg_role(Role::TextSubtle)
+                .visible_signal(link_empty),
         );
 
     Element::col()
@@ -310,6 +327,7 @@ fn picker(ui: &UiState) -> Element {
         .child(Element::divider())
         .child(muted(strings::PAIR_JOIN_LINK_LABEL))
         .child(link_row)
+        .child(link_hint)
 }
 
 fn peer_row(ui: &UiState, p: &PeerView) -> Element {
@@ -338,12 +356,21 @@ fn peer_row(ui: &UiState, p: &PeerView) -> Element {
                         .truncate(Truncate::End),
                 )
                 .child(
-                    Element::label(format!("{} · {}", p.display_name, p.device_short))
+                    Element::label(p.display_name.clone())
                         .font_size(style::FONT_META)
                         .fg_role(Role::TextSubtle)
                         .max_lines(1)
                         .truncate(Truncate::End),
                 ),
+        )
+        .child(
+            Element::label(format!(
+                "{} {}",
+                strings::CONTACT_FINGERPRINT,
+                p.device_short
+            ))
+            .font_size(style::FONT_META)
+            .fg_role(Role::TextSubtle),
         )
         .child(
             Element::label(strings::PAIR_JOIN_ACTION)
