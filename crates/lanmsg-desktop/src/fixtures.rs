@@ -497,7 +497,7 @@ pub fn demo_model(p: DemoPage) -> Model {
             "c-self",
             ConvKind::SelfDevices,
             "我的设备",
-            "手机: 备忘已同步",
+            "手机：备忘已同步",
             45,
             0,
         ),

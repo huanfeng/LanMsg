@@ -295,7 +295,7 @@ fn text_bubble(mine: bool, text: &str) -> Element {
 }
 
 /// 下载中的进度与速率文字：`42% · 3.1 MB/s`。
-fn progress_text(transfers: &BTreeMap<String, TransferInfo>, hashes: &[String]) -> String {
+pub fn progress_text(transfers: &BTreeMap<String, TransferInfo>, hashes: &[String]) -> String {
     let (frac, speed) = aggregate_progress(transfers, hashes);
     format!(
         "{}% · {}",

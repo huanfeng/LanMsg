@@ -12,7 +12,7 @@ use crate::style;
 use crate::ui_state::UiState;
 use crate::views::chats::avatar;
 use crate::views::confirm::{confirm_host, Confirm, ConfirmState};
-use crate::views::devices::{device_row, devices_section, path_label};
+use crate::views::devices::{device_row, devices_panel, path_label, remove_confirm_host};
 
 /// 分类导航栏宽度。
 const NAV_W: i32 = 200;
@@ -564,7 +564,7 @@ fn nearby_tab(ui: &UiState) -> Element {
 // 页面
 // ---------------------------------------------------------------------------
 
-fn content(ui: &UiState, confirm: ConfirmState) -> Element {
+fn content(ui: &UiState, confirm: ConfirmState, remove_confirm: ConfirmState) -> Element {
     let tab = ui.derive(|m| m.contacts_tab);
     let ui = ui.clone();
     Element::switcher(tab, move |t| {
@@ -572,7 +572,7 @@ fn content(ui: &UiState, confirm: ConfirmState) -> Element {
             0 => (strings::TAB_CONTACTS, contacts_tab(&ui)),
             1 => (strings::TAB_REQUESTS, requests_tab(&ui, confirm)),
             2 => (strings::TAB_NEARBY, nearby_tab(&ui)),
-            _ => (strings::TAB_DEVICES, devices_section(&ui)),
+            _ => (strings::TAB_DEVICES, devices_panel(&ui, remove_confirm)),
         };
         Element::col()
             .width_match()
@@ -584,20 +584,21 @@ fn content(ui: &UiState, confirm: ConfirmState) -> Element {
     })
 }
 
-/// 联系人页：左分类导航 + 右内容；屏蔽请求前二次确认。
+/// 联系人页：左分类导航 + 右内容；屏蔽请求、移除设备前二次确认。
+/// 两个确认框都放在滚动区之外的最上层，遮罩才是全窗的。
 pub fn contacts_page(ui: &UiState) -> Element {
     let confirm = ConfirmState::new();
+    let remove_confirm = ConfirmState::new();
     let ui_ok = ui.clone();
     let body = Element::row()
         .fill()
         .child(side_nav(ui))
         .child(style::vline())
-        .child(
-            Element::scroll()
-                .weight(1.0)
-                .height_match()
-                .child(content(ui, confirm)),
-        );
+        .child(Element::scroll().weight(1.0).height_match().child(content(
+            ui,
+            confirm,
+            remove_confirm,
+        )));
     Element::stack()
         .fill()
         .bg_role(Role::Bg)
@@ -605,6 +606,7 @@ pub fn contacts_page(ui: &UiState) -> Element {
         .child(confirm_host(confirm, move |request| {
             ui_ok.act(|m| m.respond_request(request, RequestAction::Block));
         }))
+        .child(remove_confirm_host(ui, remove_confirm))
 }
 
 #[cfg(test)]

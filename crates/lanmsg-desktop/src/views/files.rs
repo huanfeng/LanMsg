@@ -1,6 +1,6 @@
 // 文件页：筛选条（类型 / 会话 / 状态 / 名字）+ 列表或网格。
-// 类型为图片或视频时用网格（120×120 缩略图 + 文件名），其余用列表；
-// 状态区与聊天里的文件卡片是同一个函数 `message_row::file_state_area`。
+// 类型为图片或视频时用网格（120×120 缩略图 + 文件名与来源），其余用列表；
+// 列表每项两行信息（名字 / 大小·时间·来源·会话）+ 右侧统一的小号描边操作按钮。
 // 注释中文，标识符英文。
 
 use std::cell::{Cell, RefCell};
@@ -21,22 +21,21 @@ use crate::views::chats::{format_time, now_millis};
 use crate::views::confirm::{confirm_host, Confirm, ConfirmState};
 use crate::views::forward::forward_host;
 use crate::views::message_row::{
-    aggregate_progress, duration_label, file_icon, file_state_area, human_size, icon_bytes,
-    parent_dir, FileIcon,
+    aggregate_progress, duration_label, file_icon, human_size, icon_bytes, parent_dir,
+    progress_text, FileIcon,
 };
 
 /// 内容区最大宽度之外的两侧留白。
 const PAGE_PAD: i32 = style::SPACE_XL;
 /// 网格每行的缩略图个数：5 × 120 + 4 × 12 = 648，正好放进最小窗口（760）的内容区。
+/// windui 取不到容器宽度，列数无法随窗口宽度变化（缺能力），所以固定列数并在行内居中。
 const GRID_COLS: usize = 5;
 /// 网格缩略图边长。
 const TILE: i32 = 120;
-/// 列表行高度。
-const ROW_H: i32 = 72;
-/// 列表行里的各列宽度。
-const COL_SIZE_W: i32 = 72;
-const COL_CONV_W: i32 = 104;
-const COL_STATE_W: i32 = 176;
+/// 列表行高度（名字一行 + 信息最多两行）。
+const ROW_H: i32 = 76;
+/// 列表行右侧操作区宽度。
+const ACTIONS_W: i32 = 208;
 /// 搜索框停止输入多久后查询（毫秒）。
 const SEARCH_DEBOUNCE_MS: u64 = 300;
 
@@ -235,6 +234,35 @@ impl FilesUi {
 // 视图
 // ---------------------------------------------------------------------------
 
+/// switcher 的键要 Eq + Hash，而 `BlobState` 没有：用数字码表示。
+fn state_code(s: &BlobState) -> u8 {
+    match s {
+        BlobState::Remote => 0,
+        BlobState::Downloading => 1,
+        BlobState::Local => 2,
+        BlobState::SourceOffline => 3,
+        BlobState::Preparing => 4,
+    }
+}
+
+/// 列表项第二行的信息段：大小、（视频）时长、时间、来源各段；
+/// 会话名已在来源里出现（如私聊“来自 张三”）时不再重复。
+pub fn meta_parts(f: &FileView, time_text: String) -> Vec<String> {
+    let item = &f.item;
+    let mut parts = vec![human_size(item.size)];
+    if file_icon(&item.mime, &item.name) == FileIcon::Video {
+        if let Some(ms) = item.duration_ms {
+            parts.push(duration_label(ms));
+        }
+    }
+    parts.push(time_text);
+    parts.extend(split_source(&item.source_label));
+    if !f.conv_title.is_empty() && !item.source_label.contains(&f.conv_title) {
+        parts.push(strings::files_in_conv(&f.conv_title));
+    }
+    parts
+}
+
 fn meta_label(text: impl Into<TextContent>, role: Role) -> Element {
     Element::label(text)
         .font_size(style::FONT_META)
@@ -254,7 +282,9 @@ fn menu_builder(
     move || {
         let mut v = Vec::new();
         let item = &f.item;
-        if item.state == BlobState::Local {
+        // 点击下载后立刻按“下载中”处理，菜单里不再给“下载”
+        let state = ui.read(|m| effective_state(item, m));
+        if state == BlobState::Local {
             if let Some(p) = item.local_path.clone() {
                 if let Some(d) = parent_dir(&p) {
                     v.push(MenuItem::run(
@@ -270,7 +300,7 @@ fn menu_builder(
                 }
             }
         }
-        if item.state == BlobState::Remote {
+        if state == BlobState::Remote {
             let (ui, hash) = (ui.clone(), item.hash.clone());
             v.push(MenuItem::run(
                 strings::FILES_MENU_DOWNLOAD,
@@ -348,16 +378,89 @@ fn thumb_or_icon(item: &lanmsg_api::types::FileItemView, size: i32, radius: f32)
     }
 }
 
-/// 列表行：图标 / 缩略图、名字与来源、大小与时间、会话、状态区。
+/// 列表项右侧的操作区：待下载 -> 下载；下载中 -> 进度 + 取消；已在本地 -> 打开 / 打开所在文件夹；
+/// 源离线、准备中 -> 文字。按钮一律是小号描边按钮。
+fn file_actions(ui: &UiState, item: &lanmsg_api::types::FileItemView) -> Element {
+    let key = {
+        let it = item.clone();
+        ui.derive(move |m| state_code(&effective_state(&it, m)))
+    };
+    let (ui, item) = (ui.clone(), item.clone());
+    Element::switcher(key, move |st| {
+        let button = |text: &'static str| Element::button(text).outline().small();
+        match st {
+            0 => {
+                let (ui, hash) = (ui.clone(), item.hash.clone());
+                button(strings::FILE_DOWNLOAD)
+                    .on_click(move |_| ui.act(|m| m.download(hash.clone())))
+            }
+            1 => {
+                let hs = vec![item.hash.clone()];
+                let frac = ui.derive({
+                    let hs = hs.clone();
+                    move |m| aggregate_progress(&m.transfers, &hs).0
+                });
+                let text = ui.derive({
+                    let hs = hs.clone();
+                    move |m| progress_text(&m.transfers, &hs)
+                });
+                let (ui, hash) = (ui.clone(), item.hash.clone());
+                Element::col()
+                    .width_match()
+                    .spacing(style::SPACE_XS)
+                    .child(Element::progress(frac).width_match())
+                    .child(
+                        Element::row()
+                            .width_match()
+                            .cross(Align::Center)
+                            .child(
+                                Element::label(text)
+                                    .font_size(style::FONT_META)
+                                    .fg_role(Role::TextMuted)
+                                    .weight(1.0),
+                            )
+                            .child(
+                                button(strings::FILE_CANCEL)
+                                    .on_click(move |_| ui.act(|m| m.cancel_transfer(&hash))),
+                            ),
+                    )
+            }
+            2 => {
+                let mut row = Element::row().spacing(style::SPACE_SM).cross(Align::Center);
+                if let Some(p) = item.local_path.clone() {
+                    if let Some(d) = parent_dir(&p) {
+                        row = row
+                            .child(button(strings::FILE_OPEN).on_click(move |ctx| ctx.open_url(&p)))
+                            .child(
+                                button(strings::FILE_OPEN_FOLDER)
+                                    .on_click(move |ctx| ctx.open_url(&d)),
+                            );
+                    }
+                }
+                row
+            }
+            3 => meta_label(strings::FILE_SOURCE_OFFLINE, Role::TextMuted),
+            _ => meta_label(strings::FILE_PREPARING, Role::TextMuted),
+        }
+    })
+}
+
+/// 列表行：缩略图（视频带播放角标）、名字 + 信息行，右侧操作区。
 fn list_row(ui: &UiState, f: &FileView, confirm: ConfirmState) -> Element {
     let item = &f.item;
-    let tz = tz::local_offset_secs();
-    let mut source = Element::row()
+    let time = format_time(f.hlc_millis, now_millis(), tz::local_offset_secs());
+    // 信息行用流式布局：窄窗口时自动折到第二行，各段之间只留间距不加符号
+    let mut meta = Element::flow()
+        .width_match()
         .spacing(style::SPACE_MD)
-        .cross(Align::Center)
-        .width_match();
-    for part in split_source(&item.source_label) {
-        source = source.child(meta_label(part, Role::TextSubtle));
+        .run_spacing(style::SPACE_XS);
+    for (i, part) in meta_parts(f, time).into_iter().enumerate() {
+        let role = if i == 0 {
+            Role::TextMuted
+        } else {
+            Role::TextSubtle
+        };
+        meta = meta.child(meta_label(part, role));
     }
     let info = Element::col()
         .weight(1.0)
@@ -369,24 +472,21 @@ fn list_row(ui: &UiState, f: &FileView, confirm: ConfirmState) -> Element {
                 .max_lines(1)
                 .truncate(Truncate::End),
         )
-        .child(source);
-    let size_time = Element::col()
-        .width(COL_SIZE_W)
-        .spacing(style::SPACE_XS)
-        .child(meta_label(human_size(item.size), Role::TextMuted))
-        .child(meta_label(
-            format_time(f.hlc_millis, now_millis(), tz),
-            Role::TextSubtle,
-        ));
-    let conv = Element::label(f.conv_title.clone())
-        .font_size(style::FONT_META)
-        .fg_role(Role::TextMuted)
-        .max_lines(1)
-        .truncate(Truncate::End)
-        .width(COL_CONV_W);
-    let state = Element::col()
-        .width(COL_STATE_W)
-        .child(file_state_area(ui, item));
+        .child(meta);
+    let mut thumb =
+        Element::stack()
+            .size(40, 40)
+            .child(thumb_or_icon(item, 40, style::RADIUS_CONTROL));
+    if item.thumb_path.is_some() && file_icon(&item.mime, &item.name) == FileIcon::Video {
+        thumb = thumb.child(
+            Element::stack()
+                .size(20, 20)
+                .corner(10.0)
+                .bg_role(Role::Scrim)
+                .align(Align::Center)
+                .child(style::icon(style::ICON_PLAY, 12, Role::OnAccent).align(Align::Center)),
+        );
+    }
     Element::col()
         .width_match()
         .child(
@@ -396,11 +496,13 @@ fn list_row(ui: &UiState, f: &FileView, confirm: ConfirmState) -> Element {
                 .padding_xy(style::SPACE_LG, style::SPACE_SM)
                 .spacing(style::SPACE_MD)
                 .cross(Align::Center)
-                .child(thumb_or_icon(item, 40, style::RADIUS_CONTROL))
+                .child(thumb)
                 .child(info)
-                .child(size_time)
-                .child(conv)
-                .child(state),
+                .child(
+                    Element::col()
+                        .width(ACTIONS_W)
+                        .child(file_actions(ui, item)),
+                ),
         )
         .child(Element::divider())
         .on_context_menu(menu_builder(ui, f, confirm))
@@ -410,13 +512,7 @@ fn list_row(ui: &UiState, f: &FileView, confirm: ConfirmState) -> Element {
 fn tile_overlay(ui: &UiState, item: &lanmsg_api::types::FileItemView) -> Element {
     let key = {
         let it = item.clone();
-        ui.derive(move |m| match effective_state(&it, m) {
-            BlobState::Remote => 0u8,
-            BlobState::Downloading => 1,
-            BlobState::Local => 2,
-            BlobState::SourceOffline => 3,
-            BlobState::Preparing => 4,
-        })
+        ui.derive(move |m| state_code(&effective_state(&it, m)))
     };
     let (ui, item) = (ui.clone(), item.clone());
     Element::switcher(key, move |st| {
@@ -521,14 +617,25 @@ fn grid_tile(ui: &UiState, f: &FileView, confirm: ConfirmState) -> Element {
                 .truncate(Truncate::End)
                 .width(TILE),
         )
+        .child(meta_label(tile_source(&item.source_label), Role::TextSubtle).width(TILE))
         .on_context_menu(menu_builder(ui, f, confirm))
 }
 
+/// 磁贴下方的来源：只取第一段（“来自 张三”），磁贴窄放不下全部。
+pub fn tile_source(label: &str) -> String {
+    split_source(label).into_iter().next().unwrap_or_default()
+}
+
+/// 网格一行：windui 取不到容器宽度，无法按宽度算列数，所以整行在内容区里居中。
 fn grid_row(ui: &UiState, fs: &[FileView], confirm: ConfirmState) -> Element {
-    Element::row()
-        .spacing(style::SPACE_MD)
-        .padding_xy(style::SPACE_LG, style::SPACE_SM)
-        .children(fs.iter().map(|f| grid_tile(ui, f, confirm)))
+    Element::col().width_match().cross(Align::Center).child(
+        Element::row()
+            .spacing(style::SPACE_MD)
+            .padding_xy(style::SPACE_LG, style::SPACE_SM)
+            .children(fs.iter().map(|f| grid_tile(ui, f, confirm)))
+            // 末行不足时用空位补齐，缺的磁贴不会让这一行相对上面的行错位
+            .children((fs.len()..GRID_COLS).map(|_| Element::leaf().size(TILE, 1))),
+    )
 }
 
 fn row_view(ui: &UiState, row: FileRow, confirm: ConfirmState) -> Element {
@@ -739,6 +846,30 @@ mod tests {
             vec!["来自 张三", "已下载"]
         );
         assert!(split_source("").is_empty());
+    }
+
+    #[test]
+    fn meta_parts_skip_conv_already_in_source_and_add_video_duration() {
+        let mut f = fv("m", "h");
+        f.item.source_label = "来自 张三 · 存于 我的台式机".into();
+        f.conv_title = "张三".into();
+        let p = meta_parts(&f, "昨天".into());
+        assert_eq!(p, vec!["1 B", "昨天", "来自 张三", "存于 我的台式机"]);
+        // 会话名没出现在来源里时补一段
+        f.conv_title = "项目群".into();
+        let p = meta_parts(&f, "昨天".into());
+        assert_eq!(p.last().map(String::as_str), Some("会话 项目群"));
+        // 视频带时长
+        f.item.mime = "video/mp4".into();
+        f.item.name = "a.mp4".into();
+        f.item.duration_ms = Some(7_000);
+        assert_eq!(meta_parts(&f, "昨天".into())[1], "0:07");
+    }
+
+    #[test]
+    fn tile_source_takes_first_segment() {
+        assert_eq!(tile_source("来自 张三 · 存于 我的台式机"), "来自 张三");
+        assert_eq!(tile_source(""), "");
     }
 
     #[test]

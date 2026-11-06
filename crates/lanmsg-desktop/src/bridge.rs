@@ -48,6 +48,13 @@ pub enum ReplyTag {
         append: bool,
         epoch: u64,
     },
+    /// 文件页静默刷新的一批：已加载条数超过单次上限时分多批取回，凑够 `target` 条再整体替换；
+    /// `asked` 是本批请求的条数（回复满批才说明后面还有）。
+    FilesRefresh {
+        epoch: u64,
+        target: u32,
+        asked: u32,
+    },
     Settings,
     /// `SetSettings` 的回复：成功后提示并重新读取。
     SettingsSaved,

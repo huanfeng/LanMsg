@@ -222,6 +222,7 @@ pub const FILES_DELETE_ACTION: &str = "删除";
 pub const SETTINGS_SAVED: &str = "设置已保存";
 pub const SETTINGS_SAVE: &str = "保存";
 pub const SETTINGS_SAVE_BLOCKED: &str = "有内容不符合要求，改正后才能保存";
+pub const SETTINGS_SAVE_CLEAN: &str = "没有修改";
 pub const SETTINGS_LOADING: &str = "正在读取设置…";
 pub const SETTINGS_GROUP_PERSONAL: &str = "个人";
 pub const SETTINGS_GROUP_DEVICES: &str = "我的设备";
@@ -243,9 +244,12 @@ pub const SETTINGS_PICK_DIR_FAILED: &str = "无法打开选择框，可直接输
 pub const SETTINGS_AUTO_IMAGE: &str = "图片自动下载上限";
 pub const SETTINGS_AUTO_FILE: &str = "文件自动下载上限";
 pub const SETTINGS_MB: &str = "MB";
-pub const SETTINGS_MB_INVALID: &str = "请输入 1–10240 之间的整数";
-pub const SETTINGS_AUTO_HINT: &str = "联系人发来的内容不超过上限时自动下载，超过则等你点击下载";
+pub const SETTINGS_MB_INVALID: &str = "请输入 0–10240 之间的整数";
+pub const SETTINGS_AUTO_HINT: &str =
+    "联系人发来的内容不超过上限时自动下载，超过则等你点击下载；填 0 表示不自动下载";
 pub const SETTINGS_WIFI_ONLY: &str = "仅在 Wi-Fi 或有线网络下自动下载文件";
+pub const SETTINGS_WIFI_ONLY_HINT: &str =
+    "使用流量计费的网络时同样不会自动下载文件，图片不受此开关影响";
 pub const SETTINGS_LOCALSEND: &str = "兼容 LocalSend";
 pub const SETTINGS_LOCALSEND_HINT: &str = "开启后可与 LocalSend 应用互传文件";
 pub const SETTINGS_TARGETS: &str = "单播通告目标";
@@ -265,6 +269,11 @@ pub const SETTINGS_ABOUT_DEVICE_FINGERPRINT: &str = "本机指纹";
 /// 设置页地址行校验错误，`line` 为 1 起的行号。
 pub fn settings_target_invalid(line: usize, text: &str) -> String {
     format!("第 {line} 行无效：{text}")
+}
+
+/// 文件列表信息行里的会话名。
+pub fn files_in_conv(title: &str) -> String {
+    format!("会话 {title}")
 }
 
 /// 删除确认里追加的说明：被删的消息里不止这一个文件。

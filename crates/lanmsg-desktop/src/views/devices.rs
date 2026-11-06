@@ -1,5 +1,5 @@
 // “我的设备”分组：本人设备列表、移除（二次确认）与添加（扫码 / 数字比对）。
-// 联系人页的“我的设备”分类与设置页（Task 15）共用 `devices_section`。
+// 联系人页的“我的设备”分类与设置页共用 `devices_panel`，确认框宿主 `remove_confirm_host` 由页面放在滚动区之外。
 // 注释中文，标识符英文。
 
 use lanmsg_api::types::{DeviceView, PairMethod, PathClassDto};
@@ -107,17 +107,6 @@ pub fn device_row(d: &DeviceView, confirm: Option<ConfirmState>) -> Element {
         );
     }
     row
-}
-
-/// “我的设备”分组：设备卡片列表 + 两个添加入口；移除前二次确认。
-/// 确认框随分组放在原地：适合分组不在滚动区里的场景；放在滚动区里时，
-/// 遮罩只会盖住分组所在的那一块，应改用 `devices_panel` + `remove_confirm_host`。
-pub fn devices_section(ui: &UiState) -> Element {
-    let confirm = ConfirmState::new();
-    Element::col()
-        .width_match()
-        .child(devices_panel(ui, confirm))
-        .child(remove_confirm_host(ui, confirm))
 }
 
 /// 移除设备的确认框宿主：放在页面最外层的 stack 里，遮罩才是全窗的。

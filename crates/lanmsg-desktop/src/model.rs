@@ -172,6 +172,8 @@ pub struct Model {
     pub files_loading: bool,
     /// 上次返回满页，还可能有更早的文件。
     pub files_more: bool,
+    /// 静默刷新分批取回时已收到的部分，凑够目标条数后才整体替换 `files`。
+    pub files_refresh_acc: Vec<FileView>,
     /// 已收到过至少一次文件查询的回复（区分“加载中”与“没有文件”）。
     pub files_loaded: bool,
     /// 文件页视图的重建序号：进入文件页或用户改筛选时自增（回到列表顶部）；
@@ -252,6 +254,7 @@ impl Model {
             files_epoch: 0,
             files_loading: false,
             files_more: false,
+            files_refresh_acc: Vec::new(),
             files_loaded: false,
             files_view_epoch: 0,
             settings: None,
@@ -478,6 +481,44 @@ impl Model {
                 } else {
                     self.files = value;
                 }
+                Vec::new()
+            }
+            (
+                ReplyTag::FilesRefresh {
+                    epoch,
+                    target,
+                    asked,
+                },
+                Response::Files { value },
+            ) => {
+                if epoch != self.files_epoch {
+                    return Vec::new();
+                }
+                let got = value.len() as u32;
+                self.files_refresh_acc.extend(value);
+                let have = self.files_refresh_acc.len() as u32;
+                // 本批满了且还没凑够：以已取回的最后一项为游标继续取
+                if got >= asked && have < target {
+                    let Some(last) = self.files_refresh_acc.last() else {
+                        return Vec::new();
+                    };
+                    let mut filter = self.file_filter.clone();
+                    filter.before_millis = Some(last.hlc_millis);
+                    filter.limit = (target - have).min(FILE_REFRESH_MAX);
+                    return vec![call(
+                        Request::QueryFiles {
+                            filter: filter.clone(),
+                        },
+                        ReplyTag::FilesRefresh {
+                            epoch,
+                            target,
+                            asked: filter.limit,
+                        },
+                    )];
+                }
+                self.files = std::mem::take(&mut self.files_refresh_acc);
+                self.files_loaded = true;
+                self.files_more = got >= asked;
                 Vec::new()
             }
             (ReplyTag::Settings, Response::Settings { value }) => {
@@ -1123,17 +1164,23 @@ impl Model {
     }
 
     /// 静默刷新文件列表：保持当前条件与已加载的条数（不退回第一页、不动滚动位置）。
+    /// 已加载条数超过 core 单次上限时分多批取回（见 `ReplyTag::FilesRefresh`），凑够后整体替换。
     pub fn refresh_files(&mut self) -> Vec<Effect> {
         self.files_epoch += 1;
         self.files_loading = false;
+        self.files_refresh_acc.clear();
+        let target = (self.files.len() as u32).max(FILE_PAGE);
         let mut filter = self.file_filter.clone();
         filter.before_millis = None;
-        filter.limit = (self.files.len() as u32).clamp(FILE_PAGE, FILE_REFRESH_MAX);
+        filter.limit = target.min(FILE_REFRESH_MAX);
         vec![call(
-            Request::QueryFiles { filter },
-            ReplyTag::Files {
-                append: false,
+            Request::QueryFiles {
+                filter: filter.clone(),
+            },
+            ReplyTag::FilesRefresh {
                 epoch: self.files_epoch,
+                target,
+                asked: filter.limit,
             },
         )]
     }
@@ -3254,10 +3301,7 @@ mod tests {
         // 刷新保持已加载的条数，不退回第一页
         assert!(has(&fx, |r| matches!(r, Request::QueryFiles { .. })));
         assert_eq!(query_filter(&fx).limit, FILE_PAGE);
-        assert!(matches!(
-            query_tag(&fx),
-            ReplyTag::Files { append: false, .. }
-        ));
+        assert!(matches!(query_tag(&fx), ReplyTag::FilesRefresh { .. }));
     }
 
     #[test]
@@ -3268,6 +3312,58 @@ mod tests {
         let fx = m.refresh_files();
         assert_eq!(query_filter(&fx).limit, FILE_PAGE + 40);
         assert_eq!(query_filter(&fx).before_millis, None);
+        // 条数不多时一批就够，回复直接替换
+        m.apply(files_reply(query_tag(&fx), FILE_PAGE as usize + 40));
+        assert_eq!(m.files.len(), FILE_PAGE as usize + 40);
+    }
+
+    #[test]
+    fn refresh_beyond_core_cap_fetches_in_batches_and_replaces_once() {
+        let mut m = Model::new();
+        m.page = Page::Files;
+        m.files = files_page(FILE_REFRESH_MAX as usize + 120);
+        let before = m.files.clone();
+        let fx = m.refresh_files();
+        // 第一批不超过 core 的单次上限
+        assert_eq!(query_filter(&fx).limit, FILE_REFRESH_MAX);
+        assert_eq!(query_filter(&fx).before_millis, None);
+        let fx = m.apply(files_reply(query_tag(&fx), FILE_REFRESH_MAX as usize));
+        // 还差 120 条：以已取回的最后一项为游标继续取，期间原列表不动
+        assert_eq!(m.files, before);
+        assert_eq!(query_filter(&fx).limit, 120);
+        assert_eq!(
+            query_filter(&fx).before_millis,
+            Some(file_view(FILE_REFRESH_MAX as usize - 1).hlc_millis)
+        );
+        let fx = m.apply(files_reply(query_tag(&fx), 120));
+        assert!(fx.is_empty());
+        assert_eq!(m.files.len(), FILE_REFRESH_MAX as usize + 120);
+        assert!(m.files_more, "末批取满，后面可能还有");
+    }
+
+    #[test]
+    fn refresh_stops_when_source_has_fewer_files() {
+        let mut m = Model::new();
+        m.files = files_page(FILE_REFRESH_MAX as usize + 120);
+        let fx = m.refresh_files();
+        // 期间有文件被删，第一批没取满：直接结束，不再追问
+        let fx = m.apply(files_reply(query_tag(&fx), 450));
+        assert!(fx.is_empty());
+        assert_eq!(m.files.len(), 450);
+        assert!(!m.files_more);
+    }
+
+    #[test]
+    fn stale_refresh_batch_is_dropped_after_filter_change() {
+        let mut m = Model::new();
+        m.files = files_page(FILE_REFRESH_MAX as usize + 10);
+        let fx = m.refresh_files();
+        let tag = query_tag(&fx);
+        m.set_file_kind(FileKindFilter::Image);
+        let before = m.files.clone();
+        let fx = m.apply(files_reply(tag, FILE_REFRESH_MAX as usize));
+        assert!(fx.is_empty());
+        assert_eq!(m.files, before);
     }
 
     #[test]

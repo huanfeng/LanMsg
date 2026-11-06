@@ -1,6 +1,7 @@
 // 设置页：分组卡片 + 表单行。
-// 个人、我的设备、下载与存储、网络、通用、关于；改动后点“保存”才写入（SetSettings / SetProfile），
-// 数值或地址非法时保存按钮禁用，并在字段下方用红字说明。开机自启开关即时生效。
+// 个人、我的设备、下载与存储、网络、通用、关于；“个人”“下载与存储”“网络”三张卡片各有自己的“保存”，
+// 只提交本组字段（SetSettings 以当前已保存的值为底，只替换本组字段），某组非法不影响其他组。
+// 本组没有修改或有非法内容时保存按钮禁用，旁边说明原因。开机自启开关与“我的设备”即时生效。
 // 注释中文，标识符英文。
 
 use std::net::{IpAddr, SocketAddr};
@@ -26,17 +27,84 @@ const LABEL_W: i32 = 168;
 const FIELD_W: i32 = 280;
 /// 1 MB 的字节数。
 const MIB: u64 = 1024 * 1024;
-/// 自动下载上限可填的 MB 范围。
-const MB_RANGE: std::ops::RangeInclusive<u64> = 1..=10_240;
+/// 自动下载上限可填的 MB 范围；0 表示不自动下载。
+const MB_RANGE: std::ops::RangeInclusive<u64> = 0..=10_240;
 
 // ---------------------------------------------------------------------------
 // 纯函数
 // ---------------------------------------------------------------------------
 
-/// 解析“MB”输入：1–10240 的整数，返回字节数；其余（空、负数、小数、越界）为 None。
+/// 解析“MB”输入：0–10240 的整数（0 = 不自动下载），返回字节数；其余（空、负数、小数、越界）为 None。
 pub fn parse_mb(s: &str) -> Option<u64> {
     let mb: u64 = s.trim().parse().ok()?;
     MB_RANGE.contains(&mb).then(|| mb * MIB)
+}
+
+/// 解析某个 MB 字段：文字与已保存值的显示一致（用户没动过）时原样沿用已保存的字节数，不做范围校验——
+/// 这样 Android 端写入的“不限”（u64::MAX）等超出 10240 的值不会让整组永远无法保存；
+/// 用户改过才按 `parse_mb` 校验。
+pub fn resolve_mb(text: &str, saved: u64) -> Option<u64> {
+    if text.trim() == mb_text(saved) {
+        Some(saved)
+    } else {
+        parse_mb(text)
+    }
+}
+
+/// 一组设置的保存按钮状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupState {
+    /// 没有未保存的修改。
+    Clean,
+    /// 有修改但有内容不符合要求。
+    Invalid,
+    /// 有可保存的修改。
+    Dirty,
+}
+
+/// 个人组：在已保存设置上只替换设备名。
+pub fn personal_dto(base: &SettingsDto, device: &str) -> SettingsDto {
+    let mut dto = base.clone();
+    dto.device_name = device.trim().to_string();
+    dto
+}
+
+/// 下载与存储组：只替换下载目录、两个自动下载上限、仅 Wi-Fi 开关；任一字段非法返回 None。
+pub fn storage_dto(
+    base: &SettingsDto,
+    dir: &str,
+    image_mb: &str,
+    file_mb: &str,
+    wifi_only: bool,
+) -> Option<SettingsDto> {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return None;
+    }
+    let mut dto = base.clone();
+    dto.download_dir = dir.to_string();
+    dto.auto_image_max = resolve_mb(image_mb, base.auto_image_max)?;
+    dto.auto_file_max = resolve_mb(file_mb, base.auto_file_max)?;
+    dto.auto_file_wifi_only = wifi_only;
+    Some(dto)
+}
+
+/// 网络组：只替换 LocalSend 开关与单播通告目标；目标有非法行返回 None。
+pub fn network_dto(base: &SettingsDto, localsend: bool, targets: &str) -> Option<SettingsDto> {
+    let mut dto = base.clone();
+    dto.localsend_enabled = localsend;
+    dto.unicast_targets = parse_targets(targets).ok()?;
+    Some(dto)
+}
+
+/// 由“能否生成本组 DTO”和“与已保存值是否不同”得出按钮状态。
+/// 生成不出 DTO（有非法内容）时只可能是用户改过，视为 Invalid。
+pub fn group_state(dto: Option<&SettingsDto>, base: &SettingsDto, extra_dirty: bool) -> GroupState {
+    match dto {
+        None => GroupState::Invalid,
+        Some(d) if d != base || extra_dirty => GroupState::Dirty,
+        Some(_) => GroupState::Clean,
+    }
 }
 
 /// 字节数换成输入框里的 MB 文字（向下取整；非整 MB 的旧值保存时会按整 MB 写回）。
@@ -193,41 +261,113 @@ fn info_row(label: &'static str, value: String) -> Element {
 // 页面
 // ---------------------------------------------------------------------------
 
-/// 设置表单；控件的草稿值放在本函数创建的信号里，设置从后台重新读到时整页重建。
-fn form(ui: &UiState, s: SettingsDto, remove_confirm: ConfirmState) -> Element {
-    let me = ui.read(|m| m.me.clone());
-    let display = signal(
-        me.as_ref()
-            .and_then(|m| m.display_name.clone())
-            .unwrap_or_default(),
-    );
-    let device = signal(s.device_name.clone());
-    let dir = signal(s.download_dir.clone());
-    let image_mb = signal(mb_text(s.auto_image_max));
-    let file_mb = signal(mb_text(s.auto_file_max));
-    let wifi_only = signal(s.auto_file_wifi_only);
-    let localsend = signal(s.localsend_enabled);
-    let targets = signal(s.unicast_targets.join("\n"));
+/// 分组卡片底部右侧的“保存”：只有本组有可保存的修改时可点；不可点时旁边说明原因。
+fn group_footer(
+    state: impl Fn() -> GroupState + Copy + 'static,
+    on_save: impl Fn(&mut windui::core::EventCtx) + 'static,
+) -> Element {
+    let hint = |text: &'static str, role: Role, shown: GroupState| {
+        Element::label(text)
+            .font_size(style::FONT_META)
+            .fg_role(role)
+            .visible_when(move || state() == shown)
+    };
+    Element::row()
+        .width_match()
+        .padding_xy(style::SPACE_LG, style::SPACE_MD)
+        .spacing(style::SPACE_MD)
+        .cross(Align::Center)
+        .child(Element::leaf().weight(1.0))
+        .child(hint(
+            strings::SETTINGS_SAVE_CLEAN,
+            Role::TextSubtle,
+            GroupState::Clean,
+        ))
+        .child(hint(
+            strings::SETTINGS_SAVE_BLOCKED,
+            Role::Danger,
+            GroupState::Invalid,
+        ))
+        .child(
+            Element::button(strings::SETTINGS_SAVE)
+                .enabled_when(move || state() == GroupState::Dirty)
+                .on_click(on_save),
+        )
+}
+
+/// 设置表单。控件的草稿值放在本函数创建的信号里，只在设置首次到达时创建一次；
+/// 保存后重新读到的设置只更新“已保存值”，其他组尚未保存的草稿不会被冲掉。
+fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Element {
+    // 已保存的值：随 Model 刷新；表单只在设置存在时才建，取不到时各组按“没有修改”处理
+    let saved = ui.derive(|m| m.settings.clone());
+    let saved_name = ui.derive(|m| {
+        m.me.as_ref()
+            .and_then(|me| me.display_name.clone())
+            .unwrap_or_default()
+    });
+    let display = signal(saved_name.get());
+    let device = signal(init.device_name.clone());
+    let dir = signal(init.download_dir.clone());
+    let image_mb = signal(mb_text(init.auto_image_max));
+    let file_mb = signal(mb_text(init.auto_file_max));
+    let wifi_only = signal(init.auto_file_wifi_only);
+    let localsend = signal(init.localsend_enabled);
+    let targets = signal(init.unicast_targets.join("\n"));
     let auto_start = signal(autostart::is_enabled());
 
-    // 校验：每项一个派生信号，保存按钮要全部通过
+    // 校验：每项一个派生信号
     let display_ok = display.map(|v| wizard_name_ok(v));
     let device_ok = device.map(|v| wizard_name_ok(v));
     let dir_ok = dir.map(|v| !v.trim().is_empty());
-    let image_ok = image_mb.map(|v| parse_mb(v).is_some());
-    let file_ok = file_mb.map(|v| parse_mb(v).is_some());
+    // MB 字段的合法性要看已保存值：没动过的超大原值算合法
+    let image_ok = {
+        let saved_image = saved.map(|s| s.as_ref().map_or(0, |s| s.auto_image_max));
+        image_mb.map(move |v| resolve_mb(v, saved_image.get()).is_some())
+    };
+    let file_ok = {
+        let saved_file = saved.map(|s| s.as_ref().map_or(0, |s| s.auto_file_max));
+        file_mb.map(move |v| resolve_mb(v, saved_file.get()).is_some())
+    };
     let targets_err = targets.map(|v| parse_targets(v).err().unwrap_or_default());
     let targets_ok = targets_err.map(|e| e.is_empty());
     let not = |ok: Signal<bool>| ok.map(|v| !*v);
-    let all_ok = move || {
-        display_ok.get()
-            && device_ok.get()
-            && dir_ok.get()
-            && image_ok.get()
-            && file_ok.get()
-            && targets_ok.get()
+
+    // 各组按钮状态
+    let personal_state = move || match saved.get() {
+        None => GroupState::Clean,
+        Some(b) => {
+            if !display_ok.get() || !device_ok.get() {
+                return GroupState::Invalid;
+            }
+            let name_changed = display.get().trim() != saved_name.get();
+            group_state(Some(&personal_dto(&b, &device.get())), &b, name_changed)
+        }
+    };
+    let storage_state = move || match saved.get() {
+        None => GroupState::Clean,
+        Some(b) => group_state(
+            storage_dto(
+                &b,
+                &dir.get(),
+                &image_mb.get(),
+                &file_mb.get(),
+                wifi_only.get(),
+            )
+            .as_ref(),
+            &b,
+            false,
+        ),
+    };
+    let network_state = move || match saved.get() {
+        None => GroupState::Clean,
+        Some(b) => group_state(
+            network_dto(&b, localsend.get(), &targets.get()).as_ref(),
+            &b,
+            false,
+        ),
     };
 
+    let ui_personal = ui.clone();
     let personal = card(vec![
         field(
             strings::SETTINGS_DISPLAY_NAME,
@@ -249,6 +389,12 @@ fn form(ui: &UiState, s: SettingsDto, remove_confirm: ConfirmState) -> Element {
                 error_note(strings::SETTINGS_DEVICE_NAME_INVALID, not(device_ok)),
             ],
         ),
+        group_footer(personal_state, move |_| {
+            let Some(b) = saved.get() else { return };
+            let dto = personal_dto(&b, &device.get());
+            let name = display.get();
+            ui_personal.act(|m| m.save_settings(dto, &name));
+        }),
     ]);
 
     let pick_failed = signal(false);
@@ -279,6 +425,7 @@ fn form(ui: &UiState, s: SettingsDto, remove_confirm: ConfirmState) -> Element {
                     .fg_role(Role::TextMuted),
             )
     };
+    let ui_storage = ui.clone();
     let storage = card(vec![
         field(
             strings::SETTINGS_DOWNLOAD_DIR,
@@ -310,9 +457,28 @@ fn form(ui: &UiState, s: SettingsDto, remove_confirm: ConfirmState) -> Element {
                 error_note(strings::SETTINGS_MB_INVALID, not(file_ok)),
             ],
         ),
-        switch_row(strings::SETTINGS_WIFI_ONLY, "", Element::switch(wifi_only)),
+        switch_row(
+            strings::SETTINGS_WIFI_ONLY,
+            strings::SETTINGS_WIFI_ONLY_HINT,
+            Element::switch(wifi_only),
+        ),
+        group_footer(storage_state, move |_| {
+            let Some(b) = saved.get() else { return };
+            if let Some(dto) = storage_dto(
+                &b,
+                &dir.get(),
+                &image_mb.get(),
+                &file_mb.get(),
+                wifi_only.get(),
+            ) {
+                // 显示名不属于本组：传当前已保存的名字，Model 不会发 SetProfile
+                let name = saved_name.get();
+                ui_storage.act(|m| m.save_settings(dto, &name));
+            }
+        }),
     ]);
 
+    let ui_network = ui.clone();
     let network = card(vec![
         switch_row(
             strings::SETTINGS_LOCALSEND,
@@ -330,9 +496,17 @@ fn form(ui: &UiState, s: SettingsDto, remove_confirm: ConfirmState) -> Element {
                 error_note(targets_err, not(targets_ok)),
             ],
         ),
+        group_footer(network_state, move |_| {
+            let Some(b) = saved.get() else { return };
+            if let Some(dto) = network_dto(&b, localsend.get(), &targets.get()) {
+                let name = saved_name.get();
+                ui_network.act(|m| m.save_settings(dto, &name));
+            }
+        }),
     ]);
 
     let data_dir = ui.data_dir().to_path_buf();
+    let me = ui.read(|m| m.me.clone());
     let general = card(vec![switch_row(
         strings::SETTINGS_AUTOSTART,
         strings::SETTINGS_AUTOSTART_HINT,
@@ -373,34 +547,6 @@ fn form(ui: &UiState, s: SettingsDto, remove_confirm: ConfirmState) -> Element {
     }
     let about = card(about_rows);
 
-    let ui_save = ui.clone();
-    let base = s;
-    let save = Element::button(strings::SETTINGS_SAVE)
-        .enabled_when(all_ok)
-        .on_click(move |_| {
-            let mut dto = base.clone();
-            dto.device_name = device.get().trim().to_string();
-            dto.download_dir = dir.get().trim().to_string();
-            dto.auto_image_max = parse_mb(&image_mb.get()).unwrap_or(base.auto_image_max);
-            dto.auto_file_max = parse_mb(&file_mb.get()).unwrap_or(base.auto_file_max);
-            dto.auto_file_wifi_only = wifi_only.get();
-            dto.localsend_enabled = localsend.get();
-            dto.unicast_targets =
-                parse_targets(&targets.get()).unwrap_or_else(|_| base.unicast_targets.clone());
-            let name = display.get();
-            ui_save.act(|m| m.save_settings(dto, &name));
-        });
-    let blocked = Element::label(strings::SETTINGS_SAVE_BLOCKED)
-        .font_size(style::FONT_META)
-        .fg_role(Role::Danger)
-        .visible_when(move || !all_ok());
-
-    let actions = Element::row()
-        .width_match()
-        .spacing(style::SPACE_MD)
-        .cross(Align::Center)
-        .child(save)
-        .child(blocked);
     Element::col()
         .width_match()
         .max_width(CONTENT_MAX_W)
@@ -419,23 +565,24 @@ fn form(ui: &UiState, s: SettingsDto, remove_confirm: ConfirmState) -> Element {
         ))
         .child(group(strings::SETTINGS_GROUP_STORAGE, storage))
         .child(group(strings::SETTINGS_GROUP_NETWORK, network))
-        .child(actions)
         .child(group(strings::SETTINGS_GROUP_GENERAL, general))
         .child(group(strings::SETTINGS_GROUP_ABOUT, about))
 }
 
-/// 设置页：设置到达前显示读取提示；到达（或保存后重新读到）时按新值重建表单。
+/// 设置页：设置到达前显示读取提示；到达后建一次表单，之后的刷新只更新“已保存值”。
 /// 移除设备的确认框放在滚动区之外的最上层，遮罩才是全窗的。
 pub fn settings_page(ui: &UiState) -> Element {
-    let key = ui.digest(|m| m.settings.clone());
+    let arrived = ui.derive(|m| m.settings.is_some());
     let remove_confirm = ConfirmState::new();
     let ui_form = ui.clone();
-    let body = Element::switcher(key, move |_| match ui_form.read(|m| m.settings.clone()) {
-        None => Element::label(strings::SETTINGS_LOADING)
-            .font_size(style::FONT_BODY)
-            .fg_role(Role::TextMuted)
-            .margin(style::SPACE_XL),
-        Some(s) => form(&ui_form, s, remove_confirm),
+    let body = Element::switcher(arrived, move |_| {
+        match ui_form.read(|m| m.settings.clone()) {
+            Some(s) => form(&ui_form, s, remove_confirm),
+            None => Element::label(strings::SETTINGS_LOADING)
+                .font_size(style::FONT_BODY)
+                .fg_role(Role::TextMuted)
+                .margin(style::SPACE_XL),
+        }
     });
     Element::stack()
         .fill()
@@ -453,13 +600,100 @@ mod tests {
         assert_eq!(parse_mb("1"), Some(MIB));
         assert_eq!(parse_mb(" 50 "), Some(50 * MIB));
         assert_eq!(parse_mb("10240"), Some(10_240 * MIB));
-        assert_eq!(parse_mb("0"), None);
+        assert_eq!(parse_mb("0"), Some(0));
+        assert_eq!(parse_mb(" 0 "), Some(0));
         assert_eq!(parse_mb("10241"), None);
         assert_eq!(parse_mb(""), None);
         assert_eq!(parse_mb("-5"), None);
         assert_eq!(parse_mb("1.5"), None);
         assert_eq!(parse_mb("abc"), None);
         assert_eq!(parse_mb("99999999999999999999"), None);
+    }
+
+    fn dto() -> SettingsDto {
+        SettingsDto {
+            device_name: "旧设备".into(),
+            download_dir: "/d".into(),
+            auto_image_max: 10 * MIB,
+            auto_file_max: 50 * MIB,
+            auto_file_wifi_only: true,
+            localsend_enabled: true,
+            unicast_targets: vec!["10.0.0.1".into()],
+            background_mode: lanmsg_api::types::BackgroundMode::Realtime,
+            localsend_listening: None,
+        }
+    }
+
+    #[test]
+    fn resolve_mb_keeps_untouched_huge_value_and_validates_edits() {
+        // Android 的“不限”= u64::MAX：没动过就沿用，不阻塞保存
+        let unlimited = u64::MAX;
+        assert_eq!(resolve_mb(&mb_text(unlimited), unlimited), Some(unlimited));
+        // 改过则按范围校验
+        assert_eq!(resolve_mb("20000", unlimited), None);
+        assert_eq!(resolve_mb("0", unlimited), Some(0));
+        assert_eq!(resolve_mb("100", unlimited), Some(100 * MIB));
+        // 非整 MB 的旧值，文字没变时字节数原样保留
+        assert_eq!(resolve_mb("1", MIB + 5), Some(MIB + 5));
+    }
+
+    #[test]
+    fn storage_group_saves_with_huge_value_and_zero() {
+        let mut base = dto();
+        base.auto_file_max = u64::MAX;
+        let file = mb_text(u64::MAX);
+        let d = storage_dto(&base, "/d", "0", &file, true).expect("合法");
+        assert_eq!(d.auto_image_max, 0);
+        assert_eq!(d.auto_file_max, u64::MAX);
+        assert_eq!(group_state(Some(&d), &base, false), GroupState::Dirty);
+        // 全部没改 -> 没有修改
+        let same = storage_dto(&base, "/d", &mb_text(base.auto_image_max), &file, true);
+        assert_eq!(group_state(same.as_ref(), &base, false), GroupState::Clean);
+        // 非法 -> Invalid
+        let bad = storage_dto(&base, "/d", "abc", &file, true);
+        assert_eq!(group_state(bad.as_ref(), &base, false), GroupState::Invalid);
+        assert!(storage_dto(&base, "  ", "1", "1", true).is_none());
+    }
+
+    #[test]
+    fn group_dtos_only_touch_their_own_fields() {
+        let base = dto();
+        let p = personal_dto(&base, " 新设备 ");
+        assert_eq!(p.device_name, "新设备");
+        assert_eq!(
+            SettingsDto {
+                device_name: base.device_name.clone(),
+                ..p
+            },
+            base
+        );
+
+        let s = storage_dto(&base, " /new ", "5", "6", false).expect("合法");
+        assert_eq!(s.download_dir, "/new");
+        assert_eq!((s.auto_image_max, s.auto_file_max), (5 * MIB, 6 * MIB));
+        assert!(!s.auto_file_wifi_only);
+        assert_eq!(s.device_name, base.device_name);
+        assert_eq!(s.localsend_enabled, base.localsend_enabled);
+        assert_eq!(s.unicast_targets, base.unicast_targets);
+
+        let n = network_dto(&base, false, "10.1.1.1\n10.2.0.0/16").expect("合法");
+        assert!(!n.localsend_enabled);
+        assert_eq!(n.unicast_targets, vec!["10.1.1.1", "10.2.0.0/16"]);
+        assert_eq!(n.download_dir, base.download_dir);
+        assert_eq!(n.auto_file_max, base.auto_file_max);
+        assert_eq!(n.device_name, base.device_name);
+        assert!(network_dto(&base, true, "bad").is_none());
+    }
+
+    #[test]
+    fn group_state_distinguishes_clean_dirty_invalid() {
+        let base = dto();
+        assert_eq!(group_state(Some(&base), &base, false), GroupState::Clean);
+        // 显示名改了但 DTO 没变（个人组）
+        assert_eq!(group_state(Some(&base), &base, true), GroupState::Dirty);
+        assert_eq!(group_state(None, &base, false), GroupState::Invalid);
+        let n = network_dto(&base, true, "10.0.0.1").expect("合法");
+        assert_eq!(group_state(Some(&n), &base, false), GroupState::Clean);
     }
 
     #[test]
