@@ -53,7 +53,7 @@
 - 时间格式：今天 `HH:mm`；昨天 `昨天 HH:mm`；今年 `M月d日`；更早 `yyyy/M/d`。
 - 大小格式：`< 1024` → `N B`；`< 1024²` → `x.x KB`；`< 1024³` → `x.x MB`；否则 `x.x GB`（一位小数，去掉 `.0`）。
 - 时长格式：`m:ss`，超过 1 小时 `h:mm:ss`。
-- 头像：圆形，背景色取 `user_id` 前 6 位 hex 映射到 6 色调色板（`#3D6E8F #5B6E3A #7A5A8C #8C5A3D #3D7A6E #6B6478`，取 `hex前2位的值 % 6`；与桌面端一致，白字对比度 ≥ 4.5:1），中间显示显示名第一个字符；"我的设备"会话用设备图标代替。
+- 头像：圆形，背景色取自 6 色调色板 `#3D6E8F #5B6E3A #7A5A8C #8C5A3D #3D7A6E #6B6478`（白字对比度均 ≥ 4.5:1），亮色与暗色主题下底色不变。取色算法与桌面端 `style.rs` 的 `avatar_color` 逐字一致，保证同一人在两端颜色相同：对 id 字符串的 UTF-8 字节序列做 djb2 哈希，`h = 5381`（u32），对每个字节 `b` 依次 `h = (h * 33 + b) mod 2^32`（u32 回绕），最终取调色板下标 `h mod 6`（按上面从左到右的顺序，下标 0 起）。Kotlin 用 `Int` 运算后以 `toUInt()` 或 `toLong() and 0xFFFFFFFF` 取模；id 对会话取会话 id，对人取用户 id。中间显示显示名第一个字符；"我的设备"会话用设备图标代替。
 
 ## §4 页面规格
 
@@ -63,7 +63,7 @@
 |---|---|---|---|---|
 | 引导 | `step`(欢迎/名字/方式)、`displayName`、`deviceName`(默认系统设备名)、`busy`、`error` | `GetSelf` | — | 完成第一台：`Init{display_name, device_name, FirstDevice}`；加入已有：`Init{…, JoinExisting}` 后进入 `pair/join` |
 | 会话列表 | `items: [ConversationSummary]`（按 `last_hlc_millis` 降序，空值排最后）、`loading` | `ListConversations` | `ConversationUpdated` → 按 conv upsert 并重排；`PeerOnline/PeerOffline` → 重拉 | 点行 → `chat/{conv}`；长按 → 菜单「免打扰 / 取消免打扰」（仅本机设置） |
-| 聊天 | `conv`、`title`、`kind`、`peerOnline`、`messages: [MessageView]`（升序）、`hasMore`、`loadingMore`、`input`、`progress: {hash → (done,total)}` | `ListConversations` 取本会话摘要；`ListMessages{conv, before=null, limit=50}` | `MessageAdded`(conv 相同) → 按 id 去重后追加；`MessageUpdated` → 按 id 替换；`TransferProgress` → 更新 progress；`TransferFinished` → 移除 progress 并重拉最新一页合并；`ConversationUpdated` → 更新标题/在线 | 发送文字：`SendText`；选择图片/视频（系统相册选择器）或文件（系统文件选择器）→ 复制到发件箱 → `SendFiles{conv, paths}`；点"未下载"的文件 → `DownloadBlob{hash}`；下载中点 × → `CancelTransfer`；长按自己 2 分钟内的消息 → 「撤回」→ `Recall`；长按任意消息 → 「删除」→ `DeleteLocal{msgs, also_my_devices=false}`、「复制」（文字）、「转发」（Files/Folder 消息，转发其全部文件 → `forward/{hashes}`）；滚到顶 → `ListMessages{before=最早一条 id}`；页面可见且最新一条变化 → `MarkRead{conv, upto=最新一条 id}` |
+| 聊天 | `conv`、`title`、`kind`、`peerOnline`、`messages: [MessageView]`（升序）、`hasMore`、`loadingMore`、`input`、`progress: {hash → (transfer, done, total)}`（`transfer` 取自 `TransferProgress.transfer`，`CancelTransfer{transfer}` 用它） | `ListConversations` 取本会话摘要；`ListMessages{conv, before=null, limit=50}` | `MessageAdded`(conv 相同) → 按 id 去重后追加；`MessageUpdated` → 按 id 替换；`TransferProgress{transfer, hash, done, total, …}` → 按 hash 更新 progress（含 transfer）；`TransferFinished` → 移除 progress 并重拉最新一页合并；`ConversationUpdated` → 更新标题/在线 | 发送文字：`SendText`；选择图片/视频（系统相册选择器）或文件（系统文件选择器）→ 复制到发件箱 → `SendFiles{conv, paths}`；点"未下载"的文件 → `DownloadBlob{hash}`；下载中点 × → `CancelTransfer{transfer}`（取 progress[hash].transfer）；长按自己 2 分钟内的消息 → 「撤回」→ `Recall`；长按任意消息 → 「删除」→ `DeleteLocal{msgs, also_my_devices=false}`、「复制」（文字）、「转发」（Files/Folder 消息，转发其全部文件 → `forward/{hashes}`）；滚到顶 → `ListMessages{before=最早一条 id}`；页面可见且最新一条变化 → `MarkRead{conv, upto=最新一条 id}` |
 | 图片查看 | `item: FileItemView` | 从聊天页传入的 conv 中 `ListMessages` 查找 hash | `TransferFinished`(hash) → 刷新 | 未下载时显示缩略图 + 「下载原图」→ `DownloadBlob`；「保存到相册」（本机动作） |
 | 文件视图 | `filter: FileFilter`（默认 kind=All、limit=200）、`items: [FileView]` | `QueryFiles{filter}` | `MessageAdded` / `TransferFinished` → 500ms 防抖后重查 | 顶部分段：全部/图片/视频/文档/压缩包/其他；筛选菜单：状态（全部/已下载/未下载）、来源设备；搜索框（`name_query`）；点项：已下载 → 打开，未下载 → `DownloadBlob`；长按：「打开所在会话」→ `chat/{conv}`、「转发」→ `forward/{hash}` |
 | 联系人 | `contacts: [ContactView]`、`nearby: [PeerView]`（`!is_contact && !is_mine`）、`requestCount` | `ListContacts`、`ListPeers`、`ListRequests` | `ContactsChanged` → 重拉联系人；`PeerOnline/Offline` → 重拉 peers；`IncomingRequest` → 重拉请求数 | 顶部「新的请求 (N)」→ `requests`；点联系人 → `contact/{user}`；附近的人行尾「添加」→ `RequestContact{user}`，成功后提示 `toast_request_sent` |
@@ -82,19 +82,19 @@
 
 | 组件 | 内容与规则 |
 |---|---|
-| 会话行 | 头像、标题（单行省略）、右上时间、第二行 `last_text`（单行省略，空则显示 `conv_no_message`）、未读角标（>99 显示 `99+`）、对端在线时头像右下 8dp 绿点（`online`，见 §5.1）；免打扰会话标题后显示静音图标，未读角标改灰色 |
-| 消息气泡 | 自己的消息靠右、`signal` 底白字；他人靠左、`surface` 底 + 1px `line`、`ink` 字；最大宽度为屏宽 75%；`kind == SelfDevices` 或对方有多台设备时，气泡上方显示小字 `来自 {author_device_name}`；相邻两条间隔 > 5 分钟时插入居中时间分隔；`state`：Sending 显示转圈、Failed 显示 `danger` 色感叹号（点按重发 = 再次 `SendText` 同文本）、Delivered 不显示、Read 显示 `msg_read`、Recalled 整条替换为居中灰字 `msg_recalled_by_me`/`msg_recalled` |
+| 会话行 | 头像、标题（单行省略）、右上时间、第二行 `last_text`（单行省略，空则显示 `conv_no_message`）、未读角标（>99 显示 `99+`，`signal_fill` 底白字）、对端在线时头像右下 8dp 绿点（`online`，见 §5.1）；免打扰会话标题后显示静音图标，未读角标改灰色 |
+| 消息气泡 | 自己的消息靠右、`signal_fill` 底白字（见 §5.1，暗色下不是 `signal`）；他人靠左、`surface` 底 + 1px `line`、`ink` 字；最大宽度为屏宽 75%；`kind == SelfDevices` 或对方有多台设备时，气泡上方显示小字 `来自 {author_device_name}`；相邻两条间隔 > 5 分钟时插入居中时间分隔；`state`：Sending 显示转圈、Failed 显示 `danger` 色感叹号（点按重发 = 再次 `SendText` 同文本）、Delivered 不显示、Read 显示 `msg_read`、Recalled 整条替换为居中灰字 `msg_recalled_by_me`/`msg_recalled` |
 | 文件卡片 | 左侧类型图标（按 mime：图片/视频/音频/文档/压缩包/其他），名称（中间省略）、大小、`source_label`（灰色小字）；右侧状态：Remote → 下载图标 + `file_not_downloaded`；Downloading → 环形进度 + 百分比 + × 按钮；Local → 无标记，点按打开；SourceOffline → 灰色 `file_source_offline`，不可点；Preparing → 转圈 + `file_preparing` |
 | 媒体网格 | Files 消息中所有图片/视频条目组成网格：1 个时按宽高比显示（最长边 240dp），2–4 个 2 列，5 个以上 3 列，最多显示 9 个，第 9 格显示 `+N`；视频右下角显示时长；缩略图来自 `thumb_path`，没有就显示类型图标；Downloading 时叠加进度环 |
 | 系统消息 | 居中灰色小字，`System{text}` 原样显示 |
 | 不支持的消息 | 居中灰字 `msg_unsupported` |
 | 路径角标 | `Lan` 不显示；`Vpn` → `path_vpn`；`Internet` → `path_internet`；`Relay` → `path_relay`；小号描边标签 |
-| 空状态 | 图标 + 一行文案（各页文案见 §6） |
-| 确认对话框 | 标题、正文、「取消」+ 红色确认按钮 |
+| 空状态 | 图标 + 一句说明（文案见 §6）+ 可直接行动的入口：页面有可行动操作时必须给出按钮（例如“添加设备”按钮），页面确无可做之事时才只留图标和说明 |
+| 确认对话框 | 标题、正文、「取消」+ 危险确认按钮（`danger_fill`，白字，见 §5.1；暗色下为描边按钮） |
 
 ### 5.1 视觉令牌（与桌面端视觉规范 v1.1 对齐）
 
-浅色主题值如下；暗色主题按桌面规范第 4 节推导（`canvas #12181D`、`surface #1C252C`、`line #2B363F`、`ink #E6ECEF`、`ink_muted #A3B0BA`、`ink_subtle #8D9AA5`、`signal #3FB8AF`、`signal_soft #1E3533`、`online #3CC27A`、`danger #F08A5D`），跟随系统切换。各平台界面代码中不得出现表外色值字面量。
+浅色主题值如下；暗色主题按桌面规范第 4 节推导（`canvas #12181D`、`surface #1C252C`、`line #2B363F`、`ink #E6ECEF`、`ink_muted #A3B0BA`、`ink_subtle #8D9AA5`、`signal #3FB8AF`、`signal_soft #1E3533`、`online #3CC27A`、`danger #F08A5D`），跟随系统切换；头像底色不随主题变。各平台界面代码中不得出现表外色值字面量。
 
 | 名称 | 值 | 用途 |
 |---|---|---|
@@ -107,11 +107,16 @@
 | `signal` | `#0B7A75` | 强调色（深青）：选中标签、主按钮、未读角标底、我的气泡 |
 | `signal_soft` | `#E8F4F2` | 选中底色、次要强调底 |
 | `online` | `#1E9E5A` | 在线点 |
-| `danger` | `#C2410C` | 错误、红色确认按钮、校验提示 |
+| `danger` | `#C2410C` | 错误文字、校验提示、危险确认按钮实底（浅色） |
+| `signal_fill` | 浅色 `#0B7A75`；暗色 `#0B7A75` | 实底：主按钮、我的气泡、未读角标；白字 |
+| `signal_fill_hover` | 浅色 `#096A65`；暗色 `#0B7F79` | `signal_fill` 悬停（有指针的平台） |
+| `signal_fill_pressed` | 浅色 `#075A56`；暗色 `#096560` | `signal_fill` 按下 |
 
 规则：
 - 所有文字与其底色对比度 ≥ 4.5:1（含 12sp 小字）。不用渐变、不用阴影堆叠，层级靠底色与 1px `line`。
-- 主按钮用 `signal` 实底白字，一个页面最多一个；次按钮 `surface` 底 + 1px `line`；文字按钮仅 `signal` 字。
+- 暗色主题 `signal`（`#3FB8AF`）亮度高，白字只有 2.42:1，**不得作实底**：实底（主按钮、我的气泡、未读角标）一律用 `signal_fill`（`#0B7A75`）配白字；`#3FB8AF` 只用于暗底上的文字、描边、选中色。白字对比度：`signal_fill` 5.18:1、暗色悬停 `#0B7F79` 4.85:1、暗色按下 `#096560` 6.90:1、浅色悬停 `#096A65` 6.44:1、浅色按下 `#075A56` 8.06:1，均 ≥ 4.5:1。浅色下 `signal` 与 `signal_fill` 同值。
+- 危险确认按钮：桌面端没有 danger 实底。浅色下用 `danger` `#C2410C` 实底白字（5.18:1）；暗色 `danger` `#F08A5D` 白字只有 2.47:1，故暗色下改为描边按钮：`surface` 底、1px `danger` 描边、`danger` 文字（对 `surface` 6.29:1），按下态用系统默认涟漪/高亮。暗色下 `danger` 只作文字、描边、图标，不作白字实底。
+- 主按钮用 `signal_fill` 实底白字，一个页面最多一个；次按钮 `surface` 底 + 1px `line`；文字按钮仅 `signal` 字。
 - 禁用状态保留形状、透明度 45%，旁边或下方必须有一句说明为什么不可用（例如名字为空时显示“填写名字后继续”）。
 - 空状态：图标 + 一句说明 + 一个能直接行动的入口，不写“暂无数据”。
 - 文案原则：动作按钮写清会发生什么，结果提示与按钮同词；错误说明原因与办法，不道歉、不写“操作失败”；不用 `A · B · C` 拼接元信息；不用全大写。
