@@ -215,3 +215,41 @@ async fn paired_device_inherits_display_name() {
         other => panic!("期望 SelfInfo，实际 {other:?}"),
     }
 }
+
+/// 缺陷 5（隐私）：「我的设备」会话的消息只能投递给自己用户的设备，
+/// 不得推给在线的第三方。A 仅与第三方 D 相连时，自己设备会话里的消息应保持 Sending。
+#[tokio::test]
+async fn self_devices_conv_not_pushed_to_third_party() {
+    let mut a = node_offline().await;
+    let a_user = a.init_first("甲").await;
+    let mut d = node_offline().await;
+    d.init_first("丁").await;
+    befriend(&mut a, &mut d).await;
+
+    let conv = ConvId::self_devices(&user(&a_user)).to_hex();
+    a.call(Request::SendText {
+        conv: conv.clone(),
+        text: "私密".into(),
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let Response::Messages { value } = a
+        .call(Request::ListMessages {
+            conv,
+            before: None,
+            limit: 50,
+        })
+        .await
+    else {
+        panic!("期望 Messages")
+    };
+    let m = value
+        .iter()
+        .find(|m| matches!(&m.body, MessageBodyView::Text { text } if text == "私密"))
+        .expect("消息应存在");
+    assert_eq!(
+        m.state,
+        lanmsg_api::types::MessageState::Sending,
+        "无自己设备在线时不应被投递给第三方"
+    );
+}

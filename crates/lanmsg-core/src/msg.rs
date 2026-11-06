@@ -74,10 +74,13 @@ fn delivery_targets(
                 .map(|p| p.device)
                 .collect()
         }
+        // 仅自己用户的其他设备；绝不能推给联系人/陌生人（隐私）。
         ConvKindRow::SelfDevices => conns
             .peers()
             .into_iter()
-            .filter(|p| p.device != *self_device)
+            .filter(|p| {
+                p.device != *self_device && p.cert.as_ref().is_some_and(|c| c.user == *self_user)
+            })
             .map(|p| p.device)
             .collect(),
         _ => Vec::new(),
