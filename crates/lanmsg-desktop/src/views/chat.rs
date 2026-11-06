@@ -330,6 +330,7 @@ fn new_messages_banner(ui: &UiState) -> Element {
                 .padding_xy(style::SPACE_MD, 0)
                 .corner(style::RADIUS_PILL)
                 .bg_role(Role::Surface)
+                .border_role(Role::Border, 1)
                 .align(Align::Center)
                 .clickable()
                 .on_click(move |_| {

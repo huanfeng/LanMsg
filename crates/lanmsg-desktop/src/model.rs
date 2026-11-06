@@ -108,6 +108,8 @@ pub struct Model {
     pub cancelled_downloads: BTreeSet<String>,
     pub pair: Option<PairUi>,
     pub toast: Option<String>,
+    /// 发送失败待回填输入框的草稿 `(会话, 文字)`；由 UiState 在输入框存在时取走。
+    pub draft_restore: Option<(String, String)>,
     pub window_focused: bool,
     pub search_query: String,
     pub search_results: Vec<MessageView>,
@@ -159,6 +161,7 @@ impl Model {
             cancelled_downloads: BTreeSet::new(),
             pair: None,
             toast: None,
+            draft_restore: None,
             window_focused: true,
             search_query: String::new(),
             search_results: Vec::new(),
@@ -187,6 +190,11 @@ impl Model {
                         self.toast = Some(e.message);
                     }
                     match &tag {
+                        // 文字发送失败：草稿交还输入框，避免用户重打
+                        ReplyTag::Sent {
+                            conv,
+                            draft: Some(d),
+                        } => self.draft_restore = Some((conv.clone(), d.clone())),
                         ReplyTag::Messages { older: true, .. } => self.older_in_flight = false,
                         ReplyTag::Messages { older: false, .. } => self.reload_in_flight = false,
                         _ => {}
@@ -374,7 +382,7 @@ impl Model {
                 self.toast = Some(strings::FORWARDED.to_string());
                 Vec::new()
             }
-            // Sent / Transfer / Generic 等无需更新模型：结果经事件到达
+            // Sent（成功：草稿随之丢弃）/ Transfer / Generic 等无需更新模型：结果经事件到达
             _ => Vec::new(),
         }
     }
@@ -716,13 +724,17 @@ impl Model {
 
     /// 发送文字（调用方已做空白规整）；结果经 MessageAdded 事件与错误 toast 到达。
     pub fn send_text(&mut self, conv: String, text: String) -> Vec<Effect> {
+        let draft = text.clone();
         let mut fx = self.send_prefix();
         fx.push(call(
             Request::SendText {
                 conv: conv.clone(),
                 text,
             },
-            ReplyTag::Sent { conv },
+            ReplyTag::Sent {
+                conv,
+                draft: Some(draft),
+            },
         ));
         fx
     }
@@ -735,7 +747,7 @@ impl Model {
                 conv: conv.clone(),
                 paths,
             },
-            ReplyTag::Sent { conv },
+            ReplyTag::Sent { conv, draft: None },
         ));
         fx
     }
@@ -751,7 +763,10 @@ impl Model {
             return Vec::new();
         }
         let mut fx = self.send_prefix();
-        let tag = || ReplyTag::Sent { conv: conv.clone() };
+        let tag = || ReplyTag::Sent {
+            conv: conv.clone(),
+            draft: None,
+        };
         if !files.is_empty() {
             fx.push(call(
                 Request::SendFiles {
@@ -1273,6 +1288,43 @@ mod tests {
             }),
         });
         assert_eq!(m.toast.as_deref(), Some("对方不在线"));
+    }
+
+    #[test]
+    fn send_failure_restores_draft() {
+        let mut m = Model::new();
+        let fx = m.send_text("c1".into(), "你好\n世界".into());
+        let tag = fx
+            .iter()
+            .find_map(|e| match e {
+                Effect::Call(Request::SendText { .. }, t) => Some(t.clone()),
+                _ => None,
+            })
+            .expect("有发送请求");
+        m.apply(UiMsg::Reply {
+            tag,
+            result: Err(ApiError {
+                code: ErrorCode::PeerOffline,
+                message: "对方离线".into(),
+            }),
+        });
+        assert_eq!(
+            m.draft_restore,
+            Some(("c1".to_string(), "你好\n世界".to_string()))
+        );
+    }
+
+    #[test]
+    fn send_success_discards_draft() {
+        let mut m = Model::new();
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::Sent {
+                conv: "c1".into(),
+                draft: Some("x".into()),
+            },
+            result: Ok(Response::Ok),
+        });
+        assert_eq!(m.draft_restore, None);
     }
 
     #[test]

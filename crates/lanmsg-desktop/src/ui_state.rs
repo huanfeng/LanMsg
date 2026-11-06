@@ -17,6 +17,9 @@ use crate::strings;
 use crate::views::composer::PastedImage;
 use lanmsg_api::types::Response;
 
+/// 当前输入框的登记：(会话, 文本信号)。
+type ComposerSlot = (String, Signal<String>);
+
 /// 界面共享状态句柄（可克隆，仅限 UI 线程使用）。
 #[derive(Clone)]
 pub struct UiState {
@@ -35,6 +38,8 @@ pub struct UiState {
     pub paste: Signal<Option<PastedImage>>,
     /// 回到列表底部的请求序号：消息列表按它重建，首次布局即滚到底。
     pub bottom_epoch: Signal<u64>,
+    /// 当前输入框：(会话, 文本信号)；发送失败的草稿经它回填。
+    composer: Rc<RefCell<Option<ComposerSlot>>>,
     debouncer: Rc<RefCell<Debouncer>>,
     started: Instant,
     /// 数据目录：登记开机自启时决定是否带 `--data-dir`。
@@ -55,6 +60,7 @@ impl UiState {
             forward: signal((0u64, Vec::new())),
             paste: signal(None),
             bottom_epoch: signal(0u64),
+            composer: Rc::new(RefCell::new(None)),
             debouncer: Rc::new(RefCell::new(Debouncer::new(SEARCH_DEBOUNCE_MS))),
             started: Instant::now(),
             data_dir: lanmsg_core::paths::default_data_dir(),
@@ -94,6 +100,7 @@ impl UiState {
         // 先放开 borrow 再执行副作用，避免回调重入时 RefCell 冲突
         let fx = self.model.borrow_mut().apply(msg);
         self.run(fx);
+        self.restore_draft();
         if is_convs_reply {
             self.resolve_pending_open();
         }
@@ -159,6 +166,42 @@ impl UiState {
             }
         }
         self.rev.update(|v| *v += 1);
+    }
+
+    /// 登记当前会话的输入框（`composer` 每次随会话重建时调用），并补回此前失败的草稿。
+    pub fn register_composer(&self, conv: String, text: Signal<String>) {
+        *self.composer.borrow_mut() = Some((conv, text));
+        self.restore_draft();
+    }
+
+    /// 发送失败的草稿属于当前输入框所在会话时回填并清除；输入框已有新内容则草稿放前面。
+    fn restore_draft(&self) {
+        let Some((conv, text)) = self.composer.borrow().clone() else {
+            return;
+        };
+        let draft = {
+            let mut m = self.model.borrow_mut();
+            match m.draft_restore.take() {
+                Some((c, d)) if c == conv => Some(d),
+                other => {
+                    m.draft_restore = other;
+                    None
+                }
+            }
+        };
+        if let Some(d) = draft {
+            text.set(crate::views::composer::merge_draft(&d, &text.get()));
+        }
+    }
+
+    /// 周期调用：粘贴确认小窗被 ESC 隐藏后，删除临时文件并清除状态。
+    pub fn tick_paste(&self) {
+        if let Some(p) = self.paste.get() {
+            if !p.show.get() {
+                let _ = std::fs::remove_file(p.path());
+                self.paste.set(None);
+            }
+        }
     }
 
     /// 周期调用：搜索框文本稳定后发起搜索。

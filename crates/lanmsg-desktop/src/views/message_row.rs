@@ -289,6 +289,7 @@ fn bubble_shell(mine: bool, child: Element) -> Element {
 fn text_bubble(mine: bool, text: &str) -> Element {
     let label = Element::label(text.to_string())
         .font_size(style::FONT_BODY)
+        .line_height(style::LINE_HEIGHT_BODY)
         .fg_role(if mine { Role::OnAccent } else { Role::Text });
     bubble_shell(mine, label)
 }

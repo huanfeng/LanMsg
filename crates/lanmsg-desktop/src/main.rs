@@ -127,6 +127,11 @@ fn main() {
     };
     *slot.borrow_mut() = Some(ui.clone());
     if demo.is_none() {
+        // 清理上次遗留的未确认粘贴图片；后台线程，不阻塞界面
+        let (pending, _) = views::composer::paste_dirs(&data_dir);
+        std::thread::spawn(move || {
+            views::composer::cleanup_pending(&pending, views::composer::PASTE_PENDING_MAX_AGE)
+        });
         if let Some(conv) = cli.open_conv {
             ui.request_open_conv(conv);
         }
@@ -137,6 +142,7 @@ fn main() {
     app = app
         .on_interval(std::time::Duration::from_millis(100), move |_ctx| {
             ui_tick.tick_search();
+            ui_tick.tick_paste();
         })
         .on_window_activated(move |_ctx, active| {
             ui_focus.act(|m| m.set_window_focused(active));

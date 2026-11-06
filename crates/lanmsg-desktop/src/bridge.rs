@@ -35,19 +35,34 @@ pub enum UiMsg {
 pub enum ReplyTag {
     SelfInfo,
     Conversations,
-    Messages { conv: String, older: bool },
+    Messages {
+        conv: String,
+        older: bool,
+    },
     Peers,
     Contacts,
     Requests,
     Devices,
-    Files { append: bool },
+    Files {
+        append: bool,
+    },
     Settings,
     Init,
     Pair,
-    Sent { conv: String },
-    Transfer { hash: String },
-    Deleted { msg: String },
-    Search { query: String },
+    /// `draft` 是发送文字时的原文：失败时用来回填输入框。
+    Sent {
+        conv: String,
+        draft: Option<String>,
+    },
+    Transfer {
+        hash: String,
+    },
+    Deleted {
+        msg: String,
+    },
+    Search {
+        query: String,
+    },
     Forwarded,
     Generic,
 }

@@ -320,6 +320,9 @@ pub fn window_icon() -> windui::icon::IconSource {
     })
 }
 
+/// 正文行高（字号的倍数）：多行消息与输入框用，约 1.45 倍。
+pub const LINE_HEIGHT_BODY: f32 = 1.45;
+
 /// 应用标识：保持自身颜色。
 pub fn logo(size: i32) -> Element {
     Element::image_svg(ICON_LOGO, None).size(size, size)

@@ -91,6 +91,7 @@ pub const PASTE_TITLE: &str = "发送这张图片？";
 pub const PASTE_SEND: &str = "发送";
 pub const PASTE_CANCEL: &str = "取消";
 pub const PASTE_SAVE_FAILED: &str = "保存粘贴的图片失败：";
+pub const PASTE_NAME_EXHAUSTED: &str = "同一时刻粘贴的图片过多";
 pub const NEW_MESSAGES_BANNER: &str = "有新消息，点击查看最新";
 
 /// 转发对话框。

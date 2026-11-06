@@ -1,8 +1,9 @@
 // 输入区：多行输入框、文件/文件夹按钮、发送按钮；支持粘贴图片与拖入文件。
 // 纯函数（空白规整、拖入分流、粘贴文件命名与 PNG 编码）带单测。注释中文，标识符英文。
 //
-// 粘贴图片的临时文件写在 `<data_dir>/cache/paste/`，发送后保留：核心发送文件时按路径引用
-// 原文件（消息的 `local_path` 指向它，“打开”依赖它存在），所以界面侧不能删除已发送的图片。
+// 粘贴图片分两级目录：未确认的写在 `<data_dir>/cache/paste/pending/`（取消 / ESC / × 删除，
+// 启动时清理超过一天的残留）；确认发送时移到 `paste/sent/` 再交给核心。核心发送文件时按
+// 路径引用原文件（消息的 `local_path` 指向它，“打开”依赖它存在），所以 sent 下的不能删除。
 
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -48,17 +49,115 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
-/// 粘贴图片的文件名：`paste-YYYYMMDD-HHMMSS.png`（本地时间）。
-pub fn paste_file_name(millis: i64, tz_offset_secs: i32) -> String {
+/// 粘贴图片的文件名：`paste-YYYYMMDD-HHMMSS-mmm.png`（本地时间）；
+/// `seq > 0` 时在毫秒后追加 `-seq`，用于同一毫秒内的重名重试。
+pub fn paste_file_name(millis: i64, tz_offset_secs: i32, seq: u32) -> String {
     let secs = millis.div_euclid(1000) + i64::from(tz_offset_secs);
     let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
     let sod = secs.rem_euclid(86_400);
+    let suffix = if seq > 0 {
+        format!("-{seq}")
+    } else {
+        String::new()
+    };
     format!(
-        "paste-{y:04}{m:02}{d:02}-{:02}{:02}{:02}.png",
+        "paste-{y:04}{m:02}{d:02}-{:02}{:02}{:02}-{:03}{suffix}.png",
         sod / 3600,
         sod % 3600 / 60,
-        sod % 60
+        sod % 60,
+        millis.rem_euclid(1000)
     )
+}
+
+/// 同名重试上限。
+const PASTE_NAME_TRIES: u32 = 100;
+/// 未确认的粘贴文件保留多久（启动时清理超期的）。
+pub const PASTE_PENDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// 粘贴目录：`(pending, sent)`。
+pub fn paste_dirs(data_dir: &Path) -> (PathBuf, PathBuf) {
+    let base = data_dir.join("cache").join("paste");
+    (base.join("pending"), base.join("sent"))
+}
+
+/// 以 `create_new` 写入 PNG：重名（同一毫秒再次粘贴）时追加序号重试，绝不覆盖已有文件。
+pub fn save_pasted(
+    dir: &Path,
+    millis: i64,
+    tz_offset_secs: i32,
+    png: &[u8],
+) -> Result<PathBuf, String> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    for seq in 0..PASTE_NAME_TRIES {
+        let path = dir.join(paste_file_name(millis, tz_offset_secs, seq));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(png) {
+                    // 写一半失败不留残缺文件
+                    drop(f);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(e.to_string());
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err(strings::PASTE_NAME_EXHAUSTED.to_string())
+}
+
+/// 把确认发送的文件从 pending 移到 sent（目标重名则加序号），返回新路径。
+pub fn promote_paste(pending: &Path, sent_dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(sent_dir).map_err(|e| e.to_string())?;
+    let name = pending
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "无效的文件名".to_string())?;
+    let stem = name.strip_suffix(".png").unwrap_or(name);
+    let mut target = sent_dir.join(name);
+    for n in 1..PASTE_NAME_TRIES {
+        if !target.exists() {
+            break;
+        }
+        target = sent_dir.join(format!("{stem}-d{n}.png"));
+    }
+    std::fs::rename(pending, &target).map_err(|e| e.to_string())?;
+    Ok(target)
+}
+
+/// 清理 pending 目录里修改时间早于 `max_age` 的文件（启动时在后台线程调用一次）。
+pub fn cleanup_pending(dir: &Path, max_age: std::time::Duration) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for e in rd.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > max_age);
+        if old {
+            // 清理失败（被占用等）下次启动再试
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// 发送失败的草稿回填：输入框已有新内容时，把失败草稿放在前面以换行分隔，不覆盖新输入。
+pub fn merge_draft(draft: &str, existing: &str) -> String {
+    if existing.is_empty() {
+        draft.to_string()
+    } else {
+        format!("{draft}\n{existing}")
+    }
 }
 
 /// 非预乘 RGBA8 编码为 PNG。
@@ -83,6 +182,14 @@ pub struct PastedImage {
     width: u32,
     height: u32,
     rgba: Rc<Vec<u8>>,
+    /// 小窗显隐；ESC 只会把它置假，由 `UiState::tick_paste` 发现后清理临时文件。
+    pub show: Signal<bool>,
+}
+
+impl PastedImage {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 impl PartialEq for PastedImage {
@@ -107,23 +214,24 @@ fn on_paste(
     rgba: Vec<u8>,
 ) {
     let now = now_millis();
-    let dir = ui.data_dir().join("cache").join("paste");
-    let path = dir.join(paste_file_name(now, tz::local_offset_secs()));
+    let (dir, _) = paste_dirs(ui.data_dir());
     let saved = encode_png(width, height, &rgba)
-        .and_then(|png| {
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| e.to_string())
-                .map(|_| png)
-        })
-        .and_then(|png| std::fs::write(&path, png).map_err(|e| e.to_string()));
+        .and_then(|png| save_pasted(&dir, now, tz::local_offset_secs(), &png));
     match saved {
-        Ok(()) => ui.paste.set(Some(PastedImage {
-            path,
-            stamp: now,
-            width,
-            height,
-            rgba: Rc::new(rgba),
-        })),
+        Ok(path) => {
+            // 上一张还没确认就又粘贴了：删掉旧的临时文件
+            if let Some(old) = ui.paste.get() {
+                let _ = std::fs::remove_file(old.path());
+            }
+            ui.paste.set(Some(PastedImage {
+                path,
+                stamp: now,
+                width,
+                height,
+                rgba: Rc::new(rgba),
+                show: signal(true),
+            }));
+        }
         Err(e) => ctx.toast_err(format!("{}{e}", strings::PASTE_SAVE_FAILED)),
     }
 }
@@ -138,7 +246,7 @@ pub fn paste_host(ui: &UiState) -> Element {
 }
 
 fn paste_dialog(ui: &UiState, p: PastedImage) -> Element {
-    let show = signal(true);
+    let show = p.show;
     let (w, h) = (p.width as f32, p.height as f32);
     let scale = (PREVIEW_MAX as f32 / w.max(h)).min(1.0);
     let preview = Element::image_rgba(p.width, p.height, &p.rgba)
@@ -162,13 +270,19 @@ fn paste_dialog(ui: &UiState, p: PastedImage) -> Element {
                 .outline()
                 .on_click(move |_| discard_paste(&ui_cancel, &path_cancel)),
         )
-        .child(Element::button(strings::PASTE_SEND).on_click(move |_| {
-            let path = path_send.to_string_lossy().into_owned();
-            if let Some(conv) = ui_send.read(|m| m.current_conv.clone()) {
-                ui_send.act(|m| m.send_files(conv, vec![path]));
-                ui_send.jump_to_bottom();
+        .child(Element::button(strings::PASTE_SEND).on_click(move |ctx| {
+            let (_, sent_dir) = paste_dirs(ui_send.data_dir());
+            match promote_paste(&path_send, &sent_dir) {
+                Ok(sent) => {
+                    if let Some(conv) = ui_send.read(|m| m.current_conv.clone()) {
+                        let path = sent.to_string_lossy().into_owned();
+                        ui_send.act(|m| m.send_files(conv, vec![path]));
+                        ui_send.jump_to_bottom();
+                    }
+                    ui_send.paste.set(None);
+                }
+                Err(e) => ctx.toast_err(format!("{}{e}", strings::PASTE_SAVE_FAILED)),
             }
-            ui_send.paste.set(None);
         }));
     Element::dialog_panel(
         show,
@@ -180,7 +294,7 @@ fn paste_dialog(ui: &UiState, p: PastedImage) -> Element {
     )
 }
 
-/// 取消发送：删除尚未被任何消息引用的临时图片。
+/// 取消发送（取消按钮 / ×）：删除尚未被任何消息引用的临时图片。ESC 走 `UiState::tick_paste`。
 fn discard_paste(ui: &UiState, path: &Path) {
     // 删除失败（已被清理等）不影响取消
     let _ = std::fs::remove_file(path);
@@ -258,6 +372,8 @@ fn pick_button(
 /// 底部输入区：surface 底、顶部 1px 分隔线；Enter 发送，Shift+Enter 换行。
 pub fn composer(ui: &UiState, conv: String) -> Element {
     let text = signal(String::new());
+    // 登记输入框，发送失败的草稿由 UiState 回填；先前失败而此刻才打开的会话也在此补回
+    ui.register_composer(conv.clone(), text);
     let hint = signal(String::new());
     let has_hint = hint.map(|h| !h.is_empty());
     let blank = text.map(|t| normalize_outgoing(t).is_none());
@@ -270,6 +386,8 @@ pub fn composer(ui: &UiState, conv: String) -> Element {
         .on_submit(move |_| submit(&ui_submit, &conv_submit, text))
         // 剪贴板只有图片时触发；原生 Wayland 不支持读剪贴板图片，此时回调不会触发
         .on_paste_image(move |ctx, img| on_paste(ctx, &ui_paste, img.width, img.height, img.rgba))
+        .font_size(style::FONT_BODY)
+        .line_height(style::LINE_HEIGHT_BODY)
         .autofocus()
         .width_match()
         .height(INPUT_H);
@@ -342,9 +460,53 @@ mod tests {
     fn paste_file_name_uses_local_time() {
         // 2026-03-15 09:05:07 UTC，+08:00 -> 17:05:07
         assert_eq!(
-            paste_file_name(1_773_565_507_000, 8 * 3600),
-            "paste-20260315-170507.png"
+            paste_file_name(1_773_565_507_042, 8 * 3600, 0),
+            "paste-20260315-170507-042.png"
         );
+        assert_eq!(
+            paste_file_name(1_773_565_507_042, 8 * 3600, 2),
+            "paste-20260315-170507-042-2.png"
+        );
+    }
+
+    #[test]
+    fn save_pasted_same_millis_does_not_overwrite() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let a = save_pasted(dir.path(), 1_773_565_507_042, 0, b"first").expect("a");
+        let b = save_pasted(dir.path(), 1_773_565_507_042, 0, b"second").expect("b");
+        assert_ne!(a, b);
+        assert_eq!(std::fs::read(&a).expect("读a"), b"first");
+        assert_eq!(std::fs::read(&b).expect("读b"), b"second");
+    }
+
+    #[test]
+    fn promote_paste_moves_to_sent() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let (pending, sent) = paste_dirs(dir.path());
+        let p = save_pasted(&pending, 1, 0, b"x").expect("存");
+        let q = promote_paste(&p, &sent).expect("移动");
+        assert!(!p.exists() && q.starts_with(&sent));
+        assert_eq!(std::fs::read(&q).expect("读"), b"x");
+    }
+
+    #[test]
+    fn cleanup_pending_removes_only_old_files() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let old = dir.path().join("old.png");
+        let new = dir.path().join("new.png");
+        std::fs::write(&old, b"o").expect("写");
+        std::fs::write(&new, b"n").expect("写");
+        let f = std::fs::File::options().write(true).open(&old).expect("开");
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400))
+            .expect("改mtime");
+        cleanup_pending(dir.path(), PASTE_PENDING_MAX_AGE);
+        assert!(!old.exists() && new.exists());
+    }
+
+    #[test]
+    fn merge_draft_keeps_new_input() {
+        assert_eq!(merge_draft("旧", ""), "旧");
+        assert_eq!(merge_draft("旧", "新"), "旧\n新");
     }
 
     #[test]
