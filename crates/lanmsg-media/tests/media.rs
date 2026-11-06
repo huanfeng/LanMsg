@@ -115,6 +115,58 @@ fn truncated_png_returns_err() {
     assert!(decode_image(&png).is_err());
 }
 
+/// 在 JPEG 的 SOI 之后插入只含 Orientation(0x0112) 一个条目的最小 EXIF APP1 段。
+fn jpeg_with_orientation(jpeg: &[u8], orientation: u16) -> Vec<u8> {
+    let mut exif = b"Exif\0\0".to_vec();
+    exif.extend_from_slice(b"MM\0\x2a\0\0\0\x08"); // 大端 TIFF 头，IFD0 偏移 8
+    exif.extend_from_slice(&1u16.to_be_bytes()); // 条目数
+    exif.extend_from_slice(&0x0112u16.to_be_bytes()); // tag
+    exif.extend_from_slice(&3u16.to_be_bytes()); // type SHORT
+    exif.extend_from_slice(&1u32.to_be_bytes()); // count
+    exif.extend_from_slice(&orientation.to_be_bytes());
+    exif.extend_from_slice(&[0, 0]); // 值字段补齐
+    exif.extend_from_slice(&0u32.to_be_bytes()); // 无下一个 IFD
+    let mut out = jpeg[..2].to_vec();
+    out.extend_from_slice(&[0xFF, 0xE1]);
+    out.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&exif);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+#[test]
+fn exif_orientation_6_swaps_dimensions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rot.jpg");
+    std::fs::write(&path, jpeg_with_orientation(&jpeg_bytes(300, 200), 6)).unwrap();
+    let (jpeg, info) = make_thumbnail(&path, "image/jpeg").unwrap();
+    assert_eq!((info.width, info.height), (200, 300));
+    let thumb = decode_image(&jpeg).unwrap();
+    // 长边缩到 256 后仍是竖图
+    assert_eq!((thumb.width, thumb.height), (171, 256));
+}
+
+#[test]
+fn rejects_oversized_jpeg_header() {
+    // 合法小 JPEG，把 SOF0/SOF2 段里的高宽改成 30000x30000
+    let mut jpeg = jpeg_bytes(16, 16);
+    let sof = jpeg
+        .windows(2)
+        .position(|w| w == [0xFF, 0xC0] || w == [0xFF, 0xC2])
+        .expect("找不到 SOF 段");
+    // marker(2) + 长度(2) + 精度(1) 之后依次是高、宽
+    jpeg[sof + 5..sof + 7].copy_from_slice(&30000u16.to_be_bytes());
+    jpeg[sof + 7..sof + 9].copy_from_slice(&30000u16.to_be_bytes());
+    assert!(matches!(decode_image(&jpeg), Err(MediaError::TooLarge)));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fake2.jpg");
+    std::fs::write(&path, &jpeg).unwrap();
+    assert!(matches!(
+        make_thumbnail(&path, "image/jpeg"),
+        Err(MediaError::TooLarge)
+    ));
+}
+
 /// PNG 用的 CRC32（测试内自带，避免多引依赖）。
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;

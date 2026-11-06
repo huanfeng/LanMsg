@@ -1,6 +1,7 @@
 //! 图片解码；尺寸检查在分配像素缓冲之前完成。
 
 use crate::{sniff, MediaError, Sniffed};
+use image::metadata::Orientation;
 use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use std::io::{BufRead, Cursor, Read, Seek, SeekFrom};
 
@@ -42,11 +43,14 @@ pub(crate) fn decode_reader<R: BufRead + Seek>(
         .map_err(map_image_error)?;
     let (w, h) = decoder.dimensions();
     check_dimensions(w, h)?;
+    // EXIF 等方向信息：读不到按无变换处理
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
     // 尺寸合规后才真正解码；分配上限作为第二道防线（约 256MB）
     let mut limits = Limits::default();
     limits.max_alloc = Some(MAX_DECODE_PIXELS * 4);
     decoder.set_limits(limits).map_err(map_image_error)?;
-    let img = image::DynamicImage::from_decoder(decoder).map_err(map_image_error)?;
+    let mut img = image::DynamicImage::from_decoder(decoder).map_err(map_image_error)?;
+    img.apply_orientation(orientation);
     let rgba = img.into_rgba8();
     Ok(Rgba {
         width: rgba.width(),
