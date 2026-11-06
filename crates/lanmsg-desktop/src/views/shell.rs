@@ -8,14 +8,14 @@ use crate::model::Page;
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
-use crate::views::{chats, wizard};
+use crate::views::{chats, contacts, pair, wizard};
 
 /// 页面内容；尚未实现的页先放标题占位。
 fn page_view(ui: &UiState, p: Page) -> Element {
     let title = match p {
         Page::Wizard => return wizard::wizard(ui),
         Page::Chats => return chats::chats_page(ui),
-        Page::Contacts => strings::PAGE_CONTACTS,
+        Page::Contacts => return contacts::contacts_page(ui),
         Page::Files => strings::PAGE_FILES,
         Page::Settings => strings::PAGE_SETTINGS,
     };
@@ -182,9 +182,14 @@ pub fn shell(ui: &UiState) -> Element {
         .child(banner)
         .child(Element::switcher(page, move |p| page_view(&ui_page, p).fill()).weight(1.0));
 
-    Element::row()
+    let main = Element::row()
         .fill()
         .bg_role(Role::Bg)
         .child(nav)
-        .child(content)
+        .child(content);
+    // 配对对话框在最上层：向导（加入流程）与主界面共用
+    Element::stack()
+        .fill()
+        .child(main)
+        .child(pair::pair_host(ui))
 }

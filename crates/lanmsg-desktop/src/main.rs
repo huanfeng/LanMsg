@@ -143,6 +143,7 @@ fn main() {
         .on_interval(std::time::Duration::from_millis(100), move |_ctx| {
             ui_tick.tick_search();
             ui_tick.tick_paste();
+            ui_tick.tick_pair();
         })
         .on_window_activated(move |_ctx, active| {
             ui_focus.act(|m| m.set_window_focused(active));

@@ -49,6 +49,22 @@ pub enum ReplyTag {
     Settings,
     Init,
     Pair,
+    /// 加入方的 `PairJoin`：失败时回到选择界面（发起方的 `Pair` 失败则关闭对话框）。
+    PairJoin,
+    /// `OpenDm` 的回复：成功后切到会话页并打开该会话。
+    Dm,
+    /// 请求处理（接收/拒绝/屏蔽…）：成功后才从列表移除。
+    Responded {
+        request: String,
+    },
+    /// 发出联系人请求：成功后提示。
+    Requested,
+    /// 联系人策略保存：失败后以服务端为准重新拉取。
+    Policy,
+    /// 移除本人设备：成功后刷新设备列表。
+    DeviceRemoved,
+    /// 手动添加对端地址。
+    ManualPeer,
     /// `draft` 是发送文字时的原文：失败时用来回填输入框。
     Sent {
         conv: String,

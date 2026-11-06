@@ -466,11 +466,17 @@ pub fn demo_model(p: DemoPage) -> Model {
                 },
             );
         }
-        DemoPage::Contacts | DemoPage::Devices => {
+        DemoPage::Contacts => {
             m.page = Page::Contacts;
+            m.contacts_tab = 0;
+        }
+        DemoPage::Devices => {
+            m.page = Page::Contacts;
+            m.contacts_tab = 3;
         }
         DemoPage::Pair => {
             m.page = Page::Contacts;
+            m.contacts_tab = 3;
             m.pair = Some(PairUi::Showing {
                 session: "s1".into(),
                 qr_uri: Some("lanmsg://pair?s=demo".into()),

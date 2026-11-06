@@ -47,12 +47,26 @@ pub struct TransferInfo {
 /// 配对界面状态。
 #[derive(Debug, Clone, PartialEq)]
 pub enum PairUi {
+    /// 加入方：选择可见设备或粘贴配对链接。
+    Picking,
+    /// `PairStart` / `PairJoin` 已发出，等待会话信息。
+    Starting,
     Showing {
         session: String,
         qr_uri: Option<String>,
         state: PairStateDto,
     },
 }
+
+/// 最近一次配对的发起意图：失败后“重试”据此重来。
+#[derive(Debug, Clone, PartialEq)]
+pub enum PairIntent {
+    Start(PairMethod),
+    Join(PairTarget),
+}
+
+/// 联系人页分类数量（联系人 / 新的请求 / 附近的人 / 我的设备）。
+pub const CONTACTS_TABS: usize = 4;
 
 /// Model 迁移产生的副作用：交由 UiState 经 Bridge 执行。
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +121,12 @@ pub struct Model {
     /// 用户已取消的哈希：对应的失败结束事件不再弹“下载失败”。
     pub cancelled_downloads: BTreeSet<String>,
     pub pair: Option<PairUi>,
+    /// 最近一次配对意图（重试用）。
+    pub pair_intent: Option<PairIntent>,
+    /// 联系人页当前分类（0 联系人、1 新的请求、2 附近的人、3 我的设备）。
+    pub contacts_tab: usize,
+    /// 已发出处理请求、尚未回复的请求 id（防重复点击）。
+    pub pending_requests: BTreeSet<String>,
     pub toast: Option<String>,
     /// 发送失败待回填输入框的草稿 `(会话, 文字)`；由 UiState 在输入框存在时取走。
     pub draft_restore: Option<(String, String)>,
@@ -115,7 +135,7 @@ pub struct Model {
     pub search_results: Vec<MessageView>,
     /// 已提交、尚未得到回复的向导初始化模式。
     pub init_mode: Option<InitMode>,
-    /// 以“加入已有设备”方式完成了 Init，等待配对（Task 14 接管）。
+    /// 以“加入已有设备”方式完成了 Init，等待配对；配对完成或取消后复位。
     pub wizard_joining: bool,
     /// Init 已发出、尚未得到回复（期间禁用向导按钮，防重复提交）。
     pub init_in_flight: bool,
@@ -160,6 +180,9 @@ impl Model {
             pending_downloads: BTreeSet::new(),
             cancelled_downloads: BTreeSet::new(),
             pair: None,
+            pair_intent: None,
+            contacts_tab: 0,
+            pending_requests: BTreeSet::new(),
             toast: None,
             draft_restore: None,
             window_focused: true,
@@ -208,7 +231,21 @@ impl Model {
                         self.init_mode = None;
                         self.init_in_flight = false;
                     }
-                    Vec::new()
+                    let mut fx = Vec::new();
+                    match &tag {
+                        ReplyTag::Responded { request } => {
+                            self.pending_requests.remove(request);
+                        }
+                        // 发起方启动失败：关闭对话框；加入方失败：回到选择界面可改选
+                        ReplyTag::Pair => self.pair = None,
+                        ReplyTag::PairJoin => self.pair = Some(PairUi::Picking),
+                        // 乐观更新失败：以服务端为准
+                        ReplyTag::Policy => {
+                            fx.push(call(Request::ListContacts, ReplyTag::Contacts));
+                        }
+                        _ => {}
+                    }
+                    fx
                 }
             },
             UiMsg::Event(ev) => self.apply_event(ev),
@@ -344,7 +381,7 @@ impl Model {
                 self.settings = Some(value);
                 Vec::new()
             }
-            (ReplyTag::Pair, Response::PairSession { value }) => {
+            (ReplyTag::Pair | ReplyTag::PairJoin, Response::PairSession { value }) => {
                 self.pair = Some(PairUi::Showing {
                     session: value.session,
                     qr_uri: value.qr_uri,
@@ -364,7 +401,11 @@ impl Model {
                 let mut fx = Vec::new();
                 match self.init_mode.take() {
                     Some(InitMode::FirstDevice) => fx.push(Effect::EnableAutostart),
-                    Some(InitMode::JoinExisting) => self.wizard_joining = true,
+                    Some(InitMode::JoinExisting) => {
+                        self.wizard_joining = true;
+                        // 直接进入加入流程：选择已有设备或粘贴配对链接
+                        fx.extend(self.pair_open_join());
+                    }
                     None => {}
                 }
                 fx.push(call(Request::GetSelf, ReplyTag::SelfInfo));
@@ -377,6 +418,28 @@ impl Model {
             (ReplyTag::Deleted { msg }, Response::Ok) => {
                 self.messages.retain(|m| m.id != msg);
                 Vec::new()
+            }
+            (ReplyTag::Responded { request }, Response::Ok) => {
+                self.pending_requests.remove(&request);
+                self.requests.retain(|r| r.request != request);
+                Vec::new()
+            }
+            (ReplyTag::Requested, Response::Ok) => {
+                self.toast = Some(strings::CONTACT_REQUEST_SENT.to_string());
+                Vec::new()
+            }
+            (ReplyTag::Dm, Response::ConvId { value }) => {
+                self.page = Page::Chats;
+                let mut fx = self.open_conv(value);
+                fx.push(call(Request::ListConversations, ReplyTag::Conversations));
+                fx
+            }
+            (ReplyTag::DeviceRemoved, Response::Ok) => {
+                vec![call(Request::ListMyDevices, ReplyTag::Devices)]
+            }
+            (ReplyTag::ManualPeer, Response::Ok) => {
+                self.toast = Some(strings::MANUAL_PEER_SENT.to_string());
+                vec![call(Request::ListPeers, ReplyTag::Peers)]
             }
             (ReplyTag::Forwarded, _) => {
                 self.toast = Some(strings::FORWARDED.to_string());
@@ -486,6 +549,7 @@ impl Model {
             Event::ContactsChanged => vec![call(Request::ListContacts, ReplyTag::Contacts)],
             Event::DevicesChanged => vec![call(Request::ListMyDevices, ReplyTag::Devices)],
             Event::PairStatus { session, state } => {
+                let mut fx = Vec::new();
                 if let Some(PairUi::Showing {
                     session: cur,
                     state: cur_state,
@@ -493,10 +557,17 @@ impl Model {
                 }) = self.pair.as_mut()
                 {
                     if *cur == session {
+                        if state == PairStateDto::Done {
+                            // 配对完成：设备列表与本机身份都变了；向导里的加入流程到此结束
+                            // （GetSelf 回来后 initialized 为真，页面自动切到会话页）
+                            self.wizard_joining = false;
+                            fx.push(call(Request::ListMyDevices, ReplyTag::Devices));
+                            fx.push(call(Request::GetSelf, ReplyTag::SelfInfo));
+                        }
                         *cur_state = state;
                     }
                 }
-                Vec::new()
+                fx
             }
             _ => Vec::new(),
         }
@@ -642,6 +713,170 @@ impl Model {
             },
             ReplyTag::Init,
         )]
+    }
+
+    /// 处理陌生人请求（接收一次 / 加为联系人 / 拒绝 / 屏蔽）；成功回复后才从列表移除。
+    pub fn respond_request(&mut self, request: String, action: RequestAction) -> Vec<Effect> {
+        if !self.pending_requests.insert(request.clone()) {
+            return Vec::new();
+        }
+        vec![call(
+            Request::RespondRequest {
+                request: request.clone(),
+                action,
+            },
+            ReplyTag::Responded { request },
+        )]
+    }
+
+    /// 向附近的人发出联系人请求。
+    pub fn request_contact(&mut self, user: String) -> Vec<Effect> {
+        vec![call(Request::RequestContact { user }, ReplyTag::Requested)]
+    }
+
+    /// 保存联系人策略：先本地更新，失败时按服务端重新拉取。
+    pub fn set_contact_policy(
+        &mut self,
+        user: String,
+        auto_accept: bool,
+        ask_above_bytes: Option<u64>,
+    ) -> Vec<Effect> {
+        if let Some(c) = self.contacts.iter_mut().find(|c| c.user_id == user) {
+            c.auto_accept = auto_accept;
+            c.ask_above_bytes = ask_above_bytes;
+        }
+        vec![call(
+            Request::SetContactPolicy {
+                user,
+                auto_accept,
+                ask_above_bytes,
+            },
+            ReplyTag::Policy,
+        )]
+    }
+
+    /// 与某联系人发消息：打开（或创建）私聊，回复后切到会话页。
+    pub fn open_dm(&mut self, user: String) -> Vec<Effect> {
+        vec![call(Request::OpenDm { user }, ReplyTag::Dm)]
+    }
+
+    /// 移除本人的另一台设备；本机不可移除。
+    pub fn remove_device(&mut self, device: String) -> Vec<Effect> {
+        let is_self = self.me.as_ref().is_some_and(|me| me.device_id == device)
+            || self
+                .devices
+                .iter()
+                .any(|d| d.device_id == device && d.is_self);
+        if is_self {
+            self.toast = Some(strings::CANNOT_REMOVE_SELF.to_string());
+            return Vec::new();
+        }
+        vec![call(
+            Request::RemoveDevice { device },
+            ReplyTag::DeviceRemoved,
+        )]
+    }
+
+    /// 手动添加对端地址（跨网段 / VPN）。
+    pub fn add_manual_peer(&mut self, addr: String) -> Vec<Effect> {
+        let addr = addr.trim().to_string();
+        if addr.is_empty() {
+            self.toast = Some(strings::MANUAL_PEER_EMPTY.to_string());
+            return Vec::new();
+        }
+        vec![call(Request::AddManualPeer { addr }, ReplyTag::ManualPeer)]
+    }
+
+    /// 切换联系人页分类并刷新该类所需数据。
+    pub fn set_contacts_tab(&mut self, tab: usize) -> Vec<Effect> {
+        self.contacts_tab = tab.min(CONTACTS_TABS - 1);
+        match self.contacts_tab {
+            0 => vec![call(Request::ListContacts, ReplyTag::Contacts)],
+            1 => vec![call(Request::ListRequests, ReplyTag::Requests)],
+            2 => vec![call(Request::ListPeers, ReplyTag::Peers)],
+            _ => vec![call(Request::ListMyDevices, ReplyTag::Devices)],
+        }
+    }
+
+    /// 发起方开始配对（扫码或数字比对）；已有配对界面时忽略。
+    pub fn pair_start(&mut self, method: PairMethod) -> Vec<Effect> {
+        if self.pair.is_some() {
+            return Vec::new();
+        }
+        self.pair = Some(PairUi::Starting);
+        self.pair_intent = Some(PairIntent::Start(method.clone()));
+        vec![call(Request::PairStart { method }, ReplyTag::Pair)]
+    }
+
+    /// 加入方打开选择界面，并刷新可见设备。
+    pub fn pair_open_join(&mut self) -> Vec<Effect> {
+        self.pair = Some(PairUi::Picking);
+        vec![call(Request::ListPeers, ReplyTag::Peers)]
+    }
+
+    /// 加入方选定目标（设备或配对链接）；只在选择界面有效。
+    pub fn pair_join(&mut self, target: PairTarget) -> Vec<Effect> {
+        if self.pair != Some(PairUi::Picking) {
+            return Vec::new();
+        }
+        self.pair = Some(PairUi::Starting);
+        self.pair_intent = Some(PairIntent::Join(target.clone()));
+        vec![call(Request::PairJoin { target }, ReplyTag::PairJoin)]
+    }
+
+    /// 数字比对结果；“不一致”时本地立即显示失败，不等服务端事件。
+    pub fn pair_confirm(&mut self, matches: bool) -> Vec<Effect> {
+        let Some(PairUi::Showing { session, state, .. }) = self.pair.as_mut() else {
+            return Vec::new();
+        };
+        let session = session.clone();
+        if !matches {
+            *state = PairStateDto::Failed {
+                reason: strings::PAIR_SAS_MISMATCH.to_string(),
+            };
+        }
+        vec![call(
+            Request::PairConfirm { session, matches },
+            ReplyTag::Generic,
+        )]
+    }
+
+    /// 取消配对并关闭界面；向导里的加入流程随之回到填写表单。
+    pub fn pair_cancel(&mut self) -> Vec<Effect> {
+        let fx = match self.pair.take() {
+            // 已结束（完成 / 失败）的会话无需再取消
+            Some(PairUi::Showing { session, state, .. })
+                if !matches!(state, PairStateDto::Done | PairStateDto::Failed { .. }) =>
+            {
+                vec![call(Request::PairCancel { session }, ReplyTag::Generic)]
+            }
+            _ => Vec::new(),
+        };
+        self.pair_intent = None;
+        if self.wizard_joining {
+            self.wizard_joining = false;
+            self.init_mode = None;
+        }
+        fx
+    }
+
+    /// 配对完成后关闭界面（会话已结束，不再发取消）。
+    pub fn pair_close(&mut self) -> Vec<Effect> {
+        self.pair = None;
+        self.pair_intent = None;
+        Vec::new()
+    }
+
+    /// 配对失败后重试：发起方重新开始同一方式，加入方回到选择界面。
+    pub fn pair_retry(&mut self) -> Vec<Effect> {
+        match self.pair_intent.clone() {
+            Some(PairIntent::Start(method)) => {
+                self.pair = None;
+                self.pair_start(method)
+            }
+            Some(PairIntent::Join(_)) => self.pair_open_join(),
+            None => Vec::new(),
+        }
     }
 
     /// 加入等待界面点“返回”：回到填写表单。
@@ -804,6 +1039,17 @@ impl Model {
 
 fn call(req: Request, tag: ReplyTag) -> Effect {
     Effect::Call(req, tag)
+}
+
+/// 联系人策略里“超过 N MB 仍询问”的输入解析：空串表示不限制（`Some(None)`），
+/// 非负整数 MB 换算为字节（`Some(Some(n))`），其余非法（`None`）。
+pub fn parse_ask_mb(text: &str) -> Option<Option<u64>> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Some(None);
+    }
+    let mb: u64 = t.parse().ok()?;
+    mb.checked_mul(1 << 20).map(Some)
 }
 
 /// 向导显示名是否合法：去首尾空白后 1–32 个字符。
@@ -1236,7 +1482,7 @@ mod tests {
                 );
                 assert_eq!(qr_uri.as_deref(), Some("lanmsg://x"));
             }
-            None => panic!("pair 应已建立"),
+            _ => panic!("pair 应已建立"),
         }
         // 其它会话的状态不影响
         m.apply(UiMsg::Event(Event::PairStatus {
@@ -1922,5 +2168,369 @@ mod tests {
         let fx = m.send_dropped("c1".into(), vec![], vec!["/d1".into()]);
         assert_eq!(calls(&fx).len(), 1);
         assert!(m.send_dropped("c1".into(), vec![], vec![]).is_empty());
+    }
+
+    // ---- Task 14：联系人、请求、我的设备与配对 ----
+
+    fn err_reply(tag: ReplyTag, msg: &str) -> UiMsg {
+        UiMsg::Reply {
+            tag,
+            result: Err(ApiError {
+                code: ErrorCode::Io,
+                message: msg.into(),
+            }),
+        }
+    }
+
+    fn pair_info(session: &str, qr: Option<&str>) -> Response {
+        Response::PairSession {
+            value: PairSessionInfo {
+                session: session.into(),
+                qr_uri: qr.map(String::from),
+            },
+        }
+    }
+
+    fn pair_event(session: &str, state: PairStateDto) -> UiMsg {
+        UiMsg::Event(Event::PairStatus {
+            session: session.into(),
+            state,
+        })
+    }
+
+    fn my_device(id: &str, is_self: bool) -> DeviceView {
+        DeviceView {
+            device_id: id.into(),
+            device_short: id.into(),
+            name: id.into(),
+            device_type: "desktop".into(),
+            online: true,
+            path: None,
+            is_self,
+        }
+    }
+
+    #[test]
+    fn respond_request_removes_only_after_ok() {
+        let mut m = Model::new();
+        m.requests = vec![request("r1"), request("r2")];
+        let fx = m.respond_request("r1".into(), RequestAction::Block);
+        assert!(has(&fx, |r| matches!(r,
+            Request::RespondRequest { request, action: RequestAction::Block } if request == "r1")));
+        assert_eq!(m.requests.len(), 2, "回复前不移除");
+        // 在途期间重复点击不重复发
+        assert!(m
+            .respond_request("r1".into(), RequestAction::Reject)
+            .is_empty());
+        m.apply(reply(
+            ReplyTag::Responded {
+                request: "r1".into(),
+            },
+            Response::Ok,
+        ));
+        assert_eq!(m.requests.len(), 1);
+        assert_eq!(m.requests[0].request, "r2");
+    }
+
+    #[test]
+    fn respond_request_error_keeps_request_and_allows_retry() {
+        let mut m = Model::new();
+        m.requests = vec![request("r1")];
+        m.respond_request("r1".into(), RequestAction::AcceptOnce);
+        m.apply(err_reply(
+            ReplyTag::Responded {
+                request: "r1".into(),
+            },
+            "处理失败",
+        ));
+        assert_eq!(m.requests.len(), 1);
+        assert_eq!(m.toast.as_deref(), Some("处理失败"));
+        assert_eq!(
+            m.respond_request("r1".into(), RequestAction::AcceptOnce)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn request_contact_toasts_on_ok() {
+        let mut m = Model::new();
+        let fx = m.request_contact("u1".into());
+        assert!(has(&fx, |r| matches!(r,
+            Request::RequestContact { user } if user == "u1")));
+        m.apply(reply(ReplyTag::Requested, Response::Ok));
+        assert_eq!(m.toast.as_deref(), Some(strings::CONTACT_REQUEST_SENT));
+    }
+
+    #[test]
+    fn set_contact_policy_updates_locally_and_resyncs_on_error() {
+        let mut m = Model::new();
+        m.contacts = vec![ContactView {
+            user_id: "u1".into(),
+            user_short: "ab".into(),
+            display_name: "张三".into(),
+            online: true,
+            devices: vec![],
+            auto_accept: false,
+            ask_above_bytes: None,
+        }];
+        let fx = m.set_contact_policy("u1".into(), true, Some(5 << 20));
+        assert!(has(&fx, |r| matches!(r,
+            Request::SetContactPolicy { user, auto_accept: true, ask_above_bytes: Some(n) }
+            if user == "u1" && *n == 5 << 20)));
+        assert!(m.contacts[0].auto_accept);
+        assert_eq!(m.contacts[0].ask_above_bytes, Some(5 << 20));
+        let fx = m.apply(err_reply(ReplyTag::Policy, "保存失败"));
+        assert!(
+            has(&fx, |r| matches!(r, Request::ListContacts)),
+            "失败后以服务端为准"
+        );
+        assert_eq!(m.toast.as_deref(), Some("保存失败"));
+    }
+
+    #[test]
+    fn open_dm_reply_switches_to_chats_and_opens_conv() {
+        let mut m = Model::new();
+        m.page = Page::Contacts;
+        let fx = m.open_dm("u1".into());
+        assert!(has(
+            &fx,
+            |r| matches!(r, Request::OpenDm { user } if user == "u1")
+        ));
+        let fx = m.apply(reply(ReplyTag::Dm, Response::ConvId { value: "c9".into() }));
+        assert_eq!(m.page, Page::Chats);
+        assert_eq!(m.current_conv.as_deref(), Some("c9"));
+        assert!(has(
+            &fx,
+            |r| matches!(r, Request::ListMessages { conv, .. } if conv == "c9")
+        ));
+        assert!(has(&fx, |r| matches!(r, Request::ListConversations)));
+    }
+
+    #[test]
+    fn remove_device_refuses_self_and_refreshes_after_ok() {
+        let mut m = Model::new();
+        m.me = Some(self_info(true));
+        m.devices = vec![my_device("d", true), my_device("d2", false)];
+        // self_info 的 device_id 是 "d"
+        assert!(m.remove_device("d".into()).is_empty());
+        assert_eq!(m.toast.as_deref(), Some(strings::CANNOT_REMOVE_SELF));
+        m.toast = None;
+        let fx = m.remove_device("d2".into());
+        assert!(has(
+            &fx,
+            |r| matches!(r, Request::RemoveDevice { device } if device == "d2")
+        ));
+        assert!(m.toast.is_none());
+        let fx = m.apply(reply(ReplyTag::DeviceRemoved, Response::Ok));
+        assert!(has(&fx, |r| matches!(r, Request::ListMyDevices)));
+    }
+
+    #[test]
+    fn add_manual_peer_validates_and_refreshes_peers() {
+        let mut m = Model::new();
+        assert!(m.add_manual_peer("  ".into()).is_empty());
+        assert_eq!(m.toast.as_deref(), Some(strings::MANUAL_PEER_EMPTY));
+        let fx = m.add_manual_peer(" 10.8.0.5:7000 ".into());
+        assert!(has(&fx, |r| matches!(r,
+            Request::AddManualPeer { addr } if addr == "10.8.0.5:7000")));
+        let fx = m.apply(reply(ReplyTag::ManualPeer, Response::Ok));
+        assert!(has(&fx, |r| matches!(r, Request::ListPeers)));
+        assert_eq!(m.toast.as_deref(), Some(strings::MANUAL_PEER_SENT));
+    }
+
+    #[test]
+    fn pair_start_blocks_duplicates_and_shows_session() {
+        let mut m = Model::new();
+        let fx = m.pair_start(PairMethod::Qr);
+        assert!(has(&fx, |r| matches!(
+            r,
+            Request::PairStart {
+                method: PairMethod::Qr
+            }
+        )));
+        assert_eq!(m.pair, Some(PairUi::Starting));
+        assert!(m.pair_start(PairMethod::Sas).is_empty());
+        m.apply(reply(
+            ReplyTag::Pair,
+            pair_info("s1", Some("lanmsg://pair?x")),
+        ));
+        assert!(
+            matches!(&m.pair, Some(PairUi::Showing { session, qr_uri, state })
+            if session == "s1" && qr_uri.is_some() && *state == PairStateDto::WaitingPeer)
+        );
+    }
+
+    #[test]
+    fn pair_start_error_closes_dialog() {
+        let mut m = Model::new();
+        m.pair_start(PairMethod::Sas);
+        m.apply(err_reply(ReplyTag::Pair, "无法开始"));
+        assert_eq!(m.pair, None);
+        assert_eq!(m.toast.as_deref(), Some("无法开始"));
+    }
+
+    #[test]
+    fn pair_join_from_picker_and_error_returns_to_picker() {
+        let mut m = Model::new();
+        // 未在选择界面时忽略
+        assert!(m
+            .pair_join(PairTarget::Device { device: "d".into() })
+            .is_empty());
+        m.pair_open_join();
+        let fx = m.pair_join(PairTarget::QrUri {
+            uri: "lanmsg://p".into(),
+        });
+        assert!(has(&fx, |r| matches!(r,
+            Request::PairJoin { target: PairTarget::QrUri { uri } } if uri == "lanmsg://p")));
+        assert_eq!(m.pair, Some(PairUi::Starting));
+        m.apply(err_reply(ReplyTag::PairJoin, "链接无效"));
+        assert_eq!(m.pair, Some(PairUi::Picking));
+        m.pair_join(PairTarget::Device { device: "d".into() });
+        m.apply(reply(ReplyTag::PairJoin, pair_info("s2", None)));
+        assert!(matches!(&m.pair, Some(PairUi::Showing { session, .. }) if session == "s2"));
+    }
+
+    #[test]
+    fn init_join_existing_opens_picker_and_lists_peers() {
+        let mut m = Model::new();
+        m.submit_init("小李", "pc", InitMode::JoinExisting);
+        let fx = m.apply(reply(ReplyTag::Init, Response::Ok));
+        assert_eq!(m.pair, Some(PairUi::Picking));
+        assert!(has(&fx, |r| matches!(r, Request::ListPeers)));
+    }
+
+    #[test]
+    fn pair_confirm_sends_and_mismatch_fails_locally() {
+        let mut m = Model::new();
+        m.pair_start(PairMethod::Sas);
+        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        m.apply(pair_event(
+            "s1",
+            PairStateDto::ShowSas {
+                code: "123456".into(),
+            },
+        ));
+        let fx = m.pair_confirm(true);
+        assert!(has(&fx, |r| matches!(r,
+            Request::PairConfirm { session, matches: true } if session == "s1")));
+        let fx = m.pair_confirm(false);
+        assert!(has(&fx, |r| matches!(
+            r,
+            Request::PairConfirm { matches: false, .. }
+        )));
+        assert!(matches!(
+            &m.pair,
+            Some(PairUi::Showing {
+                state: PairStateDto::Failed { .. },
+                ..
+            })
+        ));
+        // 没有会话时不发请求
+        let mut m = Model::new();
+        assert!(m.pair_confirm(true).is_empty());
+    }
+
+    #[test]
+    fn pair_cancel_sends_cancel_and_resets_wizard_joining() {
+        let mut m = Model::new();
+        m.wizard_joining = true;
+        m.pair_start(PairMethod::Sas);
+        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        let fx = m.pair_cancel();
+        assert!(has(
+            &fx,
+            |r| matches!(r, Request::PairCancel { session } if session == "s1")
+        ));
+        assert_eq!(m.pair, None);
+        assert!(!m.wizard_joining);
+        // 失败 / 完成的会话不再发取消
+        m.pair_start(PairMethod::Sas);
+        m.apply(reply(ReplyTag::Pair, pair_info("s3", None)));
+        m.apply(pair_event(
+            "s3",
+            PairStateDto::Failed { reason: "x".into() },
+        ));
+        assert!(m.pair_cancel().is_empty());
+        // 选择界面直接关闭：没有会话可取消
+        m.pair_open_join();
+        assert!(m.pair_cancel().is_empty());
+        assert_eq!(m.pair, None);
+    }
+
+    #[test]
+    fn pair_done_refreshes_devices_and_self_and_ends_wizard() {
+        let mut m = Model::new();
+        m.wizard_joining = true;
+        m.pair_open_join();
+        m.pair_join(PairTarget::Device { device: "d".into() });
+        m.apply(reply(ReplyTag::PairJoin, pair_info("s1", None)));
+        let fx = m.apply(pair_event("s1", PairStateDto::Done));
+        assert!(has(&fx, |r| matches!(r, Request::ListMyDevices)));
+        assert!(has(&fx, |r| matches!(r, Request::GetSelf)));
+        assert!(!m.wizard_joining);
+        assert!(matches!(
+            &m.pair,
+            Some(PairUi::Showing {
+                state: PairStateDto::Done,
+                ..
+            })
+        ));
+        // 1.5 秒后由界面关闭：不再发 PairCancel
+        assert!(m.pair_close().is_empty());
+        assert_eq!(m.pair, None);
+    }
+
+    #[test]
+    fn pair_retry_replays_start_or_returns_to_picker() {
+        let mut m = Model::new();
+        m.pair_start(PairMethod::Sas);
+        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        m.apply(pair_event(
+            "s1",
+            PairStateDto::Failed {
+                reason: "超时".into(),
+            },
+        ));
+        let fx = m.pair_retry();
+        assert!(has(&fx, |r| matches!(
+            r,
+            Request::PairStart {
+                method: PairMethod::Sas
+            }
+        )));
+        assert_eq!(m.pair, Some(PairUi::Starting));
+
+        let mut m = Model::new();
+        m.pair_open_join();
+        m.pair_join(PairTarget::Device { device: "d".into() });
+        m.apply(reply(ReplyTag::PairJoin, pair_info("s1", None)));
+        m.apply(pair_event(
+            "s1",
+            PairStateDto::Failed { reason: "x".into() },
+        ));
+        let fx = m.pair_retry();
+        assert_eq!(m.pair, Some(PairUi::Picking));
+        assert!(has(&fx, |r| matches!(r, Request::ListPeers)));
+    }
+
+    #[test]
+    fn parse_ask_mb_cases() {
+        assert_eq!(parse_ask_mb(""), Some(None));
+        assert_eq!(parse_ask_mb(" 100 "), Some(Some(100 << 20)));
+        assert_eq!(parse_ask_mb("0"), Some(Some(0)));
+        assert_eq!(parse_ask_mb("abc"), None);
+        assert_eq!(parse_ask_mb("-1"), None);
+        assert_eq!(parse_ask_mb("99999999999999999999"), None);
+    }
+
+    #[test]
+    fn set_contacts_tab_clamps_and_loads_data() {
+        let mut m = Model::new();
+        let fx = m.set_contacts_tab(3);
+        assert_eq!(m.contacts_tab, 3);
+        assert!(has(&fx, |r| matches!(r, Request::ListMyDevices)));
+        m.set_contacts_tab(99);
+        assert_eq!(m.contacts_tab, CONTACTS_TABS - 1);
     }
 }

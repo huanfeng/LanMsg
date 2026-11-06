@@ -12,10 +12,10 @@ use windui::prelude::{signal, Signal};
 use crate::autostart;
 use crate::bridge::{Bridge, ReplyTag, UiMsg};
 use crate::debounce::Debouncer;
-use crate::model::{ConnState, Effect, Model, Page};
+use crate::model::{ConnState, Effect, Model, Page, PairUi};
 use crate::strings;
 use crate::views::composer::PastedImage;
-use lanmsg_api::types::Response;
+use lanmsg_api::types::{PairStateDto, Response};
 
 /// 当前输入框的登记：(会话, 文本信号)。
 type ComposerSlot = (String, Signal<String>);
@@ -40,11 +40,18 @@ pub struct UiState {
     pub bottom_epoch: Signal<u64>,
     /// 当前输入框：(会话, 文本信号)；发送失败的草稿经它回填。
     composer: Rc<RefCell<Option<ComposerSlot>>>,
+    /// 配对对话框的显隐信号：ESC 只隐藏、不改 Model，由 `tick_pair` 发现后取消配对。
+    pair_show: Rc<RefCell<Option<Signal<bool>>>>,
+    /// 配对完成（Done）后开始计时的时刻，用于 1.5 秒后自动关闭。
+    pair_done_since: Rc<RefCell<Option<Instant>>>,
     debouncer: Rc<RefCell<Debouncer>>,
     started: Instant,
     /// 数据目录：登记开机自启时决定是否带 `--data-dir`。
     data_dir: PathBuf,
 }
+
+/// 配对完成后多久自动关闭对话框（毫秒）。
+const PAIR_DONE_CLOSE_MS: u128 = 1500;
 
 /// 搜索框停止输入多久后发起搜索（毫秒）。
 const SEARCH_DEBOUNCE_MS: u64 = 300;
@@ -61,6 +68,8 @@ impl UiState {
             paste: signal(None),
             bottom_epoch: signal(0u64),
             composer: Rc::new(RefCell::new(None)),
+            pair_show: Rc::new(RefCell::new(None)),
+            pair_done_since: Rc::new(RefCell::new(None)),
             debouncer: Rc::new(RefCell::new(Debouncer::new(SEARCH_DEBOUNCE_MS))),
             started: Instant::now(),
             data_dir: lanmsg_core::paths::default_data_dir(),
@@ -121,6 +130,17 @@ impl UiState {
     pub fn derive<T: 'static>(&self, f: impl Fn(&Model) -> T + 'static) -> Signal<T> {
         let model = self.model.clone();
         self.rev.map(move |_| f(&model.borrow()))
+    }
+
+    /// 从 Model 派生一个“内容摘要”信号：所取内容没变，摘要就不变。
+    /// 供 `switcher` 作重建依据（api 类型没有 `Eq + Hash`）；视图在闭包里再用 `read` 取内容。
+    pub fn digest<T: std::fmt::Debug>(&self, f: impl Fn(&Model) -> T + 'static) -> Signal<u64> {
+        use std::hash::{Hash, Hasher};
+        self.derive(move |m| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            format!("{:?}", f(m)).hash(&mut h);
+            h.finish()
+        })
     }
 
     /// 取走待显示的提示文字（由持有 `EventCtx` 的调用方弹出）。
@@ -201,6 +221,52 @@ impl UiState {
                 let _ = std::fs::remove_file(p.path());
                 self.paste.set(None);
             }
+        }
+    }
+
+    /// 配对对话框建立时登记它的显隐信号。
+    pub fn register_pair_show(&self, show: Signal<bool>) {
+        *self.pair_show.borrow_mut() = Some(show);
+    }
+
+    /// 周期调用：配对对话框被 ESC 隐藏时取消配对；配对完成 1.5 秒后自动关闭。
+    pub fn tick_pair(&self) {
+        let (open, done) = self.read(|m| {
+            (
+                m.pair.is_some(),
+                matches!(
+                    &m.pair,
+                    Some(PairUi::Showing {
+                        state: PairStateDto::Done,
+                        ..
+                    })
+                ),
+            )
+        });
+        if !open {
+            self.pair_show.borrow_mut().take();
+            self.pair_done_since.borrow_mut().take();
+            return;
+        }
+        let hidden = self
+            .pair_show
+            .borrow()
+            .as_ref()
+            .is_some_and(|show| !show.get());
+        if hidden {
+            self.act(|m| m.pair_cancel());
+            return;
+        }
+        if !done {
+            self.pair_done_since.borrow_mut().take();
+            return;
+        }
+        let since = *self
+            .pair_done_since
+            .borrow_mut()
+            .get_or_insert_with(Instant::now);
+        if since.elapsed().as_millis() >= PAIR_DONE_CLOSE_MS {
+            self.act(|m| m.pair_close());
         }
     }
 

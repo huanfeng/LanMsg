@@ -274,6 +274,19 @@ pub fn badge(text: impl Into<TextContent>) -> Element {
         )
 }
 
+/// 描边小标签（“本机”“VPN”等）：meta 字号，`line` 描边，胶囊形。
+pub fn pill(text: impl Into<TextContent>) -> Element {
+    Element::row()
+        .padding_xy(SPACE_SM, 1)
+        .corner(RADIUS_PILL)
+        .border_role(Role::Border, 1)
+        .child(
+            Element::label(text)
+                .font_size(FONT_META)
+                .fg_role(Role::TextMuted),
+        )
+}
+
 /// 1px 竖分隔线（`line` 色），撑满父容器高度。
 pub fn vline() -> Element {
     Element::leaf()
