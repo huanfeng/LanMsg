@@ -48,9 +48,14 @@ pub enum ReplyTag {
     },
     Settings,
     Init,
-    Pair,
+    /// 发起方的 `PairStart`；`nonce` 是发出时 `Model.pair_nonce` 的值，用于丢弃取消后迟到的回复。
+    Pair {
+        nonce: u64,
+    },
     /// 加入方的 `PairJoin`：失败时回到选择界面（发起方的 `Pair` 失败则关闭对话框）。
-    PairJoin,
+    PairJoin {
+        nonce: u64,
+    },
     /// `OpenDm` 的回复：成功后切到会话页并打开该会话。
     Dm,
     /// 请求处理（接收/拒绝/屏蔽…）：成功后才从列表移除。

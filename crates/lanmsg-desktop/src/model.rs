@@ -184,6 +184,8 @@ pub struct Model {
     pub pair_intent: Option<PairIntent>,
     /// 先于 `PairSession` 回复到达的配对状态事件 `(会话, 状态)`：回复到达后应用。
     pub pair_early_status: Option<(String, PairStateDto)>,
+    /// 每次发起/加入配对自增；回复带回，用于识别取消后迟到的旧回复。
+    pub pair_nonce: u64,
     /// 联系人页当前分类（0 联系人、1 新的请求、2 附近的人、3 我的设备）。
     pub contacts_tab: usize,
     /// 已发出处理请求、尚未回复的请求 id（防重复点击）。
@@ -245,6 +247,7 @@ impl Model {
             pair: None,
             pair_intent: None,
             pair_early_status: None,
+            pair_nonce: 0,
             contacts_tab: 0,
             pending_requests: BTreeSet::new(),
             pending_contact_requests: BTreeSet::new(),
@@ -305,8 +308,11 @@ impl Model {
                             self.pending_contact_requests.remove(user);
                         }
                         // 发起方启动失败：关闭对话框；加入方失败：回到选择界面可改选
-                        ReplyTag::Pair => self.pair = None,
-                        ReplyTag::PairJoin => self.pair = Some(PairUi::Picking),
+                        // 仅 nonce 匹配（仍是最近一次发起）时才动界面，过期回复的错误不影响新会话
+                        ReplyTag::Pair { nonce } if *nonce == self.pair_nonce => self.pair = None,
+                        ReplyTag::PairJoin { nonce } if *nonce == self.pair_nonce => {
+                            self.pair = Some(PairUi::Picking)
+                        }
                         // 乐观更新失败：以服务端为准
                         ReplyTag::Policy => {
                             fx.push(call(Request::ListContacts, ReplyTag::Contacts));
@@ -449,10 +455,17 @@ impl Model {
                 self.settings = Some(value);
                 Vec::new()
             }
-            (ReplyTag::Pair | ReplyTag::PairJoin, Response::PairSession { value }) => {
-                if self.pair != Some(PairUi::Starting) {
-                    // 等待期间用户已取消：迟到的会话不再弹框，并通知服务端收掉孤儿会话
-                    self.pair_early_status = None;
+            (
+                ReplyTag::Pair { nonce } | ReplyTag::PairJoin { nonce },
+                Response::PairSession { value },
+            ) => {
+                if nonce != self.pair_nonce || self.pair != Some(PairUi::Starting) {
+                    // 等待期间用户已取消（含取消后又重新发起）：迟到的会话不再弹框，
+                    // 并通知服务端收掉孤儿会话。只在 nonce 匹配时才清 early 缓存，
+                    // 避免清掉属于新会话的先到状态。
+                    if nonce == self.pair_nonce {
+                        self.pair_early_status = None;
+                    }
                     return vec![call(
                         Request::PairCancel {
                             session: value.session,
@@ -641,7 +654,9 @@ impl Model {
             Event::PairStatus { session, state } => {
                 let mut fx = Vec::new();
                 if self.pair == Some(PairUi::Starting) {
-                    // 回复尚未到达：缓存最近一次状态，回复到达后应用
+                    // 回复尚未到达：只缓存最后一个先到状态（取舍：同一会话连发多个状态时
+                    // 只保留最新，终态必为最后一个；会话 id 在回复到达时比对，
+                    // 不属于本会话的缓存直接丢弃）
                     self.pair_early_status = Some((session, state));
                     return fx;
                 }
@@ -908,8 +923,14 @@ impl Model {
         }
         self.pair = Some(PairUi::Starting);
         self.pair_early_status = None;
+        self.pair_nonce += 1;
         self.pair_intent = Some(PairIntent::Start(method.clone()));
-        vec![call(Request::PairStart { method }, ReplyTag::Pair)]
+        vec![call(
+            Request::PairStart { method },
+            ReplyTag::Pair {
+                nonce: self.pair_nonce,
+            },
+        )]
     }
 
     /// 加入方打开选择界面，并刷新可见设备。
@@ -928,8 +949,14 @@ impl Model {
         }
         self.pair = Some(PairUi::Starting);
         self.pair_early_status = None;
+        self.pair_nonce += 1;
         self.pair_intent = Some(PairIntent::Join(target.clone()));
-        vec![call(Request::PairJoin { target }, ReplyTag::PairJoin)]
+        vec![call(
+            Request::PairJoin { target },
+            ReplyTag::PairJoin {
+                nonce: self.pair_nonce,
+            },
+        )]
     }
 
     /// 数字比对结果；“不一致”时本地立即显示失败，不等服务端事件。
@@ -1575,7 +1602,9 @@ mod tests {
         let mut m = Model::new();
         m.pair_start(PairMethod::Qr);
         m.apply(reply(
-            ReplyTag::Pair,
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
             Response::PairSession {
                 value: PairSessionInfo {
                     session: "s1".into(),
@@ -2432,10 +2461,59 @@ mod tests {
         let mut m = Model::new();
         m.pair_start(PairMethod::Sas);
         assert!(m.pair_cancel().is_empty(), "未拿到会话时无会话可取消");
-        let fx = m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        let fx = m.apply(reply(
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s1", None),
+        ));
         assert_eq!(m.pair, None);
         assert!(has(&fx, |r| matches!(r,
             Request::PairCancel { session } if session == "s1")));
+    }
+
+    #[test]
+    fn cancel_then_restart_ignores_stale_reply() {
+        let mut m = Model::new();
+        m.pair_start(PairMethod::Sas);
+        let a = m.pair_nonce;
+        m.pair_cancel();
+        m.pair_start(PairMethod::Sas);
+        let b = m.pair_nonce;
+        assert_ne!(a, b);
+        // A 的回复先到：界面仍在等 B，A 会话被取消
+        let fx = m.apply(reply(ReplyTag::Pair { nonce: a }, pair_info("A", None)));
+        assert_eq!(m.pair, Some(PairUi::Starting));
+        assert!(has(&fx, |r| matches!(r,
+            Request::PairCancel { session } if session == "A")));
+        // B 的回复到达：正常进入展示
+        m.apply(reply(ReplyTag::Pair { nonce: b }, pair_info("B", None)));
+        assert!(matches!(&m.pair, Some(PairUi::Showing { session, .. }) if session == "B"));
+    }
+
+    #[test]
+    fn stale_join_reply_and_error_do_not_touch_new_pair() {
+        let mut m = Model::new();
+        m.pair_open_join();
+        m.pair_join(PairTarget::Device {
+            device: "d1".into(),
+        });
+        let a = m.pair_nonce;
+        m.pair_cancel();
+        m.pair_open_join();
+        m.pair_join(PairTarget::Device {
+            device: "d2".into(),
+        });
+        let b = m.pair_nonce;
+        // 旧请求的错误回复不得把新会话的界面打回选择页
+        m.apply(err_reply(ReplyTag::PairJoin { nonce: a }, "失败"));
+        assert_eq!(m.pair, Some(PairUi::Starting));
+        let fx = m.apply(reply(ReplyTag::PairJoin { nonce: a }, pair_info("A", None)));
+        assert_eq!(m.pair, Some(PairUi::Starting));
+        assert!(has(&fx, |r| matches!(r,
+            Request::PairCancel { session } if session == "A")));
+        m.apply(reply(ReplyTag::PairJoin { nonce: b }, pair_info("B", None)));
+        assert!(matches!(&m.pair, Some(PairUi::Showing { session, .. }) if session == "B"));
     }
 
     #[test]
@@ -2449,14 +2527,24 @@ mod tests {
             },
         ));
         assert_eq!(m.pair, Some(PairUi::Starting));
-        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        m.apply(reply(
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s1", None),
+        ));
         assert!(matches!(&m.pair, Some(PairUi::Showing { state, .. })
             if matches!(state, PairStateDto::ShowSas { .. })));
         // 属于其他会话的缓存不应用
         m.pair_cancel();
         m.pair_start(PairMethod::Sas);
         m.apply(pair_event("old", PairStateDto::Verifying));
-        m.apply(reply(ReplyTag::Pair, pair_info("s2", None)));
+        m.apply(reply(
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s2", None),
+        ));
         assert!(matches!(&m.pair, Some(PairUi::Showing { state, .. })
             if *state == PairStateDto::WaitingPeer));
     }
@@ -2465,7 +2553,12 @@ mod tests {
     fn pair_confirm_match_sets_verifying_once() {
         let mut m = Model::new();
         m.pair_start(PairMethod::Sas);
-        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        m.apply(reply(
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s1", None),
+        ));
         m.apply(pair_event(
             "s1",
             PairStateDto::ShowSas {
@@ -2568,7 +2661,9 @@ mod tests {
         assert_eq!(m.pair, Some(PairUi::Starting));
         assert!(m.pair_start(PairMethod::Sas).is_empty());
         m.apply(reply(
-            ReplyTag::Pair,
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
             pair_info("s1", Some("lanmsg://pair?x")),
         ));
         assert!(
@@ -2581,7 +2676,12 @@ mod tests {
     fn pair_start_error_closes_dialog() {
         let mut m = Model::new();
         m.pair_start(PairMethod::Sas);
-        m.apply(err_reply(ReplyTag::Pair, "无法开始"));
+        m.apply(err_reply(
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
+            "无法开始",
+        ));
         assert_eq!(m.pair, None);
         assert_eq!(m.toast.as_deref(), Some("无法开始"));
     }
@@ -2600,10 +2700,20 @@ mod tests {
         assert!(has(&fx, |r| matches!(r,
             Request::PairJoin { target: PairTarget::QrUri { uri } } if uri == "lanmsg://p")));
         assert_eq!(m.pair, Some(PairUi::Starting));
-        m.apply(err_reply(ReplyTag::PairJoin, "链接无效"));
+        m.apply(err_reply(
+            ReplyTag::PairJoin {
+                nonce: m.pair_nonce,
+            },
+            "链接无效",
+        ));
         assert_eq!(m.pair, Some(PairUi::Picking));
         m.pair_join(PairTarget::Device { device: "d".into() });
-        m.apply(reply(ReplyTag::PairJoin, pair_info("s2", None)));
+        m.apply(reply(
+            ReplyTag::PairJoin {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s2", None),
+        ));
         assert!(matches!(&m.pair, Some(PairUi::Showing { session, .. }) if session == "s2"));
     }
 
@@ -2620,7 +2730,12 @@ mod tests {
     fn pair_confirm_sends_and_mismatch_fails_locally() {
         let mut m = Model::new();
         m.pair_start(PairMethod::Sas);
-        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        m.apply(reply(
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s1", None),
+        ));
         m.apply(pair_event(
             "s1",
             PairStateDto::ShowSas {
@@ -2633,7 +2748,12 @@ mod tests {
         // 已点“一致”后进入验证中；另起会话验证“不一致”
         let mut m = Model::new();
         m.pair_start(PairMethod::Sas);
-        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        m.apply(reply(
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s1", None),
+        ));
         m.apply(pair_event(
             "s1",
             PairStateDto::ShowSas {
@@ -2662,7 +2782,12 @@ mod tests {
         let mut m = Model::new();
         m.wizard_joining = true;
         m.pair_start(PairMethod::Sas);
-        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        m.apply(reply(
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s1", None),
+        ));
         let fx = m.pair_cancel();
         assert!(has(
             &fx,
@@ -2672,7 +2797,12 @@ mod tests {
         assert!(!m.wizard_joining);
         // 失败 / 完成的会话不再发取消
         m.pair_start(PairMethod::Sas);
-        m.apply(reply(ReplyTag::Pair, pair_info("s3", None)));
+        m.apply(reply(
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s3", None),
+        ));
         m.apply(pair_event(
             "s3",
             PairStateDto::Failed { reason: "x".into() },
@@ -2690,7 +2820,12 @@ mod tests {
         m.wizard_joining = true;
         m.pair_open_join();
         m.pair_join(PairTarget::Device { device: "d".into() });
-        m.apply(reply(ReplyTag::PairJoin, pair_info("s1", None)));
+        m.apply(reply(
+            ReplyTag::PairJoin {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s1", None),
+        ));
         let fx = m.apply(pair_event("s1", PairStateDto::Done));
         assert!(has(&fx, |r| matches!(r, Request::ListMyDevices)));
         assert!(has(&fx, |r| matches!(r, Request::GetSelf)));
@@ -2711,7 +2846,12 @@ mod tests {
     fn pair_retry_replays_start_or_returns_to_picker() {
         let mut m = Model::new();
         m.pair_start(PairMethod::Sas);
-        m.apply(reply(ReplyTag::Pair, pair_info("s1", None)));
+        m.apply(reply(
+            ReplyTag::Pair {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s1", None),
+        ));
         m.apply(pair_event(
             "s1",
             PairStateDto::Failed {
@@ -2730,7 +2870,12 @@ mod tests {
         let mut m = Model::new();
         m.pair_open_join();
         m.pair_join(PairTarget::Device { device: "d".into() });
-        m.apply(reply(ReplyTag::PairJoin, pair_info("s1", None)));
+        m.apply(reply(
+            ReplyTag::PairJoin {
+                nonce: m.pair_nonce,
+            },
+            pair_info("s1", None),
+        ));
         m.apply(pair_event(
             "s1",
             PairStateDto::Failed { reason: "x".into() },
