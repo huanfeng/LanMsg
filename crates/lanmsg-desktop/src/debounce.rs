@@ -33,6 +33,11 @@ impl Debouncer {
         None
     }
 
+    /// 文本为空且此前从未放行过非空内容：喂入不会产生任何结果，调用方可以直接跳过。
+    pub fn is_idle(&self, text: &str) -> bool {
+        text.is_empty() && self.last_seen.is_empty() && self.emitted.is_empty()
+    }
+
     /// 外部直接设置了搜索状态（如点击结果后清空）：同步内部记录，避免重复触发。
     pub fn reset_to(&mut self, text: &str, now_ms: u64) {
         self.last_seen = text.to_string();
@@ -44,6 +49,20 @@ impl Debouncer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_only_while_nothing_typed_or_pending() {
+        let mut d = Debouncer::new(300);
+        assert!(d.is_idle(""));
+        assert!(!d.is_idle("a"));
+        assert_eq!(d.feed("a", 0), None);
+        assert_eq!(d.feed("a", 400), Some("a".into()));
+        // 已放行过非空内容：框被清空后仍要再喂，让“空查询”放行
+        assert_eq!(d.feed("", 500), None);
+        assert!(!d.is_idle(""));
+        assert_eq!(d.feed("", 900), Some(String::new()));
+        assert!(d.is_idle(""));
+    }
 
     #[test]
     fn emits_only_after_text_is_stable() {

@@ -5,6 +5,14 @@ pub const APP_TITLE: &str = "LanMsg";
 
 /// 后台服务断开时的顶部提示条。
 pub const DISCONNECTED_BANNER: &str = "未连接后台服务，正在重试…";
+/// 后台服务被用户主动退出（托盘“退出”）后的提示条与按钮。
+pub const DAEMON_QUIT_BANNER: &str = "后台服务已退出";
+pub const DAEMON_START_BUTTON: &str = "启动后台服务";
+/// 点击“启动后台服务”后、连接建立前的状态说明。
+pub const DAEMON_STARTING: &str = "正在启动后台服务…";
+/// 拉起 lanmsgd 失败的原因。
+pub const LAUNCH_NOT_FOUND: &str = "找不到 lanmsgd，请确认它与 lanmsg 在同一目录";
+pub const LAUNCH_FAILED_PREFIX: &str = "无法启动 lanmsgd：";
 
 /// 侧栏页签名。
 pub const NAV_CHATS: &str = "会话";
@@ -76,7 +84,6 @@ pub const FILE_OPEN_FOLDER: &str = "打开所在文件夹";
 pub const FILE_CLICK_TO_DOWNLOAD: &str = "点击下载";
 pub const FILE_SOURCE_OFFLINE: &str = "源设备离线";
 pub const FILE_PREPARING: &str = "准备中…";
-pub const FILE_DOWNLOADING: &str = "下载中";
 pub const FILE_COUNT_UNIT: &str = "个文件";
 pub const COMPOSER_PLACEHOLDER: &str = "输入消息，Enter 发送，Shift+Enter 换行";
 pub const COMPOSER_SEND: &str = "发送";
@@ -111,7 +118,6 @@ pub const REQUESTS_EMPTY: &str = "没有新的请求";
 pub const REQUESTS_EMPTY_HINT: &str = "陌生人发来消息或联系人请求时，会出现在这里";
 pub const NEARBY_EMPTY: &str = "附近没有发现其他人";
 pub const NEARBY_EMPTY_HINT: &str = "确认对方在同一网络并已打开 LanMsg，或手动输入对方地址";
-pub const CONTACT_DEVICES: &str = "设备";
 pub const CONTACT_FINGERPRINT: &str = "指纹";
 pub const CONTACT_DEVICE_COUNT_UNIT: &str = "台设备";
 pub const CONTACT_AUTO_ACCEPT: &str = "自动接收对方发来的文件";
@@ -152,7 +158,6 @@ pub const MANUAL_PEER_EMPTY: &str = "请先输入对方地址";
 pub const MANUAL_PEER_SENT: &str = "已连接，对方出现在“附近的人”后即可添加";
 
 /// 我的设备与配对。
-pub const DEVICES_TITLE: &str = "我的设备";
 pub const DEVICES_THIS: &str = "本机";
 pub const DEVICES_ONLINE: &str = "在线";
 pub const DEVICES_OFFLINE: &str = "离线";

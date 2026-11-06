@@ -56,6 +56,14 @@ pub struct UiState {
 /// 配对完成后多久自动关闭对话框（毫秒）。
 const PAIR_DONE_CLOSE_MS: u128 = 1500;
 
+/// 退出前同步清焦点的最长等待。
+const FOCUS_CLEAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// 文件页筛选控件只有文件页可见时才需要同步（纯判定，便于测试）。
+fn files_tick_needed(page: Page) -> bool {
+    page == Page::Files
+}
+
 /// 搜索框停止输入多久后发起搜索（毫秒）。
 const SEARCH_DEBOUNCE_MS: u64 = 300;
 
@@ -283,11 +291,12 @@ impl UiState {
 
     /// 周期调用：搜索框文本稳定后发起搜索。
     pub fn tick_search(&self) {
+        let text = self.search_text.get();
+        if self.debouncer.borrow().is_idle(&text) {
+            return;
+        }
         let now = self.started.elapsed().as_millis() as u64;
-        let fired = self
-            .debouncer
-            .borrow_mut()
-            .feed(&self.search_text.get(), now);
+        let fired = self.debouncer.borrow_mut().feed(&text, now);
         if let Some(q) = fired {
             self.act(|m| m.search(q));
         }
@@ -295,6 +304,9 @@ impl UiState {
 
     /// 周期调用：把文件页筛选控件上的变化同步给 Model。
     pub fn tick_files(&self) {
+        if !files_tick_needed(self.read(|m| m.page)) {
+            return;
+        }
         let now = self.started.elapsed().as_millis() as u64;
         self.files_ui.tick(self, now);
     }
@@ -319,7 +331,35 @@ impl UiState {
 
     /// 连接状态是否为断开（顶部提示条用）。
     pub fn disconnected(&self) -> Signal<bool> {
-        self.derive(|m| matches!(m.conn, ConnState::Disconnected(_)))
+        self.derive(|m| m.conn.is_down())
+    }
+
+    /// 顶部提示条文案：普通重连 / 后台服务已退出 / 拉起失败原因。
+    pub fn banner_text(&self) -> Signal<String> {
+        self.derive(|m| match &m.conn {
+            ConnState::DaemonQuit => strings::DAEMON_QUIT_BANNER.to_string(),
+            ConnState::LaunchFailed(why) => why.clone(),
+            ConnState::Disconnected(r) if r == strings::DAEMON_STARTING => r.clone(),
+            _ => strings::DISCONNECTED_BANNER.to_string(),
+        })
+    }
+
+    /// 后台服务已主动退出（提示条上显示“启动后台服务”按钮）。
+    pub fn daemon_quit(&self) -> Signal<bool> {
+        self.derive(|m| m.conn == ConnState::DaemonQuit)
+    }
+
+    /// “启动后台服务”按钮：清除退出标记并拉起 lanmsgd。
+    pub fn start_daemon(&self) {
+        self.bridge.start_daemon();
+    }
+
+    /// 窗口关闭前同步清除界面焦点（最多等 1 秒）；core 在连接断开时也会清，这里是双保险。
+    pub fn clear_focus_on_exit(&self) {
+        self.bridge.call_sync(
+            lanmsg_api::types::Request::SetUiFocus { conv: None },
+            FOCUS_CLEAR_TIMEOUT,
+        );
     }
 }
 
@@ -347,6 +387,31 @@ mod tests {
                 value: ids.iter().map(|i| conv(i)).collect(),
             }),
         }
+    }
+
+    #[test]
+    fn files_tick_only_on_files_page() {
+        assert!(files_tick_needed(Page::Files));
+        for p in [Page::Chats, Page::Contacts, Page::Settings, Page::Wizard] {
+            assert!(!files_tick_needed(p));
+        }
+    }
+
+    #[test]
+    fn files_filter_change_is_not_applied_off_the_files_page() {
+        let ui = UiState::new(Model::new(), Bridge::detached());
+        ui.act(|m| m.set_page(Page::Chats));
+        let before = ui.read(|m| m.file_filter.clone());
+        ui.files_ui.kind.set(1);
+        ui.tick_files();
+        assert_eq!(
+            ui.read(|m| m.file_filter.clone()),
+            before,
+            "非文件页不应重建"
+        );
+        ui.act(|m| m.set_page(Page::Files));
+        ui.tick_files();
+        assert_ne!(ui.read(|m| m.file_filter.clone()), before);
     }
 
     #[test]

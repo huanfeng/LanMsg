@@ -10,7 +10,8 @@ pub fn local_offset_secs() -> i32 {
     *OFFSET.get_or_init(query_offset)
 }
 
-/// 解析 `date +%z` 输出，如 `+0800`、`-0330`。
+/// 解析 `date +%z` 输出，如 `+0800`、`-0330`（Windows 不走此路径，仅测试编译）。
+#[cfg(any(not(windows), test))]
 pub fn parse_utc_offset(s: &str) -> Option<i32> {
     let s = s.trim();
     let (sign, digits) = match s.as_bytes().first()? {

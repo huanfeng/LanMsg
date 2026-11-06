@@ -1,11 +1,12 @@
 // IPC 桥：后台线程里的 IpcClient。
 // UI 线程经 `Bridge::call` 投递请求，结果与事件经 windui 通道（`UiMsg`）回到 UI 线程。
-// 连接失败时拉起 lanmsgd 一次，之后每秒重试；任何阻塞都发生在后台线程。
+// 连接失败时拉起 lanmsgd 一次（数据目录有“主动退出”标记则不拉起），之后每秒重试；任何阻塞都发生在后台线程。
 // 断线只靠 `IpcClient::events()` 的 Closed 判定（读任务退出即关闭），不对单个调用的 Io 错误做断线推断。
 // 注释中文，标识符英文。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use lanmsg_api::ipc::IpcClient;
@@ -21,6 +22,10 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 pub enum UiMsg {
     Connected,
     Disconnected(String),
+    /// 后台服务是用户主动退出的（数据目录里有退出标记），不自动拉起。
+    DaemonQuit,
+    /// 拉起 lanmsgd 失败；内容是可直接展示给用户的原因。
+    LaunchFailed(String),
     /// 事件流丢失过消息（Lagged），需要全量刷新。
     Resync,
     Reply {
@@ -103,16 +108,26 @@ pub enum ReplyTag {
     Generic,
 }
 
+/// 界面发给桥线程的指令。
+enum Cmd {
+    /// 普通请求，回复经 `UiMsg::Reply` 回到界面。
+    Call(Request, ReplyTag),
+    /// 同步请求：处理完（或确认当前未连接）后向 `ack` 发一个信号，供退出路径限时等待。
+    Sync(Request, std_mpsc::Sender<()>),
+    /// 用户点“启动后台服务”：清除退出标记并拉起 lanmsgd。
+    StartDaemon,
+}
+
 /// 界面侧的桥句柄（可克隆，随处投递请求）。
 #[derive(Clone)]
 pub struct Bridge {
-    tx: Option<mpsc::UnboundedSender<(Request, ReplyTag)>>,
+    tx: Option<mpsc::UnboundedSender<Cmd>>,
 }
 
 impl Bridge {
     /// 启动后台线程并开始连接。
     pub fn start(endpoint: String, data_dir: PathBuf, ui: Sender<UiMsg>) -> Bridge {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel::<Cmd>();
         let spawned = std::thread::Builder::new()
             .name("lanmsg-bridge".into())
             .spawn(move || {
@@ -144,8 +159,57 @@ impl Bridge {
     pub fn call(&self, req: Request, tag: ReplyTag) {
         if let Some(tx) = &self.tx {
             // 桥线程已退出时发送失败，等同未连接，直接忽略
-            let _ = tx.send((req, tag));
+            let _ = tx.send(Cmd::Call(req, tag));
         }
+    }
+
+    /// 同步投递请求并最多等 `timeout`（界面退出路径用）；返回是否在限时内完成。
+    pub fn call_sync(&self, req: Request, timeout: Duration) -> bool {
+        let Some(tx) = &self.tx else { return false };
+        let (ack_tx, ack_rx) = std_mpsc::channel();
+        if tx.send(Cmd::Sync(req, ack_tx)).is_err() {
+            return false;
+        }
+        // 桥线程丢弃 ack 发送端（未连接）时 recv_timeout 立即返回 Err，同样不再等待
+        ack_rx.recv_timeout(timeout).is_ok()
+    }
+
+    /// 清除退出标记并拉起后台服务（“启动后台服务”按钮）。
+    pub fn start_daemon(&self) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Cmd::StartDaemon);
+        }
+    }
+}
+
+/// 连接失败后下一步做什么。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FailAction {
+    /// 拉起 lanmsgd。
+    Launch,
+    /// 后台服务是主动退出的：不拉起，提示用户手动启动。
+    ShowQuit,
+    /// 什么也不做，等待下次重试。
+    Wait,
+}
+
+/// 纯判定：连接失败时，依据“有无退出标记”和“本轮是否已拉起过”决定动作。
+pub fn connect_failure_action(quit_marker: bool, launched: bool) -> FailAction {
+    if quit_marker {
+        FailAction::ShowQuit
+    } else if launched {
+        FailAction::Wait
+    } else {
+        FailAction::Launch
+    }
+}
+
+/// 拉起失败时展示给用户的原因。
+pub fn launch_failure_text(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        crate::strings::LAUNCH_NOT_FOUND.to_string()
+    } else {
+        format!("{}{e}", crate::strings::LAUNCH_FAILED_PREFIX)
     }
 }
 
@@ -161,15 +225,17 @@ async fn run(
     endpoint: String,
     data_dir: PathBuf,
     ui: Sender<UiMsg>,
-    mut rx: mpsc::UnboundedReceiver<(Request, ReplyTag)>,
+    mut rx: mpsc::UnboundedReceiver<Cmd>,
 ) {
-    // 本轮断线周期内是否已拉起过 lanmsgd / 已通知界面
+    // 本轮断线周期内是否已拉起过 lanmsgd / 已通知界面 / 已提示“后台服务已退出”
     let mut launched = false;
     let mut reported = false;
+    let mut quit_shown = false;
     loop {
         match IpcClient::connect(&endpoint).await {
             Ok(client) => {
                 launched = false;
+                quit_shown = false;
                 if ui.send(UiMsg::Connected).is_err() {
                     return;
                 }
@@ -180,11 +246,38 @@ async fn run(
                 reported = true;
             }
             Err(e) => {
-                if !launched {
-                    launched = true;
-                    if let Err(le) = spawn_daemon(&data_dir) {
-                        tracing::warn!("拉起 lanmsgd 失败: {le}");
+                let marker = data_dir
+                    .join(lanmsg_proto::consts::DAEMON_QUIT_MARKER)
+                    .exists();
+                match connect_failure_action(marker, launched) {
+                    FailAction::Launch => {
+                        launched = true;
+                        if quit_shown {
+                            // 标记已被清除：离开“已退出”提示，回到普通重连
+                            quit_shown = false;
+                            reported = false;
+                        }
+                        if let Err(le) = spawn_daemon(&data_dir) {
+                            tracing::warn!("拉起 lanmsgd 失败: {le}");
+                            reported = true;
+                            if ui
+                                .send(UiMsg::LaunchFailed(launch_failure_text(&le)))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
                     }
+                    FailAction::ShowQuit => {
+                        if !quit_shown {
+                            quit_shown = true;
+                            reported = true;
+                            if ui.send(UiMsg::DaemonQuit).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    FailAction::Wait => {}
                 }
                 if !reported {
                     reported = true;
@@ -200,10 +293,30 @@ async fn run(
         loop {
             tokio::select! {
                 _ = &mut retry => break,
-                cmd = rx.recv() => {
-                    let Some((_, tag)) = cmd else { return };
-                    if ui.send(UiMsg::Reply { tag, result: Err(not_connected()) }).is_err() {
-                        return;
+                cmd = rx.recv() => match cmd {
+                    None => return,
+                    Some(Cmd::Call(_, tag)) => {
+                        if ui.send(UiMsg::Reply { tag, result: Err(not_connected()) }).is_err() {
+                            return;
+                        }
+                    }
+                    // 未连接：丢弃 ack 发送端，等待方立即返回
+                    Some(Cmd::Sync(..)) => {}
+                    Some(Cmd::StartDaemon) => {
+                        let _ = std::fs::remove_file(data_dir.join(lanmsg_proto::consts::DAEMON_QUIT_MARKER));
+                        launched = true;
+                        quit_shown = false;
+                        let msg = match spawn_daemon(&data_dir) {
+                            Ok(()) => UiMsg::Disconnected(crate::strings::DAEMON_STARTING.to_string()),
+                            Err(le) => {
+                                tracing::warn!("拉起 lanmsgd 失败: {le}");
+                                UiMsg::LaunchFailed(launch_failure_text(&le))
+                            }
+                        };
+                        reported = true;
+                        if ui.send(msg).is_err() {
+                            return;
+                        }
                     }
                 }
             }
@@ -214,22 +327,34 @@ async fn run(
 /// 在已连接状态下处理请求与事件，返回断开原因。
 async fn serve(
     client: &IpcClient,
-    rx: &mut mpsc::UnboundedReceiver<(Request, ReplyTag)>,
+    rx: &mut mpsc::UnboundedReceiver<Cmd>,
     ui: &Sender<UiMsg>,
 ) -> String {
     let mut events = client.events();
     loop {
         tokio::select! {
             cmd = rx.recv() => {
-                let Some((req, tag)) = cmd else {
+                let Some(cmd) = cmd else {
                     return "界面已退出".to_string();
                 };
                 let client = client.clone();
                 let ui = ui.clone();
-                tokio::spawn(async move {
-                    let result = client.call(req).await;
-                    let _ = ui.send(UiMsg::Reply { tag, result });
-                });
+                match cmd {
+                    Cmd::Call(req, tag) => {
+                        tokio::spawn(async move {
+                            let result = client.call(req).await;
+                            let _ = ui.send(UiMsg::Reply { tag, result });
+                        });
+                    }
+                    Cmd::Sync(req, ack) => {
+                        tokio::spawn(async move {
+                            let _ = client.call(req).await;
+                            let _ = ack.send(());
+                        });
+                    }
+                    // 已连接，后台服务在运行，无需处理
+                    Cmd::StartDaemon => {}
+                }
             }
             ev = events.recv() => match ev {
                 Ok(e) => {
@@ -286,4 +411,35 @@ fn spawn_daemon(data_dir: &Path) -> std::io::Result<()> {
         let _ = child.wait();
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_marker_blocks_launch() {
+        assert_eq!(connect_failure_action(true, false), FailAction::ShowQuit);
+        assert_eq!(connect_failure_action(true, true), FailAction::ShowQuit);
+    }
+
+    #[test]
+    fn launches_once_without_marker() {
+        assert_eq!(connect_failure_action(false, false), FailAction::Launch);
+        assert_eq!(connect_failure_action(false, true), FailAction::Wait);
+    }
+
+    #[test]
+    fn launch_failure_text_names_the_cause() {
+        let nf = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(launch_failure_text(&nf), crate::strings::LAUNCH_NOT_FOUND);
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(launch_failure_text(&denied).starts_with(crate::strings::LAUNCH_FAILED_PREFIX));
+    }
+
+    #[test]
+    fn call_sync_on_detached_bridge_returns_immediately() {
+        let b = Bridge::detached();
+        assert!(!b.call_sync(Request::GetSelf, Duration::from_secs(5)));
+    }
 }

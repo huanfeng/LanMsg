@@ -3,8 +3,8 @@
 // 以及 windui 自带的 `--screenshot <PNG>` 等截图参数（由 windui 自行解析，这里忽略）。
 // 注释中文，标识符英文。
 
-// 骨架任务：Model/Bridge/UiState 的大部分接口由后续任务（Task 11–15）接入视图，此前允许暂未使用。
-#![allow(dead_code)]
+// Windows 发布版不带控制台窗口；日志写 stderr 失败（无控制台时句柄无效）不会 panic。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod autostart;
 mod bridge;
@@ -32,6 +32,9 @@ use ui_state::UiState;
 /// 窗口默认与最小尺寸（逻辑像素）。
 const WINDOW_SIZE: (i32, i32) = (1000, 680);
 const WINDOW_MIN: (i32, i32) = (760, 520);
+
+/// 周期任务间隔；各 tick 自带“无事可做就立即返回”的判定。搜索防抖 300ms 仍可满足。
+const TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// 自有命令行参数；windui 的截图参数不在此解析。
 #[derive(Debug, Default, PartialEq)]
@@ -138,9 +141,15 @@ fn main() {
     }
 
     let ui_focus = ui.clone();
+    let ui_close = ui.clone();
     let ui_tick = ui.clone();
     app = app
-        .on_interval(std::time::Duration::from_millis(100), move |_ctx| {
+        .on_close_request(move |_ctx| {
+            // 关窗即退出：先同步清掉界面焦点，再放行关闭
+            ui_close.clear_focus_on_exit();
+            true
+        })
+        .on_interval(TICK_INTERVAL, move |_ctx| {
             ui_tick.tick_search();
             ui_tick.tick_paste();
             ui_tick.tick_pair();

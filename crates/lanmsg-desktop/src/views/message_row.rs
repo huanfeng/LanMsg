@@ -141,12 +141,8 @@ pub fn thumb_size(w: Option<u32>, h: Option<u32>) -> (i32, i32) {
     (fit(w), fit(h))
 }
 
-/// 一组文件的聚合状态：准备中 > 下载中 > 待下载 > 源离线 > 已在本地。
-pub fn aggregate_state(items: &[FileItemView]) -> BlobState {
-    aggregate_with(items, |i| i.state.clone())
-}
-
-/// 同 `aggregate_state`，但用模型推导每项的有效状态（点击下载后立刻显示“下载中”）。
+/// 一组文件的聚合状态（准备中 > 下载中 > 待下载 > 源离线 > 已在本地），
+/// 用模型推导每项的有效状态（点击下载后立刻显示“下载中”）。
 fn aggregate_effective(items: &[FileItemView], model: &Model) -> BlobState {
     aggregate_with(items, |i| effective_state(i, model))
 }
@@ -327,11 +323,6 @@ fn state_from_key(k: u8) -> BlobState {
 
 /// 文件的状态区：待下载 -> 下载按钮；下载中 -> 进度条 + 百分比与速率 + 取消；
 /// 已在本地 -> 打开 / 打开所在文件夹；源离线、准备中 -> 文字。
-/// 文件视图页复用（单个文件）。
-pub fn file_state_area(ui: &UiState, item: &FileItemView) -> Element {
-    state_area(ui, std::slice::from_ref(item))
-}
-
 fn state_area(ui: &UiState, items: &[FileItemView]) -> Element {
     // 状态随模型变化（下载请求发出、进度到达），所以按派生状态重建
     let list = items.to_vec();
@@ -843,6 +834,7 @@ mod tests {
     #[test]
     fn aggregate_state_priority() {
         let l = |s| item("a", 1, s);
+        let aggregate_state = |items: &[FileItemView]| aggregate_with(items, |i| i.state.clone());
         assert_eq!(aggregate_state(&[l(BlobState::Local)]), BlobState::Local);
         assert_eq!(
             aggregate_state(&[l(BlobState::Local), l(BlobState::Remote)]),

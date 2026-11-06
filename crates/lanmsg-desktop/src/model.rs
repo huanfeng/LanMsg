@@ -35,6 +35,20 @@ pub enum ConnState {
     Connecting,
     Connected,
     Disconnected(String),
+    /// 后台服务是用户主动退出的：不自动拉起，提示手动启动。
+    DaemonQuit,
+    /// 拉起后台服务失败；内容是展示给用户的原因。
+    LaunchFailed(String),
+}
+
+impl ConnState {
+    /// 是否已确认与后台服务断开（含主动退出、拉起失败）。
+    pub fn is_down(&self) -> bool {
+        matches!(
+            self,
+            ConnState::Disconnected(_) | ConnState::DaemonQuit | ConnState::LaunchFailed(_)
+        )
+    }
 }
 
 /// 单个文件的传输进度。
@@ -298,12 +312,21 @@ impl Model {
                 self.settings_saving = 0;
                 Vec::new()
             }
+            UiMsg::DaemonQuit => {
+                self.conn = ConnState::DaemonQuit;
+                self.settings_saving = 0;
+                Vec::new()
+            }
+            UiMsg::LaunchFailed(reason) => {
+                self.conn = ConnState::LaunchFailed(reason);
+                self.settings_saving = 0;
+                Vec::new()
+            }
             UiMsg::Reply { tag, result } => match result {
                 Ok(resp) => self.apply_reply(tag, resp),
                 Err(e) => {
                     // 断线期间的自动请求会得到“未连接”，顶部提示条已说明，不再弹 toast
-                    let offline_io =
-                        e.code == ErrorCode::Io && matches!(self.conn, ConnState::Disconnected(_));
+                    let offline_io = e.code == ErrorCode::Io && self.conn.is_down();
                     if !offline_io {
                         self.toast = Some(e.message);
                     }
@@ -2061,6 +2084,39 @@ mod tests {
             Response::MsgId { value: "x".into() },
         ));
         assert_eq!(m.toast.as_deref(), Some("已转发"));
+    }
+
+    #[test]
+    fn daemon_quit_and_launch_failed_flow_back_to_connected() {
+        let mut m = model_in_conv("c1", 3);
+        m.apply(UiMsg::DaemonQuit);
+        assert_eq!(m.conn, ConnState::DaemonQuit);
+        assert!(m.conn.is_down());
+        assert_eq!(m.messages.len(), 3, "主动退出期间数据保留");
+        m.apply(UiMsg::LaunchFailed("找不到 lanmsgd".into()));
+        assert_eq!(m.conn, ConnState::LaunchFailed("找不到 lanmsgd".into()));
+        assert!(m.conn.is_down());
+        // 点“启动后台服务”后桥发 Disconnected，连上后回到 Connected
+        m.apply(UiMsg::Disconnected("正在启动后台服务…".into()));
+        assert!(m.conn.is_down());
+        m.apply(UiMsg::Connected);
+        assert_eq!(m.conn, ConnState::Connected);
+        assert!(!m.conn.is_down());
+    }
+
+    #[test]
+    fn offline_io_error_is_silent_when_daemon_quit() {
+        let mut m = model_in_conv("c1", 1);
+        m.apply(UiMsg::DaemonQuit);
+        m.toast = None;
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::Generic,
+            result: Err(ApiError {
+                code: ErrorCode::Io,
+                message: "未连接".into(),
+            }),
+        });
+        assert_eq!(m.toast, None);
     }
 
     #[test]

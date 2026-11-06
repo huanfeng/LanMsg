@@ -1,5 +1,4 @@
 // 外壳：左侧图标栏 + 顶部连接状态条 + 右侧页面内容区。
-// 各页内容在本任务先放标题占位，由后续任务替换。
 // 注释中文，标识符英文。
 
 use windui::prelude::*;
@@ -158,15 +157,23 @@ pub fn shell(ui: &UiState) -> Element {
         .child(rail)
         .child(style::vline());
 
+    let ui_start = ui.clone();
     let banner = Element::row()
         .width_match()
         .padding_xy(style::SPACE_LG, style::SPACE_SM)
+        .spacing(style::SPACE_MD)
+        .cross(Align::Center)
         .bg_role(Role::Warning)
         .visible_signal(disconnected)
         .child(
-            Element::label(strings::DISCONNECTED_BANNER)
+            Element::label_signal(ui.banner_text())
                 .font_size(style::FONT_BODY)
                 .fg_role(Role::OnAccent),
+        )
+        .child(
+            Element::button(strings::DAEMON_START_BUTTON)
+                .on_click(move |_| ui_start.start_daemon())
+                .visible_signal(ui.daemon_quit()),
         );
 
     let ui_page = ui.clone();
