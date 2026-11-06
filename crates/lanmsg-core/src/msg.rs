@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use tokio::sync::broadcast;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use lanmsg_api::types::Event;
 use lanmsg_proto::consts::THUMB_MAX_BYTES;
@@ -635,6 +635,12 @@ impl Messaging {
                             continue;
                         }
                     };
+                    // 2b. 作者设备已吊销 → 丢弃（吊销后其签名的信封不再可信，
+                    //     无论经哪条路径到达，含第三台设备转发）。
+                    if author_row.revoked {
+                        debug!(peer = %from, author = %author_device, "SyncPush 作者设备已吊销，丢弃");
+                        continue;
+                    }
                     let author_user = author_row.user;
 
                     // 3. clock.observe(env.hlc)。
@@ -1072,5 +1078,173 @@ mod tests {
 
         let stored = a2.store.get_message(&msg_id).unwrap().unwrap();
         assert_eq!(stored.state, MsgStateRow::Sending);
+    }
+
+    // ---- 吊销 / 伪造 conv / 转交成环 ----
+
+    fn signed_text_env(
+        dev: &lanmsg_proto::sign::DeviceKey,
+        conv: ConvId,
+        seq: u64,
+        text: &str,
+    ) -> Envelope {
+        let mut env = Envelope {
+            conv,
+            id: MsgId {
+                author: dev.device_id(),
+                seq,
+            },
+            conv_seq: seq,
+            hlc: lanmsg_proto::types::Hlc {
+                millis: 1_700_000_000_000 + seq as i64,
+                counter: 0,
+            },
+            body: MsgBody::Text { text: text.into() },
+            enc: None,
+            sig: lanmsg_proto::types::Signature64([0u8; 64]),
+        };
+        lanmsg_proto::sign::sign_with_zeroed_sig(&mut env, |b| dev.sign(b));
+        env
+    }
+
+    fn push(env: Envelope) -> Frame {
+        Frame::SyncPush(lanmsg_proto::types::SyncPush {
+            envelopes: vec![env],
+        })
+    }
+
+    /// 在 node 的 store 中登记一台属于其自己用户的第二设备，返回其密钥。
+    fn add_own_device(n: &crate::testutil::Node) -> lanmsg_proto::sign::DeviceKey {
+        let dev = lanmsg_proto::sign::DeviceKey::generate();
+        let cert = {
+            let id = n.identity.read().unwrap();
+            lanmsg_proto::types::DeviceCert::issue(
+                id.user.as_ref().unwrap(),
+                dev.device_id(),
+                "第二设备".into(),
+                lanmsg_proto::types::DeviceType::Desktop,
+                1,
+            )
+        };
+        n.store
+            .upsert_device(&crate::store::DeviceRow {
+                device: dev.device_id(),
+                user: n.user,
+                cert,
+                name: "第二设备".into(),
+                device_type: lanmsg_proto::types::DeviceType::Desktop,
+                last_addr: None,
+                last_path: None,
+                last_seen: None,
+                revoked: false,
+            })
+            .unwrap();
+        dev
+    }
+
+    #[tokio::test]
+    async fn revoked_author_envelope_is_dropped() {
+        let (a, b) = pair_of_nodes().await;
+        let conv = a.open_dm(&b.user).unwrap();
+        // a 是 b 的已接受联系人，避免门控干扰。
+        b.store
+            .upsert_contact_if_newer(&crate::store::ContactRow {
+                user: a.user,
+                state: ContactState::Accepted,
+                auto_accept: false,
+                ask_above_bytes: None,
+                updated: lanmsg_proto::types::Hlc {
+                    millis: 1,
+                    counter: 0,
+                },
+            })
+            .unwrap();
+
+        // 吊销 a 的设备后，a 再发消息：直接推送与经第三方转发均不入库。
+        let mut row = b.store.get_device(&a.device).unwrap().unwrap();
+        row.revoked = true;
+        b.store.upsert_device(&row).unwrap();
+        let id = a
+            .send(
+                &conv,
+                MsgBody::Text {
+                    text: "吊销后".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let env = a.store.get_message(&id).unwrap().unwrap().env;
+        let relay = DeviceId([9u8; 32]);
+        b.on_frame(relay, push(env.clone())).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(b.store.list_messages(&conv, None, 10).unwrap().is_empty());
+
+        // 对照：撤销吊销标志后同一信封可入库，说明丢弃确由吊销检查造成。
+        row.revoked = false;
+        b.store.upsert_device(&row).unwrap();
+        b.on_frame(relay, push(env)).await.unwrap();
+        assert_eq!(b.store.list_messages(&conv, None, 10).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn own_device_forged_conv_to_non_contact_is_dropped() {
+        let (_a, b) = pair_of_nodes().await;
+        let d2 = add_own_device(&b);
+        // 非联系人用户 S：自己设备伪造 dm(self, S) 的信封。
+        let stranger = lanmsg_proto::sign::UserKey::generate().user_id();
+        let conv = ConvId::dm(&b.user, &stranger);
+        let env = signed_text_env(&d2, conv, 1, "伪造");
+        b.on_frame(d2.device_id(), push(env)).await.unwrap();
+        assert!(b.store.get_conversation(&conv).unwrap().is_none());
+        assert!(b.store.list_messages(&conv, None, 10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relay_through_own_devices_does_not_duplicate() {
+        let (_a, b) = pair_of_nodes().await;
+        // A1(=d1)、A3(=d3) 是 b(A2) 用户的另两台设备；联系人 S 的消息经二者先后转交。
+        let d1 = add_own_device(&b);
+        let d3 = add_own_device(&b);
+        let s_dev = lanmsg_proto::sign::DeviceKey::generate();
+        let s_key = lanmsg_proto::sign::UserKey::generate();
+        let s_cert = lanmsg_proto::types::DeviceCert::issue(
+            &s_key,
+            s_dev.device_id(),
+            "S".into(),
+            lanmsg_proto::types::DeviceType::Desktop,
+            1,
+        );
+        b.store
+            .upsert_device(&crate::store::DeviceRow {
+                device: s_dev.device_id(),
+                user: s_key.user_id(),
+                cert: s_cert,
+                name: "S".into(),
+                device_type: lanmsg_proto::types::DeviceType::Desktop,
+                last_addr: None,
+                last_path: None,
+                last_seen: None,
+                revoked: false,
+            })
+            .unwrap();
+        b.store
+            .upsert_contact_if_newer(&crate::store::ContactRow {
+                user: s_key.user_id(),
+                state: ContactState::Accepted,
+                auto_accept: false,
+                ask_above_bytes: None,
+                updated: lanmsg_proto::types::Hlc {
+                    millis: 1,
+                    counter: 0,
+                },
+            })
+            .unwrap();
+        let conv = ConvId::dm(&b.user, &s_key.user_id());
+        let env = signed_text_env(&s_dev, conv, 1, "转交");
+        // A1 → A2，再 A3 → A2（A1→A2→A3→A2 环）：仅一条，且无错误。
+        b.on_frame(d1.device_id(), push(env.clone())).await.unwrap();
+        b.on_frame(d3.device_id(), push(env.clone())).await.unwrap();
+        b.on_frame(d1.device_id(), push(env)).await.unwrap();
+        assert_eq!(b.store.list_messages(&conv, None, 10).unwrap().len(), 1);
     }
 }
