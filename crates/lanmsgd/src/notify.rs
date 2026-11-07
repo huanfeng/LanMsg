@@ -15,15 +15,24 @@ pub struct Notice {
     pub conv: Option<String>,
 }
 
-/// 会话标题缓存：会话 id → (标题, 类型)，由 `ConversationUpdated` 事件填充。
+/// 会话标题缓存：会话 id → (标题, 类型)，由 `ConversationUpdated` 事件填充；
+/// 同时记录本机设备 id，用于只排除本机发出的消息（同用户其他设备的消息仍通知）。
 #[derive(Debug, Default)]
-pub struct TitleCache(HashMap<String, (String, ConvKind)>);
+pub struct TitleCache {
+    titles: HashMap<String, (String, ConvKind)>,
+    self_device: String,
+}
 
 impl TitleCache {
+    /// 记录本机设备 id（空串表示未知，此时不排除任何消息）。
+    pub fn set_self_device(&mut self, device: String) {
+        self.self_device = device;
+    }
+
     /// 观察一个事件，记录会话标题。
     pub fn observe(&mut self, ev: &Event) {
         if let Event::ConversationUpdated { summary } = ev {
-            self.0.insert(
+            self.titles.insert(
                 summary.conv.clone(),
                 (summary.title.clone(), summary.kind.clone()),
             );
@@ -31,7 +40,7 @@ impl TitleCache {
     }
 
     pub fn get(&self, conv: &str) -> Option<&(String, ConvKind)> {
-        self.0.get(conv)
+        self.titles.get(conv)
     }
 }
 
@@ -75,7 +84,9 @@ fn body_preview(body: &MessageBodyView) -> Option<String> {
 }
 
 fn message_notice(msg: &MessageView, focus: Option<&str>, titles: &TitleCache) -> Option<Notice> {
-    if msg.is_mine || focus == Some(msg.conv.as_str()) {
+    let from_this_device =
+        !titles.self_device.is_empty() && msg.author_device == titles.self_device;
+    if from_this_device || focus == Some(msg.conv.as_str()) {
         return None;
     }
     let preview = body_preview(&msg.body)?;
@@ -195,11 +206,25 @@ mod tests {
     }
 
     #[test]
-    fn no_notice_for_own_message() {
+    fn no_notice_for_message_from_this_device() {
+        let mut titles = TitleCache::default();
+        titles.set_self_device("d".into());
         let mut m = msg("c1", text("hi"));
         m.is_mine = true;
-        let n = notice_for(&added(m), None, &StatusDto::Online, &TitleCache::default());
+        let n = notice_for(&added(m), None, &StatusDto::Online, &titles);
         assert_eq!(n, None);
+    }
+
+    #[test]
+    fn notice_for_own_user_other_device_in_self_devices() {
+        let mut titles = TitleCache::default();
+        titles.set_self_device("local".into());
+        titles.observe(&conv_event("c1", "我的设备", ConvKind::SelfDevices));
+        let mut m = msg("c1", text("hi"));
+        m.is_mine = true; // 作者用户是自己，但来自另一台设备（"d"）
+        let n = notice_for(&added(m), None, &StatusDto::Online, &titles).unwrap();
+        assert_eq!(n.title, "我的设备");
+        assert_eq!(n.body, "手机: hi");
     }
 
     #[test]

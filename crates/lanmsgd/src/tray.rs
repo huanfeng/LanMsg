@@ -94,10 +94,10 @@ fn notice_with_fresh_status(
 pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     let handle = rt.handle();
 
-    // 初始状态来自 GetSelf。
-    let initial = match handle.block_on(rt.service.handle(Request::GetSelf)) {
-        Ok(Response::SelfInfo { value }) => value.status,
-        _ => StatusDto::Online,
+    // 初始状态与本机设备 id 来自 GetSelf。
+    let (initial, self_device) = match handle.block_on(rt.service.handle(Request::GetSelf)) {
+        Ok(Response::SelfInfo { value }) => (value.status, value.device_id),
+        _ => (StatusDto::Online, String::new()),
     };
     let status = signal(initial);
 
@@ -157,6 +157,7 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     let service = rt.service.clone();
     let handle_ev = handle.clone();
     let mut titles = TitleCache::default();
+    titles.set_self_device(self_device);
     let tx = app.channel::<UiMsg>(move |_ctx, msg| match msg {
         UiMsg::Quit => tray_handle.quit(),
         UiMsg::Event(ev) => {
