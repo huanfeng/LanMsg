@@ -2821,6 +2821,31 @@ mod tests {
     }
 
     #[test]
+    fn qr_pair_dialog_switches_to_sas_when_peer_joins_by_digits() {
+        let mut m = Model::new();
+        m.pair_start(PairMethod::Qr);
+        let n = m.pair_nonce;
+        m.apply(reply(
+            ReplyTag::Pair { nonce: n },
+            pair_info("s1", Some("lanmsg://pair?s=x")),
+        ));
+        m.apply(pair_event(
+            "s1",
+            PairStateDto::ShowSas {
+                code: "123456".into(),
+            },
+        ));
+        assert!(matches!(
+            &m.pair,
+            Some(PairUi::Showing { qr_uri: Some(_), state: PairStateDto::ShowSas { code }, .. })
+                if code == "123456"
+        ));
+        let fx = m.pair_confirm(true);
+        assert!(has(&fx, |r| matches!(r,
+            Request::PairConfirm { session, matches: true } if session == "s1")));
+    }
+
+    #[test]
     fn pair_refresh_peers_requests_list_only_while_picking() {
         let mut m = Model::new();
         assert!(m.pair_refresh_peers().is_empty());

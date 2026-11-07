@@ -60,6 +60,16 @@ const PAIR_DONE_CLOSE_MS: u128 = 1500;
 /// 选择界面周期刷新候选设备的间隔。
 const PAIR_REFRESH_MS: u128 = 3000;
 
+/// 选择界面刷新节流：返回（新的计时起点，本次是否发请求）。
+/// 首次进入只记起点不发请求（打开选择界面时已请求过一次），之后每 3 秒一次。
+fn pair_refresh_step(last: Option<Instant>, now: Instant) -> (Instant, bool) {
+    match last {
+        None => (now, false),
+        Some(t) if now.duration_since(t).as_millis() >= PAIR_REFRESH_MS => (now, true),
+        Some(t) => (t, false),
+    }
+}
+
 /// 退出前同步清焦点的最长等待。
 const FOCUS_CLEAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -284,12 +294,12 @@ impl UiState {
         }
         if self.read(|m| m.pair == Some(PairUi::Picking)) {
             let mut at = self.pair_refresh_at.borrow_mut();
-            if at.is_some_and(|t| t.elapsed().as_millis() < PAIR_REFRESH_MS) {
-                return;
-            }
-            *at = Some(Instant::now());
+            let (next, request) = pair_refresh_step(*at, Instant::now());
+            *at = Some(next);
             drop(at);
-            self.act(|m| m.pair_refresh_peers());
+            if request {
+                self.act(|m| m.pair_refresh_peers());
+            }
             return;
         }
         self.pair_refresh_at.borrow_mut().take();
@@ -384,6 +394,24 @@ impl UiState {
 mod tests {
     use super::*;
     use lanmsg_api::types::{ConvKind, ConversationSummary};
+
+    #[test]
+    fn pair_refresh_step_skips_first_then_throttles_to_3s() {
+        let t0 = Instant::now();
+        // 首次进入选择界面：只记起点，不发请求
+        let (start, request) = pair_refresh_step(None, t0);
+        assert!(!request);
+        // 不足 3 秒：不发，起点不变
+        let (same, request) =
+            pair_refresh_step(Some(start), t0 + std::time::Duration::from_millis(2900));
+        assert!(!request);
+        assert_eq!(same, start);
+        // 满 3 秒：发请求并重置起点
+        let later = t0 + std::time::Duration::from_millis(3000);
+        let (next, request) = pair_refresh_step(Some(start), later);
+        assert!(request);
+        assert_eq!(next, later);
+    }
 
     fn conv(id: &str) -> ConversationSummary {
         ConversationSummary {

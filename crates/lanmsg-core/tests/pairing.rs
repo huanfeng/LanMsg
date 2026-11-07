@@ -342,6 +342,97 @@ async fn sas_pairing_requires_both_confirmations() {
     }
 }
 
+/// 发起方开的是二维码窗口，加入方按候选设备走数字比对：窗口受理，
+/// 事件沿用 PairStart 的会话；必须双方确认才 Done，且口令不泄露。
+#[tokio::test]
+async fn qr_window_accepts_sas_join_and_needs_both_confirmations() {
+    init_log();
+    let bus = MemoryBus::new();
+    let mut a = node(&bus).await;
+    let mut b = node(&bus).await;
+    a.init_first("甲机").await;
+    init_join(&b).await;
+    reannounce(&a).await;
+
+    let started = match a
+        .try_call(Request::PairStart {
+            method: PairMethod::Qr,
+        })
+        .await
+        .expect("PairStart 失败")
+    {
+        Response::PairSession { value } => value,
+        other => panic!("期望 PairSession，实际 {other:?}"),
+    };
+    assert!(started.qr_uri.is_some());
+    let session_a = started.session.clone();
+    let a_dev = a.device_id().await;
+    let session = join_device(&b, &a_dev).await;
+
+    let code_a = wait_show_sas(&mut a, &session_a).await;
+    let code_b = wait_show_sas(&mut b, &session).await;
+    assert_eq!(code_a, code_b);
+
+    // 只有 A 确认：不会完成
+    a.try_call(Request::PairConfirm {
+        session: session_a.clone(),
+        matches: true,
+    })
+    .await
+    .expect("PairConfirm 失败");
+    a.no_event(is_done(&session_a), 2000).await;
+    b.no_event(is_done(&session), 2000).await;
+
+    b.try_call(Request::PairConfirm {
+        session: session.clone(),
+        matches: true,
+    })
+    .await
+    .expect("PairConfirm 失败");
+    a.wait_event(is_done(&session_a), 5).await;
+    b.wait_event(is_done(&session), 5).await;
+}
+
+/// 二维码窗口受理的 Sas 加入：任一方拒绝即双方失败，B 保持未初始化。
+#[tokio::test]
+async fn qr_window_sas_join_mismatch_fails_both() {
+    init_log();
+    let bus = MemoryBus::new();
+    let mut a = node(&bus).await;
+    let mut b = node(&bus).await;
+    a.init_first("甲机").await;
+    init_join(&b).await;
+    reannounce(&a).await;
+
+    let session_a = match a
+        .try_call(Request::PairStart {
+            method: PairMethod::Qr,
+        })
+        .await
+        .expect("PairStart 失败")
+    {
+        Response::PairSession { value } => value.session,
+        other => panic!("期望 PairSession，实际 {other:?}"),
+    };
+    let a_dev = a.device_id().await;
+    let session = join_device(&b, &a_dev).await;
+    let _ = wait_show_sas(&mut a, &session_a).await;
+    let _ = wait_show_sas(&mut b, &session).await;
+
+    a.try_call(Request::PairConfirm {
+        session: session_a.clone(),
+        matches: false,
+    })
+    .await
+    .expect("PairConfirm 失败");
+    a.wait_event(is_failed(&session_a), 5).await;
+    b.wait_event(is_failed(&session), 5).await;
+    match b.try_call(Request::GetSelf).await.expect("GetSelf 失败") {
+        Response::SelfInfo { value } => assert!(!value.initialized),
+        other => panic!("期望 SelfInfo，实际 {other:?}"),
+    }
+}
+
 /// Sas 数字不一致：双方 Failed{"数字不一致"}，B 保持未初始化。
 #[tokio::test]
 async fn sas_mismatch_fails_both() {

@@ -610,6 +610,9 @@ impl Pairing {
     // ---- 入站帧处理 ----
 
     /// 第 3 步：A 收 Begin。无窗口或方法不符 → Abort{"未开启配对"}。
+    /// 二维码窗口同时受理 Sas 加入：用户在对端的候选列表里选中本机时走数字比对。
+    /// Sas 会话不带窗口口令（secret=None），仍需双方确认数字一致才会推进；
+    /// 反过来 Sas 窗口不受理 Qr（它没有口令可验）。
     async fn on_begin(
         &self,
         from: &PeerInfo,
@@ -623,7 +626,11 @@ impl Pairing {
             .window
             .get()
             .filter(|w| w.is_open(Instant::now()));
-        let Some(w) = window.filter(|w| w.method == method) else {
+        let accepts = |w: &PairWindow| {
+            w.method == method
+                || (matches!(w.method, PairMethodWire::Qr) && matches!(method, PairMethodWire::Sas))
+        };
+        let Some(w) = window.filter(accepts) else {
             tracing::debug!(peer = %from.device, "Begin 被拒：窗口未开或方法不符");
             let _ = self
                 .inner
@@ -651,7 +658,10 @@ impl Pairing {
                 session: session.clone(),
                 role: Role::A(ASession {
                     method,
-                    secret: w.secret,
+                    // Qr 窗口的口令只属于 Qr 会话，不交给 Sas 对端
+                    secret: matches!(method, PairMethodWire::Qr)
+                        .then_some(w.secret)
+                        .flatten(),
                     exporter: from.tls_exporter,
                     peer: from.device,
                     peer_name: device_name,
