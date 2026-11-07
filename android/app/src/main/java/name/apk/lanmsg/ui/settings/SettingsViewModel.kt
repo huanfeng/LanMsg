@@ -58,6 +58,9 @@ class SettingsViewModel(
     /** 写入期间收到的 lagged / 被跳过的读取，写完后补拉一次。 */
     private var reloadAfterWrites = false
 
+    /** 被后续成功写入掩盖的失败，最后一次写完时一并输出。仅在 writeLock 内读写。 */
+    private var lastFailure: String? = null
+
     init {
         viewModelScope.launch { prefs.notificationsEnabled.collect { v -> _state.update { it.copy(notifications = v) } } }
         viewModelScope.launch { prefs.saveMediaToGallery.collect { v -> _state.update { it.copy(saveToGallery = v) } } }
@@ -88,12 +91,15 @@ class SettingsViewModel(
                     if (new.backgroundMode != base.backgroundMode) onBackgroundMode(new.backgroundMode)
                 } catch (e: ApiException) {
                     failure = e.message ?: e.code.name
+                    lastFailure = failure
                 } finally {
                     pendingWrites--
                 }
                 if (pendingWrites == 0) {
                     val shown = if (failure == null) new else fetchSettings() ?: confirmed
-                    _state.update { it.copy(settings = shown ?: it.settings, error = failure ?: it.error) }
+                    val reported = lastFailure
+                    lastFailure = null
+                    _state.update { it.copy(settings = shown ?: it.settings, error = reported ?: it.error) }
                 }
             }
             if (pendingWrites == 0 && reloadAfterWrites) {

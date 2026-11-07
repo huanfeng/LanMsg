@@ -103,7 +103,7 @@ class OutboxImporter(
         val fmt = SimpleDateFormat("yyyyMMdd", Locale.ROOT).apply { isLenient = false }
         var freed = 0L
         for (dir in outboxRoot.listFiles().orEmpty()) {
-            if (!dir.isDirectory || !DATE_DIR.matches(dir.name)) continue
+            if (!dir.isDirectory || java.nio.file.Files.isSymbolicLink(dir.toPath()) || !DATE_DIR.matches(dir.name)) continue
             val dayStart = try {
                 fmt.parse(dir.name)
             } catch (e: java.text.ParseException) {

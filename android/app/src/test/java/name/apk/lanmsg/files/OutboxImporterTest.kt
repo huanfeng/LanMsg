@@ -188,4 +188,15 @@ class OutboxImporterTest {
         assertTrue(bad.exists())
         assertTrue(loose.exists())
     }
+
+    @Test fun clear_older_than_skips_symlinked_directories() {
+        val imp = importer()
+        val target = File(tmp.root, "elsewhere").apply { mkdirs() }
+        val victim = File(target, "keep.txt").apply { writeText("keep") }
+        val link = File(tmp.root, "outbox/20230101")
+        link.parentFile!!.mkdirs()
+        java.nio.file.Files.createSymbolicLink(link.toPath(), target.toPath())
+        assertEquals(0L, imp.clearOlderThan(millis(2030, 1, 1)))
+        assertTrue(victim.exists())
+    }
 }

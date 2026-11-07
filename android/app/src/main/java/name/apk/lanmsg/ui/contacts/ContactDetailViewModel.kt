@@ -32,14 +32,18 @@ class ContactDetailViewModel(private val core: CoreApi, private val user: String
         refresh()
     }
 
+    /** 读取与写入共用 policyLock：在途的旧读取响应不会晚于成功写入而回退 confirmed。 */
     fun refresh() {
         viewModelScope.launch {
-            try {
-                val found = core.call<Response.Contacts>(Request.ListContacts).value.firstOrNull { it.userId == user }
-                confirmed = found
-                if (pendingPolicy == 0) _state.update { it.copy(contact = found, error = null) }
-            } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+            policyLock.withLock {
+                try {
+                    val found = core.call<Response.Contacts>(Request.ListContacts).value.firstOrNull { it.userId == user }
+                    confirmed = found
+                    // 等锁期间若来了新的写入，界面是乐观值：不覆盖，写完后补拉
+                    if (pendingPolicy == 0) _state.update { it.copy(contact = found, error = null) } else reloadAfterWrites = true
+                } catch (e: ApiException) {
+                    _state.update { it.copy(error = e.message ?: e.code.name) }
+                }
             }
         }
     }
@@ -66,6 +70,12 @@ class ContactDetailViewModel(private val core: CoreApi, private val user: String
     private val policyLock = Mutex()
     private var pendingPolicy = 0
 
+    /** 写入期间被跳过的读取，最后一次写完后补拉一次。 */
+    private var reloadAfterWrites = false
+
+    /** 被后续成功写入掩盖的失败，最后一次写完时一并输出。仅在 policyLock 内读写。 */
+    private var lastFailure: String? = null
+
     /** 先乐观更新；失败后重新读取 core 为准，读取也失败才回落到最近一次确认的值。 */
     private fun setPolicy(change: (ContactView) -> ContactView) {
         val cur = _state.value.contact ?: return
@@ -82,13 +92,20 @@ class ContactDetailViewModel(private val core: CoreApi, private val user: String
                     confirmed = new
                 } catch (e: ApiException) {
                     failure = e.message ?: e.code.name
+                    lastFailure = failure
                 } finally {
                     pendingPolicy--
                 }
                 if (pendingPolicy == 0) {
                     val shown = if (failure == null) new else fetchContact() ?: confirmed
-                    _state.update { it.copy(contact = shown ?: it.contact, error = failure ?: it.error) }
+                    val reported = lastFailure
+                    lastFailure = null
+                    _state.update { it.copy(contact = shown ?: it.contact, error = reported ?: it.error) }
                 }
+            }
+            if (pendingPolicy == 0 && reloadAfterWrites) {
+                reloadAfterWrites = false
+                refresh()
             }
         }
     }

@@ -3,6 +3,7 @@
 package name.apk.lanmsg.ui.contacts
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import name.apk.lanmsg.core.ApiException
@@ -110,6 +111,56 @@ class ContactDetailViewModelTest {
         vm.setAskAbove(10uL)
         advanceUntilIdle()
         assertEquals(Request.SetContactPolicy("u2", false, 10uL), fake.requests.last { it is Request.SetContactPolicy })
+        assertEquals("once", vm.state.value.error)
+    }
+
+    @Test fun stale_list_response_does_not_revert_confirmed_after_write() = runTest {
+        val fake = fake(autoAccept = false)
+        val vm = ContactDetailViewModel(fake, "u2")
+        advanceUntilIdle()
+        val gate = CompletableDeferred<Unit>()
+        var coreAuto = false
+        var held = true
+        fake.handler = { req ->
+            when (req) {
+                Request.ListContacts -> {
+                    val snapshot = coreAuto // 响应内容在请求发出时就已确定（旧值）
+                    if (held) { held = false; gate.await() }
+                    Response.Contacts(listOf(Fixtures.contact("u2").apply { autoAccept = snapshot }))
+                }
+                is Request.SetContactPolicy -> { coreAuto = req.autoAccept; Response.Ok }
+                else -> throw ApiException(ErrorCode.INTERNAL, "unexpected $req")
+            }
+        }
+        vm.refresh() // 在途读取（旧值）
+        vm.setAutoAccept(true) // 写入排在读取之后
+        advanceUntilIdle()
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(true, vm.state.value.contact?.autoAccept)
+        vm.setAskAbove(10uL)
+        advanceUntilIdle()
+        assertEquals(Request.SetContactPolicy("u2", true, 10uL), fake.requests.last { it is Request.SetContactPolicy })
+    }
+
+    @Test fun refresh_during_write_is_replayed_after_last_write() = runTest {
+        val fake = fake(autoAccept = false)
+        val vm = ContactDetailViewModel(fake, "u2")
+        advanceUntilIdle()
+        var coreAuto = false
+        fake.handler = { req ->
+            when (req) {
+                Request.ListContacts -> Response.Contacts(listOf(Fixtures.contact("u2").apply { autoAccept = coreAuto }))
+                is Request.SetContactPolicy -> { coreAuto = req.autoAccept; Response.Ok }
+                else -> throw ApiException(ErrorCode.INTERNAL, "unexpected $req")
+            }
+        }
+        val before = fake.requests.count { it == Request.ListContacts }
+        vm.setAutoAccept(true)
+        vm.refresh() // 排在写入之后、写入进行中到达
+        advanceUntilIdle()
+        assertEquals(true, vm.state.value.contact?.autoAccept)
+        assertEquals(before + 1, fake.requests.count { it == Request.ListContacts })
     }
 
     @Test fun contacts_changed_reloads() = runTest {
