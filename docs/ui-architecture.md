@@ -272,6 +272,7 @@
 | battery_card_action | 允许后台运行 |
 | battery_vendor_xiaomi | 在系统设置 → 应用设置 → 应用管理 → LanMsg 里，把“省电策略”设为“无限制”，并打开“自启动”。 |
 | battery_vendor_action | 打开应用详情 |
+| battery_vendor_recheck | 已设置？重新查看 |
 | settings_clear_outbox | 清理已分享文件的副本 |
 | settings_clear_outbox_desc | 仅清理 7 天前的副本，当前共占用 %1$s |
 | settings_clear_outbox_confirm | 清理 7 天前的副本。尚未下载这些文件的设备将无法再获取它们；你手机里的原文件不受影响。 |

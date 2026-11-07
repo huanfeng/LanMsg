@@ -80,6 +80,13 @@ class LocalPrefs(ctx: Context) : NotifierPrefs, BackgroundModePrefs {
         store.edit { it[NOTIF_ASKED] = true }
     }
 
+    /** 用户是否已点过“打开应用详情”：之后厂商省电指引折叠成一行。 */
+    val vendorHintSeen: Flow<Boolean> = store.data.map { it[VENDOR_HINT_SEEN] ?: false }
+
+    suspend fun setVendorHintSeen() {
+        store.edit { it[VENDOR_HINT_SEEN] = true }
+    }
+
     override val lastBackgroundMode: Flow<BackgroundMode?> = store.data.map { p ->
         p[LAST_MODE]?.let { name -> BackgroundMode.entries.firstOrNull { it.name == name } }
     }
@@ -94,6 +101,7 @@ class LocalPrefs(ctx: Context) : NotifierPrefs, BackgroundModePrefs {
         val SAVE_GALLERY = booleanPreferencesKey("save_media_to_gallery")
         val TRUSTED_WIFI = stringSetPreferencesKey("trusted_wifi")
         val NOTIFY = booleanPreferencesKey("notifications_enabled")
+        val VENDOR_HINT_SEEN = booleanPreferencesKey("vendor_hint_seen")
         val NOTIF_ASKED = booleanPreferencesKey("notification_permission_asked")
     }
 }

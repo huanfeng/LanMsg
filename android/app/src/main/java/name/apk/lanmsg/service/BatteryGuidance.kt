@@ -16,4 +16,11 @@ object BatteryGuidance {
         "xiaomi", "redmi", "poco" -> Vendor.XIAOMI
         else -> null
     }
+
+    /** 原“允许后台运行”入口与提示卡互斥：卡片显示时隐藏它，卡片不显示时保留。 */
+    fun showLegacyEntry(mode: BackgroundMode, isIgnoringBatteryOptimizations: Boolean): Boolean =
+        !shouldShowCard(mode, isIgnoringBatteryOptimizations)
+
+    /** 点过“打开应用详情”后，厂商指引折叠成一行；用户展开后恢复完整显示。 */
+    fun vendorHintCollapsed(seen: Boolean, expanded: Boolean): Boolean = seen && !expanded
 }

@@ -58,6 +58,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import kotlinx.coroutines.launch
 import name.apk.lanmsg.R
 import name.apk.lanmsg.ServiceLocator
+import name.apk.lanmsg.service.BatteryGuidance
 import name.apk.lanmsg.ui.common.ConfirmDialog
 import name.apk.lanmsg.ui.common.Format
 import name.apk.lanmsg.ui.common.OptionRow
@@ -103,6 +104,7 @@ fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onB
         if (granted) addCurrentWifi() else scope.launch { snackbar.showSnackbar(needLocation) }
     }
 
+    val batteryExempt by rememberBatteryExempt()
     var editingName by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
 
@@ -164,11 +166,13 @@ fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onB
                 BackgroundOption(R.string.bg_power_saving, BackgroundMode.POWER_SAVING, settings.backgroundMode) { m -> vm.update { it.copy(backgroundMode = m) } }
                 Divider()
                 BackgroundOption(R.string.bg_off, BackgroundMode.OFF, settings.backgroundMode) { m -> vm.update { it.copy(backgroundMode = m) } }
-                Divider()
-                ActionRow(stringResource(R.string.settings_battery), stringResource(R.string.settings_battery_desc)) { openBatterySettings(ctx) }
+                if (BatteryGuidance.showLegacyEntry(settings.backgroundMode, batteryExempt)) {
+                    Divider()
+                    ActionRow(stringResource(R.string.settings_battery), stringResource(R.string.settings_battery_desc)) { openBatterySettings(ctx) }
+                }
             }
 
-            BatteryGuidanceCard(settings.backgroundMode)
+            BatteryGuidanceCard(settings.backgroundMode, batteryExempt)
 
             SectionHeader(stringResource(R.string.settings_trusted_wifi))
             Group {

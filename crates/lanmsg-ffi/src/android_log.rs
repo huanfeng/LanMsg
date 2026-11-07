@@ -9,8 +9,11 @@ use std::sync::Once;
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
+
+use crate::log_text::to_c_text;
 
 const TAG: &str = "lanmsg-core";
 
@@ -44,10 +47,6 @@ struct AndroidLayer;
 impl<S: Subscriber> Layer<S> for AndroidLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let level = *event.metadata().level();
-        // info 及以上写入 logcat（debug / trace 过于嘈杂）
-        if level > Level::INFO {
-            return;
-        }
         let prio = match level {
             Level::ERROR => ANDROID_LOG_ERROR,
             Level::WARN => ANDROID_LOG_WARN,
@@ -57,8 +56,7 @@ impl<S: Subscriber> Layer<S> for AndroidLayer {
         let mut v = LineVisitor(String::new());
         event.record(&mut v);
         let line = format!("{}: {}", event.metadata().target(), v.0);
-        // 文本里含 NUL 时 CString 构造失败，直接丢弃该行
-        if let (Ok(tag), Ok(text)) = (CString::new(TAG), CString::new(line)) {
+        if let (Ok(tag), Ok(text)) = (CString::new(TAG), to_c_text(&line)) {
             // SAFETY: 两个指针都指向以 NUL 结尾且在调用期间有效的 CString。
             unsafe {
                 __android_log_write(prio, tag.as_ptr(), text.as_ptr());
@@ -71,7 +69,9 @@ impl<S: Subscriber> Layer<S> for AndroidLayer {
 pub fn init() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        let subscriber = tracing_subscriber::registry().with(AndroidLayer);
+        // 在 callsite 就过滤掉 debug / trace（过于嘈杂），只写 info 及以上
+        let subscriber =
+            tracing_subscriber::registry().with(AndroidLayer.with_filter(LevelFilter::INFO));
         let _ = tracing::subscriber::set_global_default(subscriber);
     });
 }

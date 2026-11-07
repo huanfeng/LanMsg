@@ -5,6 +5,7 @@
 pub mod adapters;
 #[cfg(target_os = "android")]
 mod android_log;
+mod log_text;
 
 use std::sync::{Arc, Mutex};
 

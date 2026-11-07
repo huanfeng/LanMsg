@@ -24,4 +24,20 @@ class BatteryGuidanceTest {
     @Test fun other_manufacturers_have_no_vendor_guidance() {
         for (m in listOf("Google", "samsung", "", null)) assertNull(m, BatteryGuidance.vendorOf(m))
     }
+
+    @Test fun legacy_entry_is_exclusive_with_card() {
+        for (mode in BackgroundMode.entries) for (ignoring in listOf(true, false)) {
+            assertEquals(
+                "$mode/$ignoring",
+                !BatteryGuidance.shouldShowCard(mode, ignoring),
+                BatteryGuidance.showLegacyEntry(mode, ignoring),
+            )
+        }
+    }
+
+    @Test fun vendor_hint_collapses_only_after_seen_and_until_expanded() {
+        assertFalse(BatteryGuidance.vendorHintCollapsed(seen = false, expanded = false))
+        assertTrue(BatteryGuidance.vendorHintCollapsed(seen = true, expanded = false))
+        assertFalse(BatteryGuidance.vendorHintCollapsed(seen = true, expanded = true))
+    }
 }

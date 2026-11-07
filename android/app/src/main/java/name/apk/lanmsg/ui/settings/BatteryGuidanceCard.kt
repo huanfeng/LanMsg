@@ -20,9 +20,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -30,34 +32,52 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.launch
 import name.apk.lanmsg.R
+import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.service.BatteryGuidance
 import name.apk.lanmsg.ui.theme.LanMsgButtons
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import uniffi.lanmsg_api.BackgroundMode
 
-/** 实时档下的后台保活引导：电池优化未豁免时提示，小米系再追加厂商省电策略说明。 */
+/** 系统是否已豁免本应用的电池优化；从系统对话框 / 设置页回来（ON_RESUME）后重新读取。 */
 @Composable
-fun BatteryGuidanceCard(mode: BackgroundMode, modifier: Modifier = Modifier) {
+fun rememberBatteryExempt(): State<Boolean> {
     val ctx = LocalContext.current
-    var ignoring by remember { mutableStateOf(isIgnoringBatteryOptimizations(ctx)) }
-    // 从系统对话框 / 设置页回来后重新读取
+    val state = remember { mutableStateOf(isIgnoringBatteryOptimizations(ctx)) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) ignoring = isIgnoringBatteryOptimizations(ctx)
+            if (event == Lifecycle.Event.ON_RESUME) state.value = isIgnoringBatteryOptimizations(ctx)
         }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
     }
+    return state
+}
+
+/** 实时档下的后台保活引导：电池优化未豁免时提示，小米系再追加厂商省电策略说明。 */
+@Composable
+fun BatteryGuidanceCard(mode: BackgroundMode, ignoring: Boolean, modifier: Modifier = Modifier) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val prefs = ServiceLocator.localPrefs
+    val seen by prefs.vendorHintSeen.collectAsStateWithLifecycle(initialValue = false)
+    var expanded by remember { mutableStateOf(false) }
     val showBattery = BatteryGuidance.shouldShowCard(mode, ignoring)
     val vendor = if (mode == BackgroundMode.REALTIME) BatteryGuidance.vendorOf(Build.MANUFACTURER) else null
     BatteryGuidanceCardContent(
         showBattery = showBattery,
         vendor = vendor,
+        vendorCollapsed = BatteryGuidance.vendorHintCollapsed(seen, expanded),
         onRequestIgnore = { requestIgnoreBatteryOptimizations(ctx) },
-        onOpenAppDetails = { openAppDetails(ctx) },
+        onOpenAppDetails = {
+            openAppDetails(ctx)
+            scope.launch { prefs.setVendorHintSeen() }
+        },
+        onExpandVendor = { expanded = true },
         modifier = modifier,
     )
 }
@@ -66,8 +86,10 @@ fun BatteryGuidanceCard(mode: BackgroundMode, modifier: Modifier = Modifier) {
 internal fun BatteryGuidanceCardContent(
     showBattery: Boolean,
     vendor: BatteryGuidance.Vendor?,
+    vendorCollapsed: Boolean,
     onRequestIgnore: () -> Unit,
     onOpenAppDetails: () -> Unit,
+    onExpandVendor: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     if (!showBattery && vendor == null) return
@@ -90,14 +112,20 @@ internal fun BatteryGuidanceCardContent(
                 Button(onClick = onRequestIgnore) { Text(stringResource(R.string.battery_card_action)) }
             }
             if (vendor == BatteryGuidance.Vendor.XIAOMI) {
-                Text(
-                    stringResource(R.string.battery_vendor_xiaomi),
-                    color = c.inkMuted,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = if (showBattery) 16.dp else 0.dp, bottom = 4.dp),
-                )
-                TextButton(onClick = onOpenAppDetails, colors = LanMsgButtons.text()) {
-                    Text(stringResource(R.string.battery_vendor_action))
+                if (vendorCollapsed) {
+                    TextButton(onClick = onExpandVendor, colors = LanMsgButtons.text()) {
+                        Text(stringResource(R.string.battery_vendor_recheck))
+                    }
+                } else {
+                    Text(
+                        stringResource(R.string.battery_vendor_xiaomi),
+                        color = c.inkMuted,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = if (showBattery) 16.dp else 0.dp, bottom = 4.dp),
+                    )
+                    TextButton(onClick = onOpenAppDetails, colors = LanMsgButtons.text()) {
+                        Text(stringResource(R.string.battery_vendor_action))
+                    }
                 }
             }
         }

@@ -21,7 +21,7 @@ class NetworkLocks(private val wifi: WifiManager, sdkInt: Int = Build.VERSION.SD
         }
     }
 
-    /** 实时档为 true：持有 WifiLock，防止熄屏后 Wi-Fi 进入省电而断开 TCP 连接；否则释放。 */
+    /** 实时档为 true：持有 WifiLock，API 34 以下可防止熄屏后 Wi-Fi 进入省电（34 及以上仅亮屏前台有效，见 wifiLockMode）；否则释放。 */
     fun setWifiLockWanted(wanted: Boolean) {
         if (wanted) {
             if (wifiLock?.isHeld == true) return
@@ -50,8 +50,10 @@ class NetworkLocks(private val wifi: WifiManager, sdkInt: Int = Build.VERSION.SD
         private const val TAG = "lanmsg"
 
         /**
-         * API 34 起 FULL_HIGH_PERF 被系统直接替换成 FULL_LOW_LATENCY（后者仅前台且亮屏时生效），
-         * 所以 34 以下仍用 HIGH_PERF——它在后台、熄屏时也生效；34 及以上只能用 LOW_LATENCY。
+         * 注意：这把锁对后台保活的作用有限。API 34 起系统把 FULL_HIGH_PERF 直接换成
+         * FULL_LOW_LATENCY，而 LOW_LATENCY 只在已连 AP、亮屏且应用在前台时才生效；
+         * 所以 API 34 及以上熄屏后它几乎没有效果，后台保活主要靠豁免电池优化、
+         * 厂商省电策略和自启动。34 以下 HIGH_PERF 在后台也有效，故仍用它。
          */
         @Suppress("DEPRECATION")
         fun wifiLockMode(sdkInt: Int): Int =
