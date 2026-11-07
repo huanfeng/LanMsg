@@ -135,10 +135,9 @@ class CoreHolder(
         } catch (e: ReleasedBeforeStart) {
             throw e
         } catch (e: Throwable) {
-            // 等锁时被取消、或创建失败：回收 owner，否则它会永久占住 core
-            synchronized(lock) {
-                if (ownerSet.remove(owner)) _owners.value = ownerSet.toSet()
-            }
+            // 等锁时被取消、或创建失败：回收 owner，否则它会永久占住 core；
+            // 创建完成的同时被取消时实例已发布，owner 归零则一并关闭
+            release(owner)
             throw e
         }
     }
@@ -150,20 +149,26 @@ class CoreHolder(
         return lifecycle.withLock {
             instance.value?.let { return it }
             awaitPendingShutdown()
-            val created = withContext(io + NonCancellable) { factory().also { applyDownloadDir(it) } } // 创建不可中断：半途取消会留下无人关闭的实例
-            val publish = synchronized(lock) {
-                (ownerSet.isNotEmpty()).also {
-                    if (it) {
-                        instance.value = created
-                        _running.value = true
+            // 创建 + 发布/关闭整体不可中断：withContext 返回时若外层已取消，结果会被丢弃，
+            // 所以必须在返回前就把实例交给 instance（由 acquire 的回收路径负责关闭）或关掉
+            val published = withContext(io + NonCancellable) {
+                val created = factory().also { applyDownloadDir(it) }
+                val publish = synchronized(lock) {
+                    (ownerSet.isNotEmpty()).also {
+                        if (it) {
+                            instance.value = created
+                            _running.value = true
+                        }
                     }
                 }
+                if (publish) {
+                    created
+                } else {
+                    shutdownQuietly(created)
+                    null
+                }
             }
-            if (!publish) {
-                withContext(io + NonCancellable) { shutdownQuietly(created) }
-                throw ReleasedBeforeStart()
-            }
-            created
+            published ?: throw ReleasedBeforeStart()
         }
     }
 

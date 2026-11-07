@@ -28,13 +28,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import name.apk.lanmsg.core.CoreHolder
@@ -116,22 +121,48 @@ internal suspend fun fetchSelf(holder: CoreHolder): SelfInfo = withContext(Dispa
     holder.api.call<Response.SelfInfo>(Request.GetSelf).value
 }
 
+/**
+ * 只在前台（STARTED）期间获取：onStop 会 release("ui")，后台里的在途 acquire 会被取消，
+ * 也不会在后台重新登记 "ui"；下次进入前台时若还没有结果自动重试。
+ * 非生命周期取消的 [CancellationException]（如创建完成前 owner 被放手）按失败处理，避免界面空白。
+ */
+internal suspend fun fetchSelfWhileStarted(
+    lifecycle: Lifecycle,
+    holder: CoreHolder,
+    hasResult: () -> Boolean,
+    onStart: () -> Unit,
+    onSelf: (SelfInfo) -> Unit,
+    onFailure: (String) -> Unit,
+) {
+    lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        if (hasResult()) return@repeatOnLifecycle
+        onStart()
+        try {
+            onSelf(fetchSelf(holder))
+        } catch (e: CancellationException) {
+            if (!currentCoroutineContext().isActive) throw e
+            onFailure(e.message ?: e.toString())
+        } catch (e: Exception) {
+            onFailure(e.message ?: e.toString())
+        }
+    }
+}
+
 /** 据 [fetchSelf] 的结果选起始路由；等待期间只显示主题背景，失败显示错误并可重试。 */
 @Composable
 private fun Launcher(incoming: ShareData?, onShareConsumed: () -> Unit, shareVm: () -> SharePickViewModel) {
     var start by remember { mutableStateOf<String?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
     var attempt by remember { mutableIntStateOf(0) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(attempt) {
-        failure = null
-        try {
-            val self = fetchSelf(ServiceLocator.coreHolder)
-            start = if (self.initialized) Routes.CONVS else Routes.ONBOARDING
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            failure = e.message ?: e.toString()
-        }
+        fetchSelfWhileStarted(
+            lifecycle, ServiceLocator.coreHolder,
+            hasResult = { start != null },
+            onStart = { failure = null },
+            onSelf = { start = if (it.initialized) Routes.CONVS else Routes.ONBOARDING },
+            onFailure = { failure = it },
+        )
     }
     val route = start
     val c = LanMsgColors.current

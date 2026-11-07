@@ -169,6 +169,23 @@ class CoreHolderTest {
         scope.cancel()
     }
 
+    @Test fun acquire_cancelled_while_core_is_being_created_still_shuts_it_down() = runBlocking {
+        val gate = CountDownLatch(1)
+        val entered = CountDownLatch(1)
+        val fake = FakeCoreApi()
+        val scope = CoroutineScope(SupervisorJob())
+        val holder = CoreHolder({ entered.countDown(); gate.await(); fake }, scope, Dispatchers.IO)
+        val job = launch(Dispatchers.Default) { holder.acquire("ui") }
+        withTimeout(2_000) { while (entered.count > 0L) delay(5) }
+        job.cancel() // 创建不可中断，此时只标记取消
+        gate.countDown()
+        job.join()
+        withTimeout(2_000) { while (!fake.shutdownCalled) delay(10) }
+        assertEquals(emptySet<String>(), holder.owners.value)
+        assertFalse(holder.running.value)
+        scope.cancel()
+    }
+
     @Test fun shutdown_that_hangs_times_out_and_lets_next_acquire_proceed() = runBlocking {
         val gate = CountDownLatch(1)
         val scope = CoroutineScope(SupervisorJob())
