@@ -21,17 +21,19 @@ use crate::store::{ConvRow, MsgStateRow, PreparingKind, PreparingRow, Store, Sto
 ///   的持有者 → `Remote`；否则 `SourceOffline`。
 /// - `thumb_path`：meta.thumb 存在时写 `<data_dir>/cache/thumbs/<hash>.jpg`
 ///   （已存在则跳过写）并返回该路径。
-/// - `source_label`：本地有 → `"来自 {作者} · 已下载"`；否则 `"来自 {作者} ·
-///   存于 {首个在线持有者设备名 | 首个持有者设备名 | 作者设备名}"`。
+/// - 来源：`source_name` = 作者显示名，`source_is_me` = 作者是否本机用户；
+///   `holder_name`：本地没有时为 {首个在线持有者设备名 | 首个持有者设备名 |
+///   作者设备名}，本地有时为 None。
 ///
-/// `peers` 为当前已连接对端（在线持有者判定）；`author_display` 为已按
-/// is_mine 解析的作者显示名（自己显示为"我"）。
+/// `peers` 为当前已连接对端（在线持有者判定）；`author_display` 为作者显示名，
+/// `author_is_me` 为作者是否本机用户。
 pub(crate) fn file_item_view(
     store: &Store,
     peers: &[PeerInfo],
     author_device: &DeviceId,
     meta: &BlobMeta,
     author_display: &str,
+    author_is_me: bool,
 ) -> FileItemView {
     let preparing = store.list_preparing().unwrap_or_default();
     file_item_view_with(
@@ -40,6 +42,7 @@ pub(crate) fn file_item_view(
         author_device,
         meta,
         author_display,
+        author_is_me,
         &preparing,
     )
 }
@@ -51,6 +54,7 @@ pub(crate) fn file_item_view_with(
     author_device: &DeviceId,
     meta: &BlobMeta,
     author_display: &str,
+    author_is_me: bool,
     preparing: &[PreparingRow],
 ) -> FileItemView {
     let local = store.get_local(&meta.hash).ok().flatten();
@@ -120,19 +124,20 @@ pub(crate) fn file_item_view_with(
             .unwrap_or_else(|| d.short())
     };
     let holders = store.holders(&meta.hash).unwrap_or_default();
-    let source_label = if local.is_some() {
-        format!("来自 {author_display} · 已下载")
+    let holder_name = if local.is_some() {
+        None
     } else {
-        let holder_name = online_holder
-            .as_ref()
-            .map(device_name_of)
-            .unwrap_or_else(|| {
-                holders
-                    .first()
-                    .map(device_name_of)
-                    .unwrap_or_else(|| device_name_of(author_device))
-            });
-        format!("来自 {author_display} · 存于 {holder_name}")
+        Some(
+            online_holder
+                .as_ref()
+                .map(device_name_of)
+                .unwrap_or_else(|| {
+                    holders
+                        .first()
+                        .map(device_name_of)
+                        .unwrap_or_else(|| device_name_of(author_device))
+                }),
+        )
     };
 
     FileItemView {
@@ -148,7 +153,9 @@ pub(crate) fn file_item_view_with(
             .as_ref()
             .map(|l| l.path.to_string_lossy().into_owned()),
         state,
-        source_label,
+        source_name: name_or(author_display, author_device.short()),
+        source_is_me: author_is_me,
+        holder_name,
     }
 }
 
@@ -210,7 +217,9 @@ pub fn preparing_view(
                 thumb_path: None,
                 local_path: None,
                 state: BlobState::Preparing,
-                source_label: String::new(),
+                source_name: String::new(),
+                source_is_me: false,
+                holder_name: None,
             }
         })
         .collect();
@@ -330,7 +339,16 @@ pub fn message_view(
         (MsgBody::Files { items }, _) => MessageBodyView::Files {
             items: items
                 .iter()
-                .map(|b| file_item_view(store, peers, &author_device, b, &author_display_name))
+                .map(|b| {
+                    file_item_view(
+                        store,
+                        peers,
+                        &author_device,
+                        b,
+                        &author_display_name,
+                        is_mine,
+                    )
+                })
                 .collect(),
         },
         (MsgBody::Folder { name, entries }, _) => MessageBodyView::Folder {
@@ -338,7 +356,14 @@ pub fn message_view(
             items: entries
                 .iter()
                 .map(|e| {
-                    file_item_view(store, peers, &author_device, &e.blob, &author_display_name)
+                    file_item_view(
+                        store,
+                        peers,
+                        &author_device,
+                        &e.blob,
+                        &author_display_name,
+                        is_mine,
+                    )
                 })
                 .collect(),
         },
@@ -959,6 +984,58 @@ mod tests {
             } => {
                 assert!(!by_me);
                 assert_eq!(author_name, AUTHOR.short());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// 作者设备与本机设备同属一个用户 → by_me 为真，名字取用户显示名。
+    #[test]
+    fn recalled_by_own_user_sets_by_me_true() {
+        use crate::store::{DeviceRow, UserRow};
+        use lanmsg_proto::sign::UserKey;
+        use lanmsg_proto::types::DeviceType;
+        let s = Store::open_in_memory().unwrap();
+        let user_key = UserKey::generate();
+        let user = user_key.user_id();
+        s.upsert_user(&UserRow {
+            user,
+            display_name: "小李".into(),
+            is_self: true,
+            updated_at: 0,
+        })
+        .unwrap();
+        let self_dev = DeviceId([7u8; 32]);
+        for dev in [AUTHOR, self_dev] {
+            s.upsert_device(&DeviceRow {
+                device: dev,
+                user,
+                cert: lanmsg_proto::types::DeviceCert::issue(
+                    &user_key,
+                    dev,
+                    "pc".into(),
+                    DeviceType::Desktop,
+                    1,
+                ),
+                name: "pc".into(),
+                device_type: DeviceType::Desktop,
+                last_addr: None,
+                last_path: None,
+                last_seen: None,
+                revoked: false,
+            })
+            .unwrap();
+        }
+        let id = put(&s, 1, MsgBody::Text { text: "x".into() });
+        s.set_message_state(&id, MsgStateRow::Recalled).unwrap();
+        let stored = s.get_message(&id).unwrap().unwrap();
+        let v = message_view(&s, &self_dev, &[], &stored);
+        match v.body {
+            MessageBodyView::System {
+                event: SystemEventView::Recalled { author_name, by_me },
+            } => {
+                assert!(by_me);
+                assert_eq!(author_name, "小李");
             }
             other => panic!("unexpected {other:?}"),
         }

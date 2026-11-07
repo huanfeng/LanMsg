@@ -73,11 +73,8 @@ fun MessageBubble(
     val c = LanMsgColors.current
     // 撤回、系统消息、不支持的类型：居中灰字，无气泡
     if (msg.state == MessageState.RECALLED) {
-        val b = msg.body
-        CenterNote(
-            if (b is MessageBodyView.System) systemEventText(b.event)
-            else stringResource(if (msg.isMine) R.string.msg_recalled_by_me else R.string.msg_recalled),
-        )
+        // core 保证撤回消息的正文是 System{Recalled}
+        (msg.body as? MessageBodyView.System)?.let { CenterNote(systemEventText(it.event)) }
         return
     }
     val body = msg.body

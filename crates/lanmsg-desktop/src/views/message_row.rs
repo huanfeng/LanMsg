@@ -7,7 +7,7 @@ use lanmsg_api::types::*;
 use windui::event::MenuItem;
 use windui::prelude::*;
 
-use crate::event_text::system_event_text;
+use crate::event_text::{source_line, system_event_text};
 use crate::model::{effective_state, Model, TransferInfo};
 use crate::strings;
 use crate::style;
@@ -465,17 +465,14 @@ fn single_file_card(ui: &UiState, item: &FileItemView) -> Element {
         icon_bytes(file_icon(&item.mime, &item.name)),
         &item.name,
         human_size(item.size),
-        &item.source_label,
+        &source_line(item),
         std::slice::from_ref(item),
     )
 }
 
 fn folder_card(ui: &UiState, name: &str, items: &[FileItemView]) -> Element {
     let total: u64 = items.iter().map(|i| i.size).sum();
-    let source = items
-        .first()
-        .map(|i| i.source_label.clone())
-        .unwrap_or_default();
+    let source = items.first().map(source_line).unwrap_or_default();
     file_card(
         ui,
         style::ICON_FILES,
@@ -836,7 +833,9 @@ mod tests {
             thumb_path: None,
             local_path: None,
             state,
-            source_label: String::new(),
+            source_name: String::new(),
+            source_is_me: false,
+            holder_name: None,
         }
     }
 

@@ -21,7 +21,7 @@ class ChatScreenTest {
     @get:Rule val compose = createComposeRule()
 
     @Test fun recalled_message_shows_placeholder_text() {
-        val recalled = Fixtures.textMsg("m1", mine = false).copy(state = MessageState.RECALLED)
+        val recalled = Fixtures.recalledMsg("m1", mine = false, authorName = "对端")
         compose.setContent {
             LanMsgTheme {
                 ChatContent(
@@ -31,11 +31,11 @@ class ChatScreenTest {
                 )
             }
         }
-        compose.onNodeWithText("对方撤回了一条消息").assertExists()
+        compose.onNodeWithText("对端 撤回了一条消息").assertExists()
     }
 
     @Test fun own_recalled_message_shows_own_placeholder() {
-        val recalled = Fixtures.textMsg("m1", mine = true).copy(state = MessageState.RECALLED)
+        val recalled = Fixtures.recalledMsg("m1", mine = true, authorName = "小李")
         compose.setContent {
             LanMsgTheme {
                 ChatContent(

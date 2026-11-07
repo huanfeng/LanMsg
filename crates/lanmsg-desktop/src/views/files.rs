@@ -12,7 +12,7 @@ use windui::event::MenuItem;
 use windui::prelude::*;
 
 use crate::debounce::Debouncer;
-use crate::event_text::conv_title;
+use crate::event_text::{conv_title, file_conv_title, source_from, source_status};
 use crate::model::{effective_state, Model, Page};
 use crate::strings;
 use crate::style;
@@ -94,17 +94,6 @@ pub fn state_index(state: &Option<BlobState>) -> usize {
 /// 图片与视频用网格，其余用列表。
 pub fn is_grid(kind: &FileKindFilter) -> bool {
     matches!(kind, FileKindFilter::Image | FileKindFilter::Video)
-}
-
-/// 把“来自 张三 · 存于 我的台式机”拆成独立的几段：界面上各段分开摆放，不用中点拼接。
-/// 依赖 core 返回的 `source_label` 以 `" · "`（中点两侧各一个空格）分段；core 改了分隔符这里要同步。
-pub fn split_source(label: &str) -> Vec<String> {
-    label
-        .split(" · ")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect()
 }
 
 /// 列表里的一行：列表模式一项一行，网格模式 `GRID_COLS` 项一行。
@@ -249,8 +238,8 @@ fn state_code(s: &BlobState) -> u8 {
 }
 
 /// 列表项第二行的信息段：大小、（视频）时长、时间、“来自 X”；
-/// 会话名已在来源里出现（如私聊“来自 张三”）时不再重复。
-/// 来源里其余的段（“存于 X”、状态）归右侧操作区，见 `status_parts`。
+/// 会话就是对方本人（私聊里对方发来的文件）时不再重复会话名。
+/// “存于 X”、“已下载”归右侧操作区，见 `status_parts`。
 pub fn meta_parts(f: &FileView, time_text: String) -> Vec<String> {
     let item = &f.item;
     let mut parts = vec![human_size(item.size)];
@@ -260,20 +249,18 @@ pub fn meta_parts(f: &FileView, time_text: String) -> Vec<String> {
         }
     }
     parts.push(time_text);
-    parts.extend(split_source(&item.source_label).into_iter().take(1));
-    if !f.conv_title.is_empty() && !item.source_label.contains(&f.conv_title) {
-        parts.push(strings::files_in_conv(&f.conv_title));
+    parts.push(source_from(item));
+    let title = file_conv_title(f);
+    let is_sender_dm = !item.source_is_me && title == item.source_name;
+    if !title.is_empty() && !is_sender_dm {
+        parts.push(strings::files_in_conv(&title));
     }
     parts
 }
 
-/// 放在右侧操作区按钮下方的说明：来源里“来自 X”之后的各段（“存于 X”、“已下载”）。
+/// 放在右侧操作区按钮下方的说明：“存于 X” 或 “已下载”。
 pub fn status_parts(f: &FileView) -> String {
-    split_source(&f.item.source_label)
-        .into_iter()
-        .skip(1)
-        .collect::<Vec<_>>()
-        .join("  ")
+    source_status(&f.item)
 }
 
 fn meta_label(text: impl Into<TextContent>, role: Role) -> Element {
@@ -652,13 +639,8 @@ fn grid_tile(ui: &UiState, f: &FileView, confirm: ConfirmState) -> Element {
                 .truncate(Truncate::End)
                 .width(TILE),
         )
-        .child(meta_label(tile_source(&item.source_label), Role::TextSubtle).width(TILE))
+        .child(meta_label(source_from(item), Role::TextSubtle).width(TILE))
         .on_context_menu(menu_builder(ui, f, confirm))
-}
-
-/// 磁贴下方的来源：只取第一段（“来自 张三”），磁贴窄放不下全部。
-pub fn tile_source(label: &str) -> String {
-    split_source(label).into_iter().next().unwrap_or_default()
 }
 
 /// 网格一行：windui 取不到容器宽度，无法按宽度算列数，所以整行在内容区里居中。
@@ -826,10 +808,13 @@ mod tests {
                 thumb_path: None,
                 local_path: None,
                 state: BlobState::Remote,
-                source_label: String::new(),
+                source_name: String::new(),
+                source_is_me: false,
+                holder_name: None,
             },
             conv: "c".into(),
             conv_title: "c".into(),
+            conv_kind: ConvKind::Dm,
             msg: msg.into(),
             hlc_millis: 1,
         }
@@ -872,48 +857,24 @@ mod tests {
     }
 
     #[test]
-    fn split_source_separates_parts_without_dot() {
-        assert_eq!(
-            split_source("来自 张三 · 存于 我的台式机"),
-            vec!["来自 张三", "存于 我的台式机"]
-        );
-        assert_eq!(
-            split_source("来自 张三 · 已下载"),
-            vec!["来自 张三", "已下载"]
-        );
-        assert!(split_source("").is_empty());
-    }
-
-    #[test]
-    fn split_source_handles_missing_and_repeated_separators() {
-        // 无分隔：整段作为一项
-        assert_eq!(split_source("来自 张三"), vec!["来自 张三"]);
-        // 多个分隔：每段各成一项
-        assert_eq!(
-            split_source("来自 张三 · 存于 台式机 · 已下载"),
-            vec!["来自 张三", "存于 台式机", "已下载"]
-        );
-        // 首尾 / 连续分隔产生的空段被丢弃
-        assert_eq!(
-            split_source(" · 来自 张三 ·  · 已下载 · "),
-            vec!["来自 张三", "已下载"]
-        );
-        // 没有空格的中点不是分隔符
-        assert_eq!(split_source("甲·乙"), vec!["甲·乙"]);
-    }
-
-    #[test]
-    fn meta_parts_skip_conv_already_in_source_and_add_video_duration() {
+    fn meta_parts_skip_conv_when_it_is_the_sender_and_add_video_duration() {
         let mut f = fv("m", "h");
-        f.item.source_label = "来自 张三 · 存于 我的台式机".into();
+        f.item.source_name = "张三".into();
+        f.item.holder_name = Some("我的台式机".into());
         f.conv_title = "张三".into();
         let p = meta_parts(&f, "昨天".into());
         assert_eq!(p, vec!["1 B", "昨天", "来自 张三"]);
         assert_eq!(status_parts(&f), "存于 我的台式机");
-        // 会话名没出现在来源里时补一段
+        // 会话不是发送者本人时补一段会话名
         f.conv_title = "项目群".into();
         let p = meta_parts(&f, "昨天".into());
         assert_eq!(p.last().map(String::as_str), Some("会话 项目群"));
+        // 自己发出的文件：来源显示“来自我”，私聊会话名仍补上
+        f.item.source_is_me = true;
+        f.conv_title = "张三".into();
+        let p = meta_parts(&f, "昨天".into());
+        assert_eq!(p[2], "来自我");
+        assert_eq!(p.last().map(String::as_str), Some("会话 张三"));
         // 视频带时长
         f.item.mime = "video/mp4".into();
         f.item.name = "a.mp4".into();
@@ -922,9 +883,21 @@ mod tests {
     }
 
     #[test]
-    fn tile_source_takes_first_segment() {
-        assert_eq!(tile_source("来自 张三 · 存于 我的台式机"), "来自 张三");
-        assert_eq!(tile_source(""), "");
+    fn self_devices_conv_label_is_localized_by_kind() {
+        let mut f = fv("m", "h");
+        f.item.source_is_me = true;
+        f.conv_title = String::new();
+        f.conv_kind = ConvKind::SelfDevices;
+        let p = meta_parts(&f, "今天".into());
+        assert_eq!(p.last().map(String::as_str), Some("会话 我的设备"));
+    }
+
+    #[test]
+    fn local_file_status_is_downloaded() {
+        let mut f = fv("m", "h");
+        f.item.state = BlobState::Local;
+        f.item.holder_name = None;
+        assert_eq!(status_parts(&f), "已下载");
     }
 
     #[test]

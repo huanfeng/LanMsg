@@ -33,6 +33,11 @@ object Fixtures {
     fun textMsg(id: String, conv: String = "c1", text: String = "你好", mine: Boolean = false, millis: Long = 1000): MessageView =
         message(id, conv, mine, millis, MessageBodyView.Text(text))
 
+    /** 撤回的消息：状态为 RECALLED，正文是 System{Recalled}（与 core 一致）。 */
+    fun recalledMsg(id: String, conv: String = "c1", mine: Boolean = false, authorName: String = "对端"): MessageView =
+        message(id, conv, mine, 1000, MessageBodyView.System(SystemEventView.Recalled(authorName, mine)))
+            .copy(state = MessageState.RECALLED)
+
     fun systemMsg(id: String, conv: String = "c1", event: SystemEventView = SystemEventView.MessagesDeleted(1u)): MessageView =
         message(id, conv, false, 1000, MessageBodyView.System(event))
 
@@ -44,7 +49,7 @@ object Fixtures {
                     FileItemView(
                         hash = hash, name = "a.bin", size = 10uL, mime = "application/octet-stream",
                         width = null, height = null, durationMs = null, thumbPath = null, localPath = null,
-                        state = state, sourceLabel = "设备一",
+                        state = state, sourceName = "设备一", sourceIsMe = false, holderName = null,
                     ),
                 ),
             ),

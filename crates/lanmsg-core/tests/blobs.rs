@@ -768,8 +768,40 @@ async fn poll_file_item(
     }
 }
 
+/// 未下载：holder_name 为在线持有者的设备名，来源名是作者显示名。
 #[tokio::test]
-async fn small_image_from_contact_auto_downloads() {
+async fn file_source_fields_remote_holder() {
+    let (mut a, mut x) = contact_pair_no_auto().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = make_file(dir.path(), "remote.bin", 2048);
+    let (conv, hash) = send_and_wait(&mut a, &mut x, &path, 2048).await;
+    let item = poll_file_item(
+        &x,
+        &conv,
+        |it| it.hash == hash && it.state == BlobState::Remote,
+        10,
+    )
+    .await;
+    assert_eq!(item.source_name, "A");
+    assert!(!item.source_is_me);
+    assert_eq!(item.holder_name.as_deref(), Some("A"));
+}
+
+/// 自己发出的文件：source_is_me 为真，且本机持有（holder_name 为 None）。
+#[tokio::test]
+async fn file_source_is_me_for_own_files() {
+    let (mut a, mut x) = contact_pair_no_auto().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = make_file(dir.path(), "mine.bin", 2048);
+    let (conv, hash) = send_and_wait(&mut a, &mut x, &path, 2048).await;
+    let item = poll_file_item(&a, &conv, |it| it.hash == hash, 10).await;
+    assert!(item.source_is_me);
+    assert_eq!(item.state, BlobState::Local);
+    assert_eq!(item.holder_name, None);
+}
+
+#[tokio::test]
+async fn file_source_fields_local() {
     let (mut a, mut x) = contact_pair().await;
     let dl = tempfile::tempdir().unwrap();
     set_download_dir(&x, dl.path()).await;
@@ -784,11 +816,9 @@ async fn small_image_from_contact_auto_downloads() {
         10,
     )
     .await;
-    assert!(
-        item.source_label.starts_with("来自 A") && item.source_label.ends_with("已下载"),
-        "source_label 应为 来自 A … 已下载，实际 {}",
-        item.source_label
-    );
+    assert_eq!(item.source_name, "A");
+    assert!(!item.source_is_me);
+    assert_eq!(item.holder_name, None, "本地已有时不应有 holder_name");
     // 落地内容与源文件一致。
     let local_path = item.local_path.expect("本地路径应存在");
     assert_eq!(

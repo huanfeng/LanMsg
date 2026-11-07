@@ -897,7 +897,9 @@ mod tests {
             thumb_path: None,
             local_path: None,
             state: BlobState::Remote,
-            source_label: String::new(),
+            source_name: String::new(),
+            source_is_me: false,
+            holder_name: None,
         }
     }
 

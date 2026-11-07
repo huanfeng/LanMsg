@@ -1369,6 +1369,34 @@ mod tests {
         );
     }
 
+    /// 多个条件同时失败时，返回校验链里先判断的那一个。
+    #[test]
+    fn first_failing_check_wins_when_several_fail() {
+        let dev = DeviceId([1u8; 32]);
+        // 证书给别的设备 + 验签失败 + 身份不符 + 空显示名：先报 CertMismatch。
+        let mut b = valid_bundle(dev);
+        b.device_cert.device_name = "tampered".into();
+        b.user_secret = UserKey::generate().to_bytes();
+        b.display_name = String::new();
+        assert_eq!(
+            validate_bundle(&b, &DeviceId([2u8; 32])),
+            Some(PairFailReason::CertMismatch)
+        );
+        // 设备对得上：验签失败先于身份不符、显示名。
+        assert_eq!(
+            validate_bundle(&b, &dev),
+            Some(PairFailReason::BadSignature)
+        );
+        // 验签通过：身份不符先于显示名。
+        let mut b = valid_bundle(dev);
+        b.user_secret = UserKey::generate().to_bytes();
+        b.display_name = String::new();
+        assert_eq!(
+            validate_bundle(&b, &dev),
+            Some(PairFailReason::IdentityMismatch)
+        );
+    }
+
     #[test]
     fn empty_display_name_is_invalid_name() {
         let dev = DeviceId([1u8; 32]);

@@ -11,6 +11,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
+import uniffi.lanmsg_api.ConvKind
 import uniffi.lanmsg_api.BlobState
 import uniffi.lanmsg_api.FileItemView
 import uniffi.lanmsg_api.FileKindFilter
@@ -25,10 +26,10 @@ class ImageViewerViewModelTest {
     private fun item(hash: String) = FileItemView(
         hash = hash, name = "$hash.png", size = 10uL, mime = "image/png",
         width = null, height = null, durationMs = null, thumbPath = null, localPath = "/x/$hash.png",
-        state = BlobState.LOCAL, sourceLabel = "设备一",
+        state = BlobState.LOCAL, sourceName = "设备一", sourceIsMe = false, holderName = null,
     )
 
-    private fun fileView(hash: String, millis: Long) = FileView(item(hash), "c1", "会话", "m-$hash", millis)
+    private fun fileView(hash: String, millis: Long) = FileView(item(hash), "c1", "会话", ConvKind.DM, "m-$hash", millis)
 
     @Test fun image_older_than_recent_200_messages_is_found_via_file_view() = runTest {
         val core = FakeCoreApi()

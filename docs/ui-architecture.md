@@ -166,8 +166,6 @@
 | msg_recall | 撤回 |
 | msg_delete | 删除 |
 | msg_copy | 复制 |
-| msg_recalled_by_me | 你撤回了一条消息 |
-| msg_recalled | 对方撤回了一条消息 |
 | sys_device_added | 已添加设备：%1$s |
 | sys_device_removed | 已移除设备：%1$s |
 | sys_contact_added | 已添加联系人：%1$s |
@@ -196,6 +194,12 @@
 | files_archive | 压缩包 |
 | files_other | 其他 |
 | files_state_downloaded | 已下载 |
+| file_source_me | 来自我 |
+| file_source_me_downloaded | 来自我 · 已下载 |
+| file_source_me_stored | 来自我 · 存于 %1$s |
+| file_source_from | 来自 %1$s |
+| file_source_downloaded | 来自 %1$s · 已下载 |
+| file_source_stored | 来自 %1$s · 存于 %2$s |
 | files_state_remote | 未下载 |
 | files_filter | 筛选 |
 | files_source_device | %1$s（%2$s） |

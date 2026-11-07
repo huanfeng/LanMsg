@@ -97,6 +97,11 @@ pub const SYS_DELETED_PREFIX: &str = "已删除 ";
 pub const SYS_DELETED_SUFFIX: &str = " 条消息";
 pub const SYS_RECALLED_BY_ME: &str = "你撤回了一条消息";
 pub const SYS_RECALLED_BY_PEER: &str = " 撤回了一条消息";
+/// 文件来源文案：来自谁、存于哪里。
+pub const SOURCE_FROM_ME: &str = "来自我";
+pub const SOURCE_FROM_PREFIX: &str = "来自 ";
+pub const SOURCE_DOWNLOADED: &str = "已下载";
+pub const SOURCE_STORED_PREFIX: &str = "存于 ";
 /// 自设备会话的标题（core 给空串，界面按 kind 显示）。
 pub const SELF_DEVICES_TITLE: &str = "我的设备";
 pub const MSG_UNSUPPORTED: &str = "不支持的消息类型，请升级";

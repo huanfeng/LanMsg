@@ -492,7 +492,13 @@ pub struct FileItemView {
     pub thumb_path: Option<String>,
     pub local_path: Option<String>,
     pub state: BlobState,
-    pub source_label: String,
+    /// 文件作者的显示名（名字缺失时为设备短 ID，非空）。
+    pub source_name: String,
+    /// 作者是否为本机用户自己（界面据此显示“我”）。
+    pub source_is_me: bool,
+    /// 未下载时持有该文件的设备名（在线持有者 → 首个持有者 → 作者设备）；
+    /// 已在本机时为 None。“已下载”由 `state == Local` 推出。
+    pub holder_name: Option<String>,
 }
 
 /// 消息视图。
@@ -708,7 +714,9 @@ pub struct FileFilter {
 pub struct FileView {
     pub item: FileItemView,
     pub conv: String,
+    /// 会话标题；自设备会话为空串，界面按 `conv_kind` 本地化。
     pub conv_title: String,
+    pub conv_kind: ConvKind,
     pub msg: String,
     pub hlc_millis: i64,
 }

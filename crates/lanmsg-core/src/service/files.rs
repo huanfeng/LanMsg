@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use lanmsg_api::types::{BlobState, FileFilter, FileView, MessageView};
+use lanmsg_api::types::{BlobState, ConvKind, FileFilter, FileView, MessageView};
 use lanmsg_proto::ids::{BlobHash, ConvId, DeviceId, UserId};
 use lanmsg_proto::types::{BlobMeta, MsgBody};
 
@@ -68,7 +68,7 @@ fn scan_files(
 ) -> Result<Vec<FileView>, CoreError> {
     let limit = base.limit;
     let preparing = store.list_preparing()?;
-    let mut titles: HashMap<ConvId, String> = HashMap::new();
+    let mut titles: HashMap<ConvId, (String, ConvKind)> = HashMap::new();
     let mut out: Vec<FileView> = Vec::new();
     let mut before = base.before_millis;
     let mut scanned: u32 = 0;
@@ -90,25 +90,28 @@ fn scan_files(
                 continue;
             };
             let author_display = author_display_name(store, &row.msg.author);
+            let author_is_me = is_own_device(store, self_user.as_ref(), &row.msg.author);
             let item = file_item_view_with(
                 store,
                 peers,
                 &row.msg.author,
                 &mb.meta,
                 &author_display,
+                author_is_me,
                 &preparing,
             );
             if state.as_ref().is_some_and(|s| *s != item.state) {
                 continue;
             }
-            let title = titles
+            let (title, kind) = titles
                 .entry(row.conv)
-                .or_insert_with(|| conv_title(store, self_user.as_ref(), &row.conv))
+                .or_insert_with(|| conv_title_kind(store, self_user.as_ref(), &row.conv))
                 .clone();
             out.push(FileView {
                 item,
                 conv: row.conv.to_hex(),
                 conv_title: title,
+                conv_kind: kind,
                 msg: stored.env.id.to_string(),
                 hlc_millis: row.hlc_millis,
             });
@@ -193,10 +196,63 @@ fn author_display_name(store: &Store, author: &DeviceId) -> String {
     }
 }
 
-/// 会话标题（规则同会话列表）；会话不存在时回退为空串。
-fn conv_title(store: &Store, self_user: Option<&UserId>, conv: &ConvId) -> String {
+/// 会话标题与类型（规则同会话列表）；会话不存在时回退为空串与 Guest。
+fn conv_title_kind(store: &Store, self_user: Option<&UserId>, conv: &ConvId) -> (String, ConvKind) {
     match store.get_conversation(conv) {
-        Ok(Some(row)) => conv_summary(store, self_user, &row, false).title,
-        _ => String::new(),
+        Ok(Some(row)) => {
+            let sum = conv_summary(store, self_user, &row, false);
+            (sum.title, sum.kind)
+        }
+        _ => (String::new(), ConvKind::Guest),
+    }
+}
+
+/// 作者设备是否属于本机用户。
+fn is_own_device(store: &Store, self_user: Option<&UserId>, device: &DeviceId) -> bool {
+    store
+        .get_device(device)
+        .ok()
+        .flatten()
+        .zip(self_user)
+        .is_some_and(|(r, u)| r.user == *u)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{ConvKindRow, ConvRow};
+
+    fn put_conv(s: &Store, kind: ConvKindRow, title: Option<&str>) -> ConvId {
+        let conv = ConvId([5u8; 32]);
+        s.ensure_conversation(&ConvRow {
+            conv,
+            kind,
+            peer_user: None,
+            title: title.map(String::from),
+            created_at: 0,
+        })
+        .unwrap();
+        conv
+    }
+
+    /// 自设备会话：标题为空串，界面按 kind 本地化。
+    #[test]
+    fn self_devices_conv_reports_empty_title_and_kind() {
+        let s = Store::open_in_memory().unwrap();
+        let conv = put_conv(&s, ConvKindRow::SelfDevices, Some("ignored"));
+        assert_eq!(
+            conv_title_kind(&s, None, &conv),
+            (String::new(), ConvKind::SelfDevices)
+        );
+    }
+
+    #[test]
+    fn guest_conv_keeps_stored_title_and_kind() {
+        let s = Store::open_in_memory().unwrap();
+        let conv = put_conv(&s, ConvKindRow::Guest, Some("web guest"));
+        assert_eq!(
+            conv_title_kind(&s, None, &conv),
+            ("web guest".to_string(), ConvKind::Guest)
+        );
     }
 }

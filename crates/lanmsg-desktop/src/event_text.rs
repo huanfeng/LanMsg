@@ -1,7 +1,9 @@
 // 结构化数据到界面文案的映射：系统消息与会话标题。
 // core 只给结构（SystemEventView、ConvKind），文案只在 strings.rs。
 
-use lanmsg_api::types::{ConvKind, ConversationSummary, SystemEventView};
+use lanmsg_api::types::{
+    BlobState, ConvKind, ConversationSummary, FileItemView, FileView, SystemEventView,
+};
 
 use crate::strings;
 
@@ -41,6 +43,45 @@ pub fn conv_title(c: &ConversationSummary) -> String {
     match c.kind {
         ConvKind::SelfDevices => strings::SELF_DEVICES_TITLE.to_string(),
         _ => c.title.clone(),
+    }
+}
+
+/// 文件来源的“来自谁”：自己发出的显示“来自我”，其余“来自 {名字}”。
+pub fn source_from(item: &FileItemView) -> String {
+    if item.source_is_me {
+        strings::SOURCE_FROM_ME.to_string()
+    } else {
+        format!("{}{}", strings::SOURCE_FROM_PREFIX, item.source_name)
+    }
+}
+
+/// 文件来源的状态：本机已有 → “已下载”；否则 “存于 {持有者}”；两者都没有则空。
+pub fn source_status(item: &FileItemView) -> String {
+    if item.state == BlobState::Local {
+        strings::SOURCE_DOWNLOADED.to_string()
+    } else {
+        match &item.holder_name {
+            Some(h) => format!("{}{h}", strings::SOURCE_STORED_PREFIX),
+            None => String::new(),
+        }
+    }
+}
+
+/// 聊天里文件卡片的单行来源：“来自 X · 已下载”。
+pub fn source_line(item: &FileItemView) -> String {
+    let status = source_status(item);
+    if status.is_empty() {
+        source_from(item)
+    } else {
+        format!("{} · {status}", source_from(item))
+    }
+}
+
+/// 文件视图所属会话的标题：自设备会话按 kind 本地化。
+pub fn file_conv_title(f: &FileView) -> String {
+    match f.conv_kind {
+        ConvKind::SelfDevices => strings::SELF_DEVICES_TITLE.to_string(),
+        _ => f.conv_title.clone(),
     }
 }
 
@@ -113,5 +154,35 @@ mod tests {
     fn self_devices_title_is_localized_by_kind() {
         assert_eq!(conv_title(&summary(ConvKind::SelfDevices, "")), "我的设备");
         assert_eq!(conv_title(&summary(ConvKind::Dm, "小王")), "小王");
+    }
+
+    fn item(state: BlobState, is_me: bool, holder: Option<&str>) -> FileItemView {
+        FileItemView {
+            hash: "h".into(),
+            name: "a.bin".into(),
+            size: 1,
+            mime: "application/octet-stream".into(),
+            width: None,
+            height: None,
+            duration_ms: None,
+            thumb_path: None,
+            local_path: None,
+            state,
+            source_name: "张三".into(),
+            source_is_me: is_me,
+            holder_name: holder.map(String::from),
+        }
+    }
+
+    #[test]
+    fn file_source_texts_by_fields() {
+        let downloaded = item(BlobState::Local, true, None);
+        assert_eq!(source_line(&downloaded), "来自我 · 已下载");
+        let remote = item(BlobState::Remote, false, Some("张三的笔记本"));
+        assert_eq!(source_line(&remote), "来自 张三 · 存于 张三的笔记本");
+        assert_eq!(source_from(&remote), "来自 张三");
+        assert_eq!(source_status(&remote), "存于 张三的笔记本");
+        let nowhere = item(BlobState::SourceOffline, false, None);
+        assert_eq!(source_line(&nowhere), "来自 张三");
     }
 }

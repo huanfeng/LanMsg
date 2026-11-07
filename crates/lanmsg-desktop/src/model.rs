@@ -2401,7 +2401,9 @@ mod tests {
             width: None,
             height: None,
             duration_ms: None,
-            source_label: String::new(),
+            source_name: String::new(),
+            source_is_me: false,
+            holder_name: None,
         }
     }
 
@@ -3275,6 +3277,7 @@ mod tests {
             item: remote_item(&format!("h{i}")),
             conv: "c1".into(),
             conv_title: "小王".into(),
+            conv_kind: ConvKind::Dm,
             msg: format!("m{i}"),
             hlc_millis: 10_000 - i as i64,
         }

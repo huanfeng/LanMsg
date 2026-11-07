@@ -62,6 +62,8 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import coil.compose.AsyncImage
 import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.fileSourceText
+import uniffi.lanmsg_api.ConvKind
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.files.FileOpener
 import name.apk.lanmsg.files.FilePreview
@@ -313,12 +315,11 @@ private fun FileRow(
                 Column(Modifier.weight(1f)) {
                     Text(middleEllipsis(item.name), color = c.ink, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(Format.size(item.size.toLong()), color = c.inkMuted, fontSize = 12.sp)
-                    if (item.sourceLabel.isNotEmpty()) {
-                        Text(item.sourceLabel, color = c.inkSubtle, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    // 已在某个会话范围内时标题是重复信息，不再显示
-                    if (showConvTitle && v.convTitle.isNotEmpty()) {
-                        Text(v.convTitle, color = c.inkSubtle, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(fileSourceText(item), color = c.inkSubtle, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    // 已在某个会话范围内时标题是重复信息，不再显示；自设备会话标题由 core 留空，按 kind 本地化
+                    val convLabel = if (v.convKind == ConvKind.SELF_DEVICES) stringResource(R.string.conv_self_title) else v.convTitle
+                    if (showConvTitle && convLabel.isNotEmpty()) {
+                        Text(convLabel, color = c.inkSubtle, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
                 Spacer(Modifier.width(8.dp))

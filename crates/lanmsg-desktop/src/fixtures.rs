@@ -158,8 +158,10 @@ fn file_item(name: &str, mime: &str, size: u64, state: BlobState) -> FileItemVie
             None
         },
         local_path: (state == BlobState::Local).then(|| format!("/tmp/{name}")),
+        holder_name: (state != BlobState::Local).then(|| "小王的笔记本".to_string()),
         state,
-        source_label: "小王的笔记本".into(),
+        source_name: "小王".into(),
+        source_is_me: false,
     }
 }
 
@@ -399,7 +401,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::Local,
             "c-dm",
             "小王",
-            "存于 小王的笔记本",
+            "小王的笔记本",
         ),
         (
             "门口监控.mp4",
@@ -408,7 +410,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::Remote,
             "c-dm",
             "小王",
-            "存于 小王的笔记本",
+            "小王的笔记本",
         ),
         (
             "团建照片01.jpg",
@@ -417,7 +419,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::Local,
             "c-dm",
             "小王",
-            "存于 小王的笔记本",
+            "小王的笔记本",
         ),
         (
             "设计稿.zip",
@@ -426,7 +428,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::Downloading,
             "c-dm",
             "小王",
-            "存于 小王的笔记本",
+            "小王的笔记本",
         ),
         (
             "会议纪要.docx",
@@ -434,8 +436,8 @@ fn demo_files() -> Vec<FileView> {
             61_000,
             BlobState::Local,
             "c-self",
-            "我的设备",
-            "存于 我的手机",
+            "",
+            "我的手机",
         ),
         (
             "屏幕截图 2026-11-05.png",
@@ -444,7 +446,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::Local,
             "c-self",
             "我的设备",
-            "存于 我的手机",
+            "我的手机",
         ),
         (
             "年度预算.xlsx",
@@ -453,7 +455,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::SourceOffline,
             "c-guest",
             "网页访客 192.168.1.8",
-            "存于 小王的笔记本",
+            "小王的笔记本",
         ),
         (
             "演示视频.mkv",
@@ -462,7 +464,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::Remote,
             "c-guest",
             "网页访客 192.168.1.8",
-            "存于 小王的笔记本",
+            "小王的笔记本",
         ),
         (
             "项目备份.7z",
@@ -471,7 +473,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::SourceOffline,
             "c-guest",
             "网页访客 192.168.1.8",
-            "存于 小王的笔记本",
+            "小王的笔记本",
         ),
         (
             "团建照片02.jpg",
@@ -480,7 +482,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::Local,
             "c-dm",
             "小王",
-            "存于 小王的笔记本",
+            "小王的笔记本",
         ),
         (
             "读书笔记.md",
@@ -489,7 +491,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::Local,
             "c-self",
             "我的设备",
-            "存于 我的手机",
+            "我的手机",
         ),
         (
             "会议录像.mp4",
@@ -498,7 +500,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::SourceOffline,
             "c-dm",
             "小王",
-            "存于 小王的笔记本",
+            "小王的笔记本",
         ),
         (
             "产品原型.png",
@@ -507,7 +509,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::Remote,
             "c-dm",
             "小王",
-            "存于 小王的笔记本",
+            "小王的笔记本",
         ),
         (
             "安装包.tar.gz",
@@ -516,7 +518,7 @@ fn demo_files() -> Vec<FileView> {
             BlobState::Remote,
             "c-dm",
             "小王",
-            "存于 小王的笔记本",
+            "小王的笔记本",
         ),
         (
             "风景.jpg",
@@ -525,21 +527,27 @@ fn demo_files() -> Vec<FileView> {
             BlobState::Local,
             "c-self",
             "我的设备",
-            "存于 我的手机",
+            "我的手机",
         ),
     ];
     rows.iter()
         .enumerate()
         .map(|(i, (name, mime, size, state, conv, title, stored))| {
             let mut item = file_item(name, mime, *size, state.clone());
-            item.source_label = match state {
-                BlobState::Local => "来自 小王 · 已下载".to_string(),
-                _ => format!("来自 小王 · {stored}"),
+            item.source_name = "小王".into();
+            item.holder_name = match state {
+                BlobState::Local => None,
+                _ => Some(stored.to_string()),
             };
             FileView {
                 item,
                 conv: (*conv).into(),
                 conv_title: (*title).into(),
+                conv_kind: if *conv == "c-self" {
+                    ConvKind::SelfDevices
+                } else {
+                    ConvKind::Dm
+                },
                 msg: format!("m{i}"),
                 hlc_millis: real_now() - (i as i64 * 3 + 1) * 60 * MIN,
             }
