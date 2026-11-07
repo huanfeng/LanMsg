@@ -39,8 +39,10 @@ import name.apk.lanmsg.ui.chat.ChatScreen
 import name.apk.lanmsg.ui.chat.ImageViewerScreen
 import name.apk.lanmsg.ui.convs.ConversationListScreen
 import name.apk.lanmsg.ui.files.FilesScreen
+import name.apk.lanmsg.ui.forward.ForwardPickScreen
 import name.apk.lanmsg.ui.onboarding.OnboardingScreen
 import name.apk.lanmsg.ui.onboarding.OnboardingViewModel
+import name.apk.lanmsg.ui.search.SearchScreen
 import name.apk.lanmsg.ui.share.SharePickScreen
 import name.apk.lanmsg.ui.share.SharePickViewModel
 import name.apk.lanmsg.ui.theme.LanMsgColors
@@ -116,7 +118,10 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                     }
                 }
             }
-            composable(Routes.CONVS) { ConversationListScreen(onOpenChat = { nav.navigate(Routes.chat(it)) }) }
+            composable(Routes.CONVS) { ConversationListScreen(
+                    onOpenChat = { nav.navigate(Routes.chat(it)) },
+                    onSearch = { nav.navigate(Routes.SEARCH) },
+                ) }
             composable(
                 Routes.FILES,
                 arguments = listOf(navArgument("conv") { type = NavType.StringType; nullable = true; defaultValue = null }),
@@ -142,8 +147,17 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                     onSent = { nav.navigate(Routes.chat(it)) { popUpTo(Routes.SHARE) { inclusive = true } } },
                 )
             }
-            composable(Routes.SEARCH) { Placeholder(Routes.SEARCH) }
-            composable(Routes.FORWARD) { Placeholder(Routes.FORWARD) }
+            composable(Routes.SEARCH) {
+                SearchScreen(onBack = { nav.popBackStack() }, onOpenChat = { nav.navigate(Routes.chat(it)) })
+            }
+            composable(Routes.FORWARD, arguments = listOf(navArgument("hashes") { type = NavType.StringType })) { entry ->
+                val hashes = entry.arguments?.getString("hashes").orEmpty().split(',').filter { it.isNotEmpty() }
+                ForwardPickScreen(
+                    hashes = hashes,
+                    onBack = { nav.popBackStack() },
+                    onDone = { nav.navigate(Routes.chat(it)) { popUpTo(Routes.FORWARD) { inclusive = true } } },
+                )
+            }
             composable(Routes.CHAT, arguments = listOf(navArgument("conv") { type = NavType.StringType })) { entry ->
                 val conv = entry.arguments?.getString("conv") ?: return@composable
                 ChatScreen(

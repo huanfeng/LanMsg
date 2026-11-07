@@ -7,8 +7,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -33,14 +36,14 @@ import name.apk.lanmsg.ui.theme.LanMsgColors
 import name.apk.lanmsg.ui.theme.LanMsgControls
 
 @Composable
-fun ConversationListScreen(onOpenChat: (String) -> Unit) {
+fun ConversationListScreen(onOpenChat: (String) -> Unit, onSearch: () -> Unit) {
     val vm: ConversationListViewModel = viewModel(
         factory = viewModelFactory {
             initializer { ConversationListViewModel(ServiceLocator.core, ServiceLocator.localPrefs) }
         },
     )
     val state by vm.state.collectAsStateWithLifecycle()
-    ConversationListContent(state, onOpenChat, vm::toggleMute)
+    ConversationListContent(state, onOpenChat, vm::toggleMute, onSearch)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -49,6 +52,7 @@ fun ConversationListContent(
     state: ConversationListViewModel.UiState,
     onOpenChat: (String) -> Unit,
     onToggleMute: (String) -> Unit,
+    onSearch: () -> Unit,
 ) {
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
@@ -60,6 +64,11 @@ fun ConversationListContent(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.tab_messages)) },
+                actions = {
+                    IconButton(onClick = onSearch) {
+                        Icon(Icons.Outlined.Search, contentDescription = stringResource(R.string.search_hint))
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = c.surface,
                     titleContentColor = c.ink,
