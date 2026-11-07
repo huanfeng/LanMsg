@@ -275,13 +275,12 @@ async fn main() -> Result<()> {
                         } else {
                             m.author_device_name.clone()
                         };
-                        if let MessageBodyView::Text { text } | MessageBodyView::System { text } =
-                            &m.body
-                        {
-                            println!("[{}] {}: {}", hhmmss(m.hlc_millis), name, text);
-                        } else {
-                            println!("[{}] {}: <不支持的消息类型>", hhmmss(m.hlc_millis), name);
-                        }
+                        println!(
+                            "[{}] {}: {}",
+                            hhmmss(m.hlc_millis),
+                            name,
+                            body_line(&m.body)
+                        );
                     }
                 }
                 other => println!("{other:?}"),
@@ -617,6 +616,23 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// `log` 输出用的消息体单行描述：文字/系统原文，文件与文件夹列出文件名与大小。
+fn body_line(body: &MessageBodyView) -> String {
+    let list = |items: &[lanmsg_api::types::FileItemView]| {
+        items
+            .iter()
+            .map(|it| format!("{} ({})", it.name, human_size(it.size)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match body {
+        MessageBodyView::Text { text } | MessageBodyView::System { text } => text.clone(),
+        MessageBodyView::Files { items } => format!("[文件] {}", list(items)),
+        MessageBodyView::Folder { name, items } => format!("[文件夹] {name}: {}", list(items)),
+        MessageBodyView::Unsupported => "<不支持的消息类型>".to_string(),
+    }
+}
+
 /// API 错误转 anyhow。
 fn api_err(e: lanmsg_api::types::ApiError) -> anyhow::Error {
     anyhow::anyhow!("API 错误 {:?}: {}", e.code, e.message)
@@ -809,5 +825,44 @@ async fn download_and_wait(client: &IpcClient, hash: String) {
         println!("耗时 {secs:.2}s 平均 {mbps:.1} MB/s");
     } else {
         println!("耗时 {secs:.2}s");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lanmsg_api::types::{BlobState, FileItemView};
+
+    fn item(name: &str, size: u64) -> FileItemView {
+        FileItemView {
+            hash: "h".into(),
+            name: name.into(),
+            size,
+            mime: "application/octet-stream".into(),
+            width: None,
+            height: None,
+            duration_ms: None,
+            thumb_path: None,
+            local_path: None,
+            state: BlobState::Remote,
+            source_label: String::new(),
+        }
+    }
+
+    #[test]
+    fn body_line_lists_files_and_system_text() {
+        let files = MessageBodyView::Files {
+            items: vec![item("a.txt", 2048), item("b.bin", 3 * 1024 * 1024)],
+        };
+        assert_eq!(body_line(&files), "[文件] a.txt (2 KB), b.bin (3.0 MB)");
+        let folder = MessageBodyView::Folder {
+            name: "docs".into(),
+            items: vec![item("x/y.md", 1024)],
+        };
+        assert_eq!(body_line(&folder), "[文件夹] docs: x/y.md (1 KB)");
+        let sys = MessageBodyView::System {
+            text: "已添加设备：手机".into(),
+        };
+        assert_eq!(body_line(&sys), "已添加设备：手机");
     }
 }
