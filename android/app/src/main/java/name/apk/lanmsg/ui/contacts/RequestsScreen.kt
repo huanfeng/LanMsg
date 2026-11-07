@@ -53,16 +53,16 @@ import uniffi.lanmsg_api.RequestView
 fun RequestsScreen(onBack: () -> Unit) {
     val vm: RequestsViewModel = viewModel(factory = viewModelFactory { initializer { RequestsViewModel(ServiceLocator.coreHolder.api) } })
     val state by vm.state.collectAsStateWithLifecycle()
-    RequestsContent(state, vm::respond, onBack)
+    RequestsContent(state, vm::respond, onBack, vm::clearError)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RequestsContent(state: RequestsViewModel.UiState, onRespond: (String, RequestAction) -> Unit, onBack: () -> Unit) {
+fun RequestsContent(state: RequestsViewModel.UiState, onRespond: (String, RequestAction) -> Unit, onBack: () -> Unit, onDismissError: () -> Unit = {}) {
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
     val errorText = state.error?.let { stringResource(it) }
-    LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it) } }
+    LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it); onDismissError() } }
 
     Scaffold(
         containerColor = c.canvas,

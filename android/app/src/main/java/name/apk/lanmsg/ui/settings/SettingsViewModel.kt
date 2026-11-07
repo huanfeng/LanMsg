@@ -41,6 +41,8 @@ class SettingsViewModel(
         val trustedWifi: Set<String> = emptySet(),
         val outboxBytes: Long = 0,
         val error: Int? = null,
+        /** 每次出错递增：相同错误码连续出现时界面仍会再次提示。 */
+        val errorSeq: Int = 0,
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -100,7 +102,7 @@ class SettingsViewModel(
                     val shown = if (failure == null) new else fetchSettings() ?: confirmed
                     val reported = lastFailure
                     lastFailure = null
-                    _state.update { it.copy(settings = shown ?: it.settings, error = reported ?: it.error) }
+                    _state.update { it.copy(settings = shown ?: it.settings, error = reported ?: it.error, errorSeq = if (reported != null) it.errorSeq + 1 else it.errorSeq) }
                 }
             }
             if (pendingWrites == 0 && reloadAfterWrites) {
@@ -164,7 +166,7 @@ class SettingsViewModel(
                 // 等锁期间若来了新的写入，界面是乐观值：不覆盖，写完后会补拉
                 if (pendingWrites == 0) _state.update { it.copy(settings = s, error = null) } else reloadAfterWrites = true
             } catch (e: ApiException) {
-                _state.update { it.copy(error = errorTextRes(e.code)) }
+                _state.update { it.copy(error = errorTextRes(e.code), errorSeq = it.errorSeq + 1) }
             }
         }
     }

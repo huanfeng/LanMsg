@@ -103,4 +103,6 @@ class ContactsViewModel(private val core: CoreApi) : ViewModel() {
     }
 
     private fun errorText(e: ApiException) = errorTextRes(e.code)
+
+    fun clearError() = _state.update { it.copy(error = null) }
 }

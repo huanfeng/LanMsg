@@ -94,6 +94,20 @@ class SettingsViewModelTest {
         assertNotNull(vm.state.value.error)
     }
 
+    @Test fun repeated_identical_failures_bump_error_seq() = runTest {
+        val fake = fake()
+        val vm = vm(fake)
+        advanceUntilIdle()
+        failSet = true
+        vm.update { it.copy(localsendEnabled = true) }
+        advanceUntilIdle()
+        val first = vm.state.value
+        vm.update { it.copy(localsendEnabled = true) }
+        advanceUntilIdle()
+        assertEquals(first.error, vm.state.value.error)
+        assertEquals(first.errorSeq + 1, vm.state.value.errorSeq)
+    }
+
     @Test fun background_mode_change_notifies_holder() = runTest {
         val vm = vm(fake())
         advanceUntilIdle()
@@ -188,14 +202,14 @@ class SettingsViewModelTest {
         advanceUntilIdle()
         val ok = fake.handler
         var n = 0
-        fake.handler = { req -> if (req is Request.SetSettings && n++ == 0) throw ApiException(ErrorCode.IO, "once") else ok(req) }
+        fake.handler = { req -> if (req is Request.SetSettings && n++ == 0) throw ApiException(ErrorCode.REJECTED, "once") else ok(req) }
         vm.update { it.copy(autoImageMax = 5uL) }
         vm.update { it.copy(autoFileMax = 7uL) }
         advanceUntilIdle()
         assertEquals(initial.autoImageMax, coreValue.autoImageMax)
         assertEquals(7uL, coreValue.autoFileMax)
         assertEquals(initial.autoImageMax, vm.state.value.settings?.autoImageMax)
-        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
+        assertEquals(errorTextRes(ErrorCode.REJECTED), vm.state.value.error)
     }
 
     @Test fun lagged_during_write_does_not_override_optimistic_value() = runTest {

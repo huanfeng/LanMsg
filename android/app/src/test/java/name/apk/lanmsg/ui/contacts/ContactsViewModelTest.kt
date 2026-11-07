@@ -81,6 +81,21 @@ class ContactsViewModelTest {
         assertNull(vm.state.value.toast)
     }
 
+    @Test fun same_failure_twice_reports_twice_after_clear_error() = runTest {
+        val fake = fake()
+        val vm = ContactsViewModel(fake)
+        advanceUntilIdle()
+        fake.handler = { throw ApiException(ErrorCode.PEER_OFFLINE, "offline") }
+        vm.add("u2")
+        advanceUntilIdle()
+        assertEquals(R.string.err_peer_offline, vm.state.value.error)
+        vm.clearError()
+        assertNull(vm.state.value.error)
+        vm.add("u2")
+        advanceUntilIdle()
+        assertEquals(R.string.err_peer_offline, vm.state.value.error)
+    }
+
     @Test fun incoming_request_refreshes_count() = runTest {
         var count = 0
         val fake = fake(requests = { count })

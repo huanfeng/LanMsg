@@ -75,4 +75,18 @@ class MeViewModelTest {
         advanceUntilIdle()
         assertNotNull(vm.state.value.error)
     }
+
+    @Test fun repeated_identical_failures_bump_error_seq() = runTest {
+        val fake = fake()
+        val vm = MeViewModel(fake)
+        advanceUntilIdle()
+        fake.handler = { throw ApiException(ErrorCode.IO, "disk") }
+        vm.rename("x")
+        advanceUntilIdle()
+        val first = vm.state.value
+        vm.rename("y")
+        advanceUntilIdle()
+        assertEquals(first.error, vm.state.value.error)
+        assertEquals(first.errorSeq + 1, vm.state.value.errorSeq)
+    }
 }

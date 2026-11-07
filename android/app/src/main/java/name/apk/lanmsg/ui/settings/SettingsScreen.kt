@@ -89,7 +89,7 @@ fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onB
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val errorText = state.error?.let { stringResource(it) }
-    LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it) } }
+    LaunchedEffect(errorText, state.errorSeq) { errorText?.let { snackbar.showSnackbar(it) } }
 
     val needLocation = stringResource(R.string.settings_trusted_wifi_need_location)
     val notConnected = stringResource(R.string.settings_trusted_wifi_not_connected)

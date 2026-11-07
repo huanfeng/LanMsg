@@ -76,6 +76,8 @@ enum FetchFail {
     Source,
     /// 连接层错误：源立即判死。
     Conn,
+    /// 本地写盘错误：与源无关，不计源失败，整个传输以 Io 终止。
+    Local,
 }
 
 /// 工作者共享状态。
@@ -91,7 +93,7 @@ struct Shared {
     /// 已耗尽的源。
     dead: StdMutex<Vec<DeviceId>>,
     /// 任一工作者宣告全部源不可用时的错误信息（仅作停止标志与排障）。
-    failed_out: StdMutex<Option<String>>,
+    failed_out: StdMutex<Option<Failure>>,
     /// 进度窗口。
     progress: StdMutex<Progress>,
 }
@@ -444,11 +446,13 @@ impl TransferEngine {
                     tracing::warn!(error = %e, "传输工作者异常退出");
                 }
             }
-            if shared.failed_out.lock().unwrap().is_none() {
+            let failed = shared.failed_out.lock().unwrap().clone();
+            if failed.is_none() || token.is_cancelled() {
                 return None;
             }
-            if token.is_cancelled() {
-                return None;
+            // 本地写错误：换源无济于事，立即以 Io 终止，不再等持有者应答。
+            if let Some(f @ (TransferFailReason::Io, _)) = failed {
+                return Some(f);
             }
             // 全部候选耗尽：等一轮持有者应答，出现新候选则重试。
             self.solicit(&row.hash, &mb.conv, token).await;
@@ -473,8 +477,10 @@ impl TransferEngine {
         {
             Ok(f) => Arc::new(StdMutex::new(f)),
             Err(e) => {
-                *shared.failed_out.lock().unwrap() =
-                    Some(format!("failed to open .part file: {e}"));
+                *shared.failed_out.lock().unwrap() = Some((
+                    TransferFailReason::Io,
+                    format!("failed to open .part file: {e}"),
+                ));
                 return;
             }
         };
@@ -531,6 +537,13 @@ impl TransferEngine {
                             *c >= 3
                         }
                         FetchFail::Conn => true,
+                        FetchFail::Local => {
+                            *shared.failed_out.lock().unwrap() = Some((
+                                TransferFailReason::Io,
+                                "failed to write segment to .part file".into(),
+                            ));
+                            return;
+                        }
                     };
                     if dead_now {
                         shared.dead.lock().unwrap().push(job.candidates[cand]);
@@ -538,7 +551,8 @@ impl TransferEngine {
                     match Self::next_candidate(&shared, &job, cand) {
                         Some(next) => cand = next,
                         None => {
-                            *shared.failed_out.lock().unwrap() = Some("source offline".into());
+                            *shared.failed_out.lock().unwrap() =
+                                Some((TransferFailReason::SourceOffline, "source offline".into()));
                             return;
                         }
                     }
@@ -583,10 +597,7 @@ impl TransferEngine {
             let frame = read_data_frame(stream).await.map_err(|_| FetchFail::Conn)?;
             match frame {
                 DataFrame::RangeStart { .. } => {
-                    read_segment_to_file(stream, len, expect, file.clone(), offset)
-                        .await
-                        .map_err(|_| FetchFail::Source)?;
-                    Ok(())
+                    read_segment_to_file(stream, len, expect, file.clone(), offset).await
                 }
                 other => {
                     tracing::debug!(?other, offset, "GetRange 应答帧非预期");
@@ -953,16 +964,19 @@ async fn read_segment_to_file(
     expect: &[u8; 32],
     file: Arc<StdMutex<std::fs::File>>,
     offset: u64,
-) -> Result<(), CoreError> {
+) -> Result<(), FetchFail> {
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; SEG_BUF];
     let mut remaining = len;
     let mut pos = offset;
     while remaining > 0 {
         let want = buf.len().min(remaining as usize);
-        let n = r.read(&mut buf[..want]).await?;
+        let n = r
+            .read(&mut buf[..want])
+            .await
+            .map_err(|_| FetchFail::Source)?;
         if n == 0 {
-            return Err(CoreError::Proto("segment data ended early".into()));
+            return Err(FetchFail::Source);
         }
         hasher.update(&buf[..n]);
         let chunk = buf[..n].to_vec();
@@ -975,12 +989,13 @@ async fn read_segment_to_file(
             Ok::<(), std::io::Error>(())
         })
         .await
-        .map_err(|e| CoreError::Proto(e.to_string()))??;
+        .map_err(|_| FetchFail::Local)?
+        .map_err(|_| FetchFail::Local)?;
         pos += n as u64;
         remaining -= n as u64;
     }
     if hasher.finalize().as_bytes() != expect {
-        return Err(CoreError::Rejected("segment verification failed".into()));
+        return Err(FetchFail::Source);
     }
     Ok(())
 }

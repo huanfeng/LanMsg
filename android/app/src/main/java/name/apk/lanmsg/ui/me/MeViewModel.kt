@@ -17,7 +17,8 @@ import uniffi.lanmsg_api.SelfInfo
 import uniffi.lanmsg_api.StatusDto
 
 class MeViewModel(private val core: CoreApi) : ViewModel() {
-    data class UiState(val self: SelfInfo? = null, val error: Int? = null)
+    /** errorSeq 每次出错递增：相同错误码连续出现时界面仍会再次提示。 */
+    data class UiState(val self: SelfInfo? = null, val error: Int? = null, val errorSeq: Int = 0)
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -42,7 +43,7 @@ class MeViewModel(private val core: CoreApi) : ViewModel() {
             core.call<Response.Ok>(req)
             reload()
         } catch (e: ApiException) {
-            _state.update { it.copy(error = errorTextRes(e.code)) }
+            _state.update { it.copy(error = errorTextRes(e.code), errorSeq = it.errorSeq + 1) }
         }
     }
 
@@ -51,7 +52,7 @@ class MeViewModel(private val core: CoreApi) : ViewModel() {
             val self = core.call<Response.SelfInfo>(Request.GetSelf).value
             _state.update { it.copy(self = self, error = null) }
         } catch (e: ApiException) {
-            _state.update { it.copy(error = errorTextRes(e.code)) }
+            _state.update { it.copy(error = errorTextRes(e.code), errorSeq = it.errorSeq + 1) }
         }
     }
 }

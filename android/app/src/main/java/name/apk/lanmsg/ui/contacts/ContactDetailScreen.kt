@@ -59,7 +59,7 @@ fun ContactDetailScreen(user: String, onBack: () -> Unit, onOpenChat: (String) -
             vm.openConvHandled()
         }
     }
-    ContactDetailContent(state, vm::openDm, vm::setAutoAccept, vm::setAskAbove, onBack)
+    ContactDetailContent(state, vm::openDm, vm::setAutoAccept, vm::setAskAbove, onBack, vm::clearError)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -69,12 +69,12 @@ fun ContactDetailContent(
     onOpenDm: () -> Unit,
     onAutoAccept: (Boolean) -> Unit,
     onAskAbove: (ULong?) -> Unit,
-    onBack: () -> Unit,
+    onBack: () -> Unit,    onDismissError: () -> Unit = {},
 ) {
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
     val errorText = state.error?.let { stringResource(it) }
-    LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it) } }
+    LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it); onDismissError() } }
 
     Scaffold(
         containerColor = c.canvas,

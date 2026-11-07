@@ -51,7 +51,7 @@ import name.apk.lanmsg.ui.theme.LanMsgColors
 fun ContactsScreen(onOpenRequests: () -> Unit, onOpenContact: (String) -> Unit, onAddDevice: () -> Unit) {
     val vm: ContactsViewModel = viewModel(factory = viewModelFactory { initializer { ContactsViewModel(ServiceLocator.coreHolder.api) } })
     val state by vm.state.collectAsStateWithLifecycle()
-    ContactsContent(state, vm::add, vm::toastShown, onOpenRequests, onOpenContact, onAddDevice)
+    ContactsContent(state, vm::add, vm::toastShown, onOpenRequests, onOpenContact, onAddDevice, vm::clearError)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -62,7 +62,7 @@ fun ContactsContent(
     onToastShown: () -> Unit,
     onOpenRequests: () -> Unit,
     onOpenContact: (String) -> Unit,
-    onAddDevice: () -> Unit,
+    onAddDevice: () -> Unit,    onDismissError: () -> Unit = {},
 ) {
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
@@ -74,7 +74,7 @@ fun ContactsContent(
             onToastShown()
         }
     }
-    LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it) } }
+    LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it); onDismissError() } }
 
     Scaffold(
         containerColor = c.canvas,

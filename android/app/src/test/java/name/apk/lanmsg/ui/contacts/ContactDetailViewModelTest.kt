@@ -92,13 +92,17 @@ class ContactDetailViewModelTest {
         val vm = ContactDetailViewModel(fake, "u2")
         advanceUntilIdle()
         val ok = fake.handler
-        fake.handler = { req -> if (req is Request.SetContactPolicy) throw ApiException(ErrorCode.IO, "disk") else ok(req) }
+        var n = 0
+        // 两次失败用不同错误码：界面报告的应是最后一次失败
+        fake.handler = { req ->
+            if (req is Request.SetContactPolicy) throw ApiException(if (n++ == 0) ErrorCode.IO else ErrorCode.REJECTED, "disk") else ok(req)
+        }
         vm.setAutoAccept(true)
         vm.setAskAbove(10uL)
         advanceUntilIdle()
         assertEquals(false, vm.state.value.contact?.autoAccept)
         assertEquals(null, vm.state.value.contact?.askAboveBytes)
-        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
+        assertEquals(errorTextRes(ErrorCode.REJECTED), vm.state.value.error)
     }
 
     @Test fun failed_first_policy_is_not_carried_by_second() = runTest {
@@ -107,12 +111,12 @@ class ContactDetailViewModelTest {
         advanceUntilIdle()
         val ok = fake.handler
         var n = 0
-        fake.handler = { req -> if (req is Request.SetContactPolicy && n++ == 0) throw ApiException(ErrorCode.IO, "once") else ok(req) }
+        fake.handler = { req -> if (req is Request.SetContactPolicy && n++ == 0) throw ApiException(ErrorCode.REJECTED, "once") else ok(req) }
         vm.setAutoAccept(true)
         vm.setAskAbove(10uL)
         advanceUntilIdle()
         assertEquals(Request.SetContactPolicy("u2", false, 10uL), fake.requests.last { it is Request.SetContactPolicy })
-        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
+        assertEquals(errorTextRes(ErrorCode.REJECTED), vm.state.value.error)
     }
 
     @Test fun stale_list_response_does_not_revert_confirmed_after_write() = runTest {

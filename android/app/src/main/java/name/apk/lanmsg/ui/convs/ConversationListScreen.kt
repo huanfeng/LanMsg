@@ -43,7 +43,7 @@ fun ConversationListScreen(onOpenChat: (String) -> Unit, onSearch: () -> Unit) {
         },
     )
     val state by vm.state.collectAsStateWithLifecycle()
-    ConversationListContent(state, onOpenChat, vm::toggleMute, onSearch)
+    ConversationListContent(state, onOpenChat, vm::toggleMute, onSearch, vm::clearError)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -52,12 +52,12 @@ fun ConversationListContent(
     state: ConversationListViewModel.UiState,
     onOpenChat: (String) -> Unit,
     onToggleMute: (String) -> Unit,
-    onSearch: () -> Unit,
+    onSearch: () -> Unit,    onDismissError: () -> Unit = {},
 ) {
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
     val errorText = state.error?.let { stringResource(it) }
-    LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it) } }
+    LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it); onDismissError() } }
 
     Scaffold(
         containerColor = c.canvas,

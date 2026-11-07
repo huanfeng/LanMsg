@@ -54,7 +54,7 @@ import uniffi.lanmsg_api.DeviceView
 fun DevicesScreen(onBack: () -> Unit, onAdd: () -> Unit, onJoin: () -> Unit) {
     val vm: DevicesViewModel = viewModel(factory = viewModelFactory { initializer { DevicesViewModel(ServiceLocator.coreHolder.api) } })
     val state by vm.state.collectAsStateWithLifecycle()
-    DevicesContent(state, onBack, onAdd, onJoin, vm::askRemove, vm::confirmRemove, vm::dismiss)
+    DevicesContent(state, onBack, onAdd, onJoin, vm::askRemove, vm::confirmRemove, vm::dismiss, vm::clearError)
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -66,12 +66,12 @@ fun DevicesContent(
     onJoin: () -> Unit,
     onAskRemove: (DeviceView) -> Unit,
     onConfirmRemove: () -> Unit,
-    onDismiss: () -> Unit,
+    onDismiss: () -> Unit,    onDismissError: () -> Unit = {},
 ) {
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
     val errorText = state.error?.let { stringResource(it) }
-    LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it) } }
+    LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it); onDismissError() } }
 
     state.confirmRemove?.let { d ->
         ConfirmDialog(

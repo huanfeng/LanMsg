@@ -538,6 +538,51 @@ async fn transfer_resumes_after_restart_with_verified_segments() {
     assert_eq!(std::fs::read(&got).unwrap(), std::fs::read(&path).unwrap());
 }
 
+/// 本地 .part 不可写：以 Io 终止，且不被误判为源离线、也不等持有者应答。
+#[cfg(unix)]
+#[tokio::test]
+async fn unwritable_part_fails_with_io_reason() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut a, mut x) = contact_pair_no_auto().await;
+    let size = 1024;
+    let src = tempfile::tempdir().unwrap();
+    let path = make_file(src.path(), "readonly.bin", size);
+    let (_, hash_hex) = send_and_wait(&mut a, &mut x, &path, size).await;
+
+    // 预置长度正确的只读 .part：下载沿用它，工作者以写模式打开时失败。
+    let dl = tempfile::tempdir().unwrap();
+    let part_dir = dl.path().join("A");
+    std::fs::create_dir_all(&part_dir).unwrap();
+    let part = part_dir.join("readonly.bin.part");
+    std::fs::write(&part, vec![0u8; size]).unwrap();
+    std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o444)).unwrap();
+    set_download_dir(&x, dl.path()).await;
+
+    let started = std::time::Instant::now();
+    x.call(Request::DownloadBlob {
+        hash: hash_hex.clone(),
+    })
+    .await;
+    let ev = x
+        .wait_event(
+            |e| matches!(e, Event::TransferFinished { hash, .. } if *hash == hash_hex),
+            15,
+        )
+        .await;
+    match ev {
+        Event::TransferFinished { ok, reason, .. } => {
+            assert!(!ok);
+            assert_eq!(reason, Some(lanmsg_api::types::TransferFailReason::Io));
+        }
+        other => panic!("expected TransferFinished, got {other:?}"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "local failure must not wait for holder replies: {:?}",
+        started.elapsed()
+    );
+}
+
 #[tokio::test]
 async fn final_hash_mismatch_fails_and_cleans_part() {
     let (mut a, mut x) = contact_pair().await;

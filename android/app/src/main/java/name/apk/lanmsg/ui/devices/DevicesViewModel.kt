@@ -81,4 +81,6 @@ class DevicesViewModel(private val core: CoreApi) : ViewModel() {
     companion object {
         private const val LOAD_DEBOUNCE_MS = 250L
     }
+
+    fun clearError() = _state.update { it.copy(error = null) }
 }

@@ -123,4 +123,6 @@ class ContactDetailViewModel(private val core: CoreApi, private val user: String
         /** 「超过此大小仍询问」选项：null = 不限。 */
         val ASK_ABOVE: List<ULong?> = listOf(null, 10uL * MB, 50uL * MB, 100uL * MB, 500uL * MB)
     }
+
+    fun clearError() = _state.update { it.copy(error = null) }
 }

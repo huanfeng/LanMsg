@@ -79,4 +79,6 @@ class ConversationListViewModel(private val core: CoreApi, private val prefs: Mu
             .map { Row(it, it.conv in muted) }
         _state.update { it.copy(rows = rows) }
     }
+
+    fun clearError() = _state.update { it.copy(error = null) }
 }

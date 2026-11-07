@@ -51,4 +51,6 @@ class RequestsViewModel(private val core: CoreApi) : ViewModel() {
             }
         }
     }
+
+    fun clearError() = _state.update { it.copy(error = null) }
 }
