@@ -227,6 +227,7 @@
 | pair_qr_desc | 配对二维码 |
 | pair_host_hint | 在另一台设备上打开 LanMsg，选择“加入我已有的设备”并扫描此二维码 |
 | pair_use_sas | 改用数字比对 |
+| pair_host_sas_hint | 在另一台设备上选择“加入我已有的设备”（已在使用的手机：“我”→“我的设备”→“加入其他设备”），选“改用数字比对”，再选中这台手机。 |
 | pair_sas_hint | 请确认两台设备上显示的数字一致 |
 | pair_match | 一致 |
 | pair_mismatch | 不一致 |
@@ -234,6 +235,8 @@
 | pair_join_scan_hint | 扫描已有设备上显示的二维码 |
 | pair_join_pick | 选择要加入的设备 |
 | pair_join_refresh | 刷新 |
+| pair_join_guide | 在已有设备上选择“添加我的设备”，并保持 LanMsg 在前台。电脑：左侧“联系人”→“我的设备”→“添加我的设备”；手机：“我”→“我的设备”→“添加我的设备”。 |
+| pair_join_empty | 还没有发现可加入的设备。请在已有设备上选择“添加我的设备”，保持其 LanMsg 在前台，然后点“刷新”。 |
 | pair_need_camera | 需要相机权限才能扫码 |
 | pair_grant_camera | 授予权限 |
 | pair_verifying | 正在验证… |

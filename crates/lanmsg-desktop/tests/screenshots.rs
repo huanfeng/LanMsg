@@ -28,6 +28,8 @@ fn every_demo_page_renders() {
         "contacts",
         "devices",
         "pair",
+        "pair-sas",
+        "pair-join",
         "files",
         "files-grid",
         "settings",

@@ -14,6 +14,10 @@ pub enum DemoPage {
     Contacts,
     Devices,
     Pair,
+    /// 配对：数字比对，等待对方加入。
+    PairSas,
+    /// 配对：加入方选择设备（候选为空）。
+    PairJoin,
     Files,
     /// 文件页，筛选为“图片”（网格）。
     FilesGrid,
@@ -30,6 +34,8 @@ impl DemoPage {
             "contacts" => DemoPage::Contacts,
             "devices" => DemoPage::Devices,
             "pair" => DemoPage::Pair,
+            "pair-sas" => DemoPage::PairSas,
+            "pair-join" => DemoPage::PairJoin,
             "files" => DemoPage::Files,
             "files-grid" => DemoPage::FilesGrid,
             "settings" => DemoPage::Settings,
@@ -624,6 +630,21 @@ pub fn demo_model(p: DemoPage) -> Model {
                 state: PairStateDto::WaitingPeer,
             });
         }
+        DemoPage::PairSas => {
+            m.page = Page::Contacts;
+            m.contacts_tab = 3;
+            m.pair = Some(PairUi::Showing {
+                session: "s1".into(),
+                qr_uri: None,
+                state: PairStateDto::WaitingPeer,
+            });
+        }
+        DemoPage::PairJoin => {
+            m.page = Page::Contacts;
+            m.contacts_tab = 3;
+            m.peers.clear();
+            m.pair = Some(PairUi::Picking);
+        }
         DemoPage::Files => {
             m.page = Page::Files;
             m.files_loaded = true;
@@ -693,6 +714,8 @@ mod tests {
             "contacts",
             "devices",
             "pair",
+            "pair-sas",
+            "pair-join",
             "files",
             "files-grid",
             "settings",

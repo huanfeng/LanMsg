@@ -139,6 +139,12 @@ fn showing(qr_uri: Option<&str>, state: &PairStateDto) -> Element {
                             .font_size(style::FONT_META)
                             .fg_role(Role::TextSubtle),
                     )
+                    .child(
+                        Element::label(strings::PAIR_QR_GUIDE)
+                            .font_size(style::FONT_BODY)
+                            .fg_role(Role::TextMuted)
+                            .max_lines(4),
+                    )
             }
             None => col
                 .child(
@@ -151,7 +157,7 @@ fn showing(qr_uri: Option<&str>, state: &PairStateDto) -> Element {
                     Element::label(strings::PAIR_SAS_WAITING_HINT)
                         .font_size(style::FONT_BODY)
                         .fg_role(Role::TextMuted)
-                        .max_lines(3),
+                        .max_lines(4),
                 ),
         },
         PairStateDto::ShowSas { code } => col
@@ -269,7 +275,7 @@ fn picker(ui: &UiState) -> Element {
                     Element::label(strings::PAIR_JOIN_NONE_HINT)
                         .font_size(style::FONT_META)
                         .fg_role(Role::TextSubtle)
-                        .max_lines(2),
+                        .max_lines(4),
                 );
         }
         let rows = ps.iter().map(|p| peer_row(&ui_list, p));
@@ -314,15 +320,28 @@ fn picker(ui: &UiState) -> Element {
                 .visible_signal(link_empty),
         );
 
-    Element::col()
+    let ui_refresh = ui.clone();
+    let header = Element::row()
         .width_match()
-        .spacing(style::SPACE_MD)
+        .cross(Align::Center)
         .child(
             Element::label(strings::PAIR_JOIN_PICK)
                 .font_size(style::FONT_HEADING)
                 .font_weight(style::WEIGHT_STRONG)
                 .fg_role(Role::Text),
         )
+        .child(Element::flex_spacer())
+        .child(
+            Element::button(strings::PAIR_JOIN_REFRESH)
+                .outline_soft()
+                .intent(Intent::Neutral)
+                .on_click(move |_| ui_refresh.act(|m| m.pair_refresh_peers())),
+        );
+
+    Element::col()
+        .width_match()
+        .spacing(style::SPACE_MD)
+        .child(header)
         .child(list)
         .child(Element::divider())
         .child(muted(strings::PAIR_JOIN_LINK_LABEL))

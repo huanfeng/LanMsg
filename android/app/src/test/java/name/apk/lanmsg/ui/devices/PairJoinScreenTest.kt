@@ -55,4 +55,25 @@ class PairJoinScreenTest {
         compose.onNodeWithText("一致").performClick()
         assertEquals(listOf(false, true), confirmed)
     }
+
+    @Test fun pick_mode_empty_list_shows_guidance_and_refresh_triggers_reload() {
+        var refreshed = 0
+        compose.setContent {
+            LanMsgTheme {
+                PairJoinContent(
+                    state = PairViewModel.UiState(joinMode = PairViewModel.JoinMode.PICK, candidates = emptyList()),
+                    onSwitchToSas = {},
+                    onGrantCamera = {},
+                    onScanned = {},
+                    onPick = {},
+                    onConfirm = {},
+                    onRetry = {},
+                    onRefresh = { refreshed++ },
+                )
+            }
+        }
+        compose.onNodeWithText("还没有发现可加入的设备", substring = true).assertExists()
+        compose.onNodeWithText("刷新").performClick()
+        assertEquals(1, refreshed)
+    }
 }

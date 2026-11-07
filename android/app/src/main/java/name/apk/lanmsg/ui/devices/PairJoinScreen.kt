@@ -128,8 +128,12 @@ fun PairJoinContent(
                     SectionHeader(stringResource(R.string.pair_join_pick))
                     TextButton(onClick = onRefresh, colors = LanMsgButtons.text()) { Text(stringResource(R.string.pair_join_refresh)) }
                     if (state.candidates.isEmpty()) {
-                        Spacer(Modifier.height(24.dp))
-                        Text(stringResource(R.string.pair_waiting), color = c.inkMuted, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            stringResource(R.string.pair_join_empty),
+                            color = c.inkMuted,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        )
                     }
                     LazyColumn(Modifier.fillMaxWidth()) {
                         items(state.candidates, key = { it.deviceId }) { p ->
@@ -161,7 +165,13 @@ fun PairJoinContent(
                         stringResource(R.string.pair_join_scan_hint),
                         color = c.inkMuted,
                         style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(16.dp),
+                        modifier = Modifier.padding(start = 16.dp, top = 16.dp, end = 16.dp),
+                    )
+                    Text(
+                        stringResource(R.string.pair_join_guide),
+                        color = c.inkSubtle,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 12.dp),
                     )
                     QrScanner(onResult = onScanned, modifier = Modifier.weight(1f).fillMaxWidth())
                     TextButton(onClick = onSwitchToSas, colors = LanMsgButtons.text(), modifier = Modifier.padding(8.dp)) {

@@ -1080,6 +1080,14 @@ impl Model {
         vec![call(Request::ListPeers, ReplyTag::Peers)]
     }
 
+    /// 选择界面里手动或周期刷新候选设备；core 没有“重新发现”接口，只重新取列表。
+    pub fn pair_refresh_peers(&mut self) -> Vec<Effect> {
+        if self.pair != Some(PairUi::Picking) {
+            return Vec::new();
+        }
+        vec![call(Request::ListPeers, ReplyTag::Peers)]
+    }
+
     /// 加入方选定目标（设备或配对链接）；只在选择界面有效。
     pub fn pair_join(&mut self, target: PairTarget) -> Vec<Effect> {
         if self.pair != Some(PairUi::Picking) {
@@ -2810,6 +2818,17 @@ mod tests {
         // B 的回复到达：正常进入展示
         m.apply(reply(ReplyTag::Pair { nonce: b }, pair_info("B", None)));
         assert!(matches!(&m.pair, Some(PairUi::Showing { session, .. }) if session == "B"));
+    }
+
+    #[test]
+    fn pair_refresh_peers_requests_list_only_while_picking() {
+        let mut m = Model::new();
+        assert!(m.pair_refresh_peers().is_empty());
+        m.pair_open_join();
+        let fx = m.pair_refresh_peers();
+        assert!(has(&fx, |r| matches!(r, Request::ListPeers)));
+        m.pair_cancel();
+        assert!(m.pair_refresh_peers().is_empty());
     }
 
     #[test]

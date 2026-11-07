@@ -107,6 +107,15 @@ fun PairHostContent(
                 TextButton(onClick = onSwitchToSas, colors = LanMsgButtons.text()) { Text(stringResource(R.string.pair_use_sas)) }
             } else {
                 PairProgress(state, onConfirm, onRetry)
+                if (state.method == PairMethod.SAS && (state.pairState == null || state.pairState is PairStateDto.WaitingPeer)) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        stringResource(R.string.pair_host_sas_hint),
+                        color = c.inkMuted,
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
             state.error?.let {
                 Spacer(Modifier.height(12.dp))

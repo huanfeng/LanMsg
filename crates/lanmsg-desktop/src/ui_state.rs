@@ -47,6 +47,8 @@ pub struct UiState {
     pair_show: Rc<RefCell<Option<Signal<bool>>>>,
     /// 配对完成（Done）后开始计时的时刻，用于 1.5 秒后自动关闭。
     pair_done_since: Rc<RefCell<Option<Instant>>>,
+    /// 选择界面上次刷新候选设备的时刻；离开选择界面即清空。
+    pair_refresh_at: Rc<RefCell<Option<Instant>>>,
     debouncer: Rc<RefCell<Debouncer>>,
     started: Instant,
     /// 数据目录：登记开机自启时决定是否带 `--data-dir`。
@@ -55,6 +57,8 @@ pub struct UiState {
 
 /// 配对完成后多久自动关闭对话框（毫秒）。
 const PAIR_DONE_CLOSE_MS: u128 = 1500;
+/// 选择界面周期刷新候选设备的间隔。
+const PAIR_REFRESH_MS: u128 = 3000;
 
 /// 退出前同步清焦点的最长等待。
 const FOCUS_CLEAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -83,6 +87,7 @@ impl UiState {
             composer: Rc::new(RefCell::new(None)),
             pair_show: Rc::new(RefCell::new(None)),
             pair_done_since: Rc::new(RefCell::new(None)),
+            pair_refresh_at: Rc::new(RefCell::new(None)),
             debouncer: Rc::new(RefCell::new(Debouncer::new(SEARCH_DEBOUNCE_MS))),
             started: Instant::now(),
             data_dir: lanmsg_core::paths::default_data_dir(),
@@ -265,6 +270,7 @@ impl UiState {
         if !open {
             self.pair_show.borrow_mut().take();
             self.pair_done_since.borrow_mut().take();
+            self.pair_refresh_at.borrow_mut().take();
             return;
         }
         let hidden = self
@@ -276,6 +282,17 @@ impl UiState {
             self.act(|m| m.pair_cancel());
             return;
         }
+        if self.read(|m| m.pair == Some(PairUi::Picking)) {
+            let mut at = self.pair_refresh_at.borrow_mut();
+            if at.is_some_and(|t| t.elapsed().as_millis() < PAIR_REFRESH_MS) {
+                return;
+            }
+            *at = Some(Instant::now());
+            drop(at);
+            self.act(|m| m.pair_refresh_peers());
+            return;
+        }
+        self.pair_refresh_at.borrow_mut().take();
         if !done {
             self.pair_done_since.borrow_mut().take();
             return;
