@@ -197,6 +197,12 @@ class NotifierTest {
         assertEquals(1, active().size)
     }
 
+    @Test fun no_notification_for_system_message() = runTest {
+        val n = notifier()
+        n.handle(Event.MessageAdded(Fixtures.systemMsg("m1", "c1")))
+        assertEquals(0, active().size)
+    }
+
     @Test fun no_notification_for_muted_conversation() = runTest {
         val n = notifier()
         prefs.setMuted("c1", true)

@@ -138,8 +138,10 @@ class Notifier(
         )
         val id = msg.conv.hashCode()
         // 用户划掉通知不会通知我们：通知已不在栏里时，累积的旧消息要丢弃
+        // activeNotifications 是 binder 调用，放在锁外读取
+        val active = nm.activeNotifications.any { it.id == id }
         val lines = synchronized(lock) {
-            if (nm.activeNotifications.none { it.id == id }) history.remove(msg.conv)
+            if (!active) history.remove(msg.conv)
             val q = history.getOrPut(msg.conv) { ArrayDeque() }
             if (q.none { it.id == msg.id }) q.addLast(Line(msg.id, body, msg.hlcMillis, msg.authorDeviceName))
             while (q.size > HISTORY_SIZE) q.removeFirst()
@@ -217,7 +219,8 @@ class Notifier(
 
     private fun bodyText(body: MessageBodyView): String? = when (body) {
         is MessageBodyView.Text -> body.text
-        is MessageBodyView.System -> body.text
+        // 系统消息只在会话内显示，不弹通知
+        is MessageBodyView.System -> null
         is MessageBodyView.Files -> ctx.getString(R.string.notif_new_files, body.items.firstOrNull()?.name.orEmpty())
         is MessageBodyView.Folder -> ctx.getString(R.string.notif_new_files, body.name)
         is MessageBodyView.Unsupported -> null

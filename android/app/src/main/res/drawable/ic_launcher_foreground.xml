@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="28"
+    android:viewportHeight="28">
+    <!-- 与桌面 logo 同形的对话气泡；108dp 画布内气泡约 60dp 宽，位于 66dp 安全区内 -->
+    <group
+        android:pivotX="14"
+        android:pivotY="14"
+        android:scaleX="1.2"
+        android:scaleY="1.2"
+        android:translateY="-0.3">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M9.5 8h9a2 2 0 0 1 2 2v5.5a2 2 0 0 1-2 2h-5.25L10 20.5v-3H9.5a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2z" />
+    </group>
+</vector>

@@ -31,6 +31,9 @@ object Fixtures {
     fun textMsg(id: String, conv: String = "c1", text: String = "你好", mine: Boolean = false, millis: Long = 1000): MessageView =
         message(id, conv, mine, millis, MessageBodyView.Text(text))
 
+    fun systemMsg(id: String, conv: String = "c1", text: String = "系统提示"): MessageView =
+        message(id, conv, false, 1000, MessageBodyView.System(text))
+
     fun fileMsg(id: String, hash: String, state: BlobState = BlobState.REMOTE): MessageView =
         message(
             id, "c1", false, 1000,

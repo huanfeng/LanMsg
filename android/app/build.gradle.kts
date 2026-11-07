@@ -16,6 +16,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        // 只保留实际提供原生库的三种 ABI，去掉 JNA 带入的 mips/armeabi/x86 等
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
     // release 签名读取 android/keystore.properties；缺失时回退 debug 签名，便于 CI 出包测试
