@@ -518,11 +518,13 @@ where
     tokio::spawn(async move {
         let mut reader = framed_read;
         let mut shutdown_rx = shutdown_rx;
+        // 连接结束原因，仅用于日志
+        let mut reason = String::from("closed locally (shutdown, replaced, or write failure)");
         'read: loop {
             tokio::select! {
                 result = next_frame_or_idle(&mut reader, &clock, timing.idle_timeout) => {
                     let Some(result) = result else {
-                        tracing::debug!(peer = %device_for_events, "对端空闲超时，关闭连接");
+                        reason = format!("idle timeout ({} s without any bytes)", timing.idle_timeout.as_secs());
                         break;
                     };
                     match result {
@@ -558,7 +560,14 @@ where
                                 let _ = event_tx.send(ConnEvent::Frame(device_for_events, frame)).await;
                             }
                         }
-                        Some(Err(_)) | None => break,
+                        Some(Err(e)) => {
+                            reason = format!("read error: {e}");
+                            break;
+                        }
+                        None => {
+                            reason = "peer closed the connection".into();
+                            break;
+                        }
                     }
                 }
                 _ = shutdown_rx.recv() => break,
@@ -566,6 +575,7 @@ where
         }
         let _ = closed_tx.send(true);
         if up_sent_flag.load(Ordering::SeqCst) && cleanup(conn_id).await {
+            tracing::info!(peer = %device_for_events, reason = %reason, "peer connection down");
             let _ = event_tx.send(ConnEvent::Down(device_for_events)).await;
         }
     });

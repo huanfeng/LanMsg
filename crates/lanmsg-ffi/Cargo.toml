@@ -25,6 +25,8 @@ lanmsg-proto = { path = "../lanmsg-proto" }
 uniffi = { version = "0.28", features = ["tokio"] }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 
 [dev-dependencies]
 tempfile = "3"

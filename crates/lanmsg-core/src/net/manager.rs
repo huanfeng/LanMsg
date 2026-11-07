@@ -225,6 +225,7 @@ impl ConnManager {
                 inner.connections.remove(&device);
                 if let (Some(down), Some(up)) = (down_permit, permit) {
                     down.send(ConnEvent::Down(device));
+                    tracing::info!(peer = %peer_info.device, "peer connection up (replaced dead connection)");
                     up.send(ConnEvent::Up(peer_info.clone()));
                 }
                 // 须在 Up 入队之后放行读循环，保证 Frame 事件排在 Up 之后。
@@ -269,6 +270,7 @@ impl ConnManager {
         }
 
         if let Some(permit) = permit {
+            tracing::info!(peer = %peer_info.device, "peer connection up");
             permit.send(ConnEvent::Up(peer_info.clone()));
         }
         // 须在 Up 入队之后放行读循环，保证 Frame 事件排在 Up 之后。
@@ -633,6 +635,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                             }
                         }
                         if let Some(permit) = permit {
+                            tracing::info!(peer = %peer_info.device, "peer connection up");
                             permit.send(ConnEvent::Up(peer_info.clone()));
                         }
                     }

@@ -3,6 +3,8 @@
 // 注释中文，标识符英文。
 
 pub mod adapters;
+#[cfg(target_os = "android")]
+mod android_log;
 
 use std::sync::{Arc, Mutex};
 
@@ -131,6 +133,8 @@ impl LanMsgCore {
         keystore: Arc<dyn FfiKeyStore>,
         platform: Arc<dyn FfiPlatform>,
     ) -> Result<Arc<Self>, FfiError> {
+        #[cfg(target_os = "android")]
+        android_log::init();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("lanmsg-core")
@@ -149,6 +153,7 @@ impl LanMsgCore {
         let service = runtime
             .block_on(Service::start(cfg))
             .map_err(|e| internal(format!("启动失败: {e}")))?;
+        tracing::info!("core started");
         Ok(Arc::new(Self {
             runtime: Some(runtime),
             service: Mutex::new(Some(service)),
