@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.preview
 
+import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -73,7 +74,11 @@ class TextPreviewViewModel(private val path: String) : ViewModel() {
                 try {
                     val t = FilePreview.readText(File(path))
                     if (t == null) UiState.Binary else UiState.Ready(splitLines(t.text), t.truncated)
-                } catch (_: IOException) {
+                } catch (e: IOException) {
+                    Log.w(TAG, "Failed to read text preview", e)
+                    UiState.Failed
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "Failed to read text preview", e)
                     UiState.Failed
                 }
             }
@@ -81,8 +86,27 @@ class TextPreviewViewModel(private val path: String) : ViewModel() {
     }
 
     companion object {
-        /** 按 \n 拆行并去掉行尾的 \r，空行保留。 */
-        fun splitLines(text: String): List<String> = text.split('\n').map { it.removeSuffix("\r") }
+        private const val TAG = "TextPreview"
+
+        /** 单个列表项最多显示的字符数；更长的行硬切分，避免压缩 JSON 这类超长单行拖垮排版。 */
+        const val MAX_LINE_CHARS = 4096
+
+        /** 按 \n 拆行并去掉行尾的 \r，空行保留；超长行按 [MAX_LINE_CHARS] 切成多项（不拆代理对）。 */
+        fun splitLines(text: String): List<String> {
+            val out = ArrayList<String>()
+            for (raw in text.split('\n')) {
+                val line = raw.removeSuffix("\r")
+                var start = 0
+                while (line.length - start > MAX_LINE_CHARS) {
+                    var end = start + MAX_LINE_CHARS
+                    if (Character.isHighSurrogate(line[end - 1])) end--
+                    out += line.substring(start, end)
+                    start = end
+                }
+                out += line.substring(start)
+            }
+            return out
+        }
     }
 }
 

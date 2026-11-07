@@ -58,7 +58,9 @@ import name.apk.lanmsg.ui.theme.LanMsgColors
 import name.apk.lanmsg.ui.theme.LanMsgControls
 import uniffi.lanmsg_api.BlobState
 import uniffi.lanmsg_api.Event
+import uniffi.lanmsg_api.FileFilter
 import uniffi.lanmsg_api.FileItemView
+import uniffi.lanmsg_api.FileKindFilter
 import uniffi.lanmsg_api.MessageBodyView
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
@@ -110,12 +112,26 @@ class ImageViewerViewModel(private val core: CoreApi, private val conv: String, 
         viewModelScope.launch {
             try {
                 val msgs = core.call<Response.Messages>(Request.ListMessages(conv, null, LOOKUP_LIMIT)).value
-                val found = msgs.firstNotNullOfOrNull { findItem(it.body) }
+                // 最近消息里没有（较早的图片，如从文件页进入）时，改按文件视图分页查找
+                val found = msgs.firstNotNullOfOrNull { findItem(it.body) } ?: findInFiles()
                 _state.update { it.copy(item = found ?: it.item, loading = false, error = null) }
             } catch (e: ApiException) {
                 _state.update { it.copy(loading = false, error = e.message ?: e.code.name) }
             }
         }
+    }
+
+    /** 在本会话的图片文件视图里按 hash 分页查找；不拿本地路径冒充，状态以 core 为准。 */
+    private suspend fun findInFiles(): FileItemView? {
+        var before: Long? = null
+        repeat(MAX_FILE_PAGES) {
+            val filter = FileFilter(FileKindFilter.IMAGE, conv, null, null, null, before, FILE_PAGE)
+            val page = core.call<Response.Files>(Request.QueryFiles(filter)).value
+            page.firstOrNull { it.item.hash == hash }?.let { return it.item }
+            if (page.size < FILE_PAGE.toInt()) return null
+            before = page.last().hlcMillis
+        }
+        return null
     }
 
     private fun findItem(body: MessageBodyView): FileItemView? = when (body) {
@@ -126,6 +142,8 @@ class ImageViewerViewModel(private val core: CoreApi, private val conv: String, 
 
     private companion object {
         const val LOOKUP_LIMIT = 200u
+        const val FILE_PAGE = 200u
+        const val MAX_FILE_PAGES = 25
     }
 }
 
