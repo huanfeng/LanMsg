@@ -49,6 +49,7 @@ import name.apk.lanmsg.ui.theme.LanMsgColors
 import name.apk.lanmsg.ui.theme.LanMsgTheme
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
+import uniffi.lanmsg_api.SelfInfo
 
 /** 外部分享带来的待发送内容。 */
 private class ShareData(val uris: List<Uri>, val text: String?)
@@ -81,7 +82,7 @@ class MainActivity : ComponentActivity() {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // 创建失败由 Launcher 的 GetSelf 请求再次尝试并显示错误
+                // 创建失败只记日志；Launcher 在每次尝试（含“重试”）里会重新 acquire 并显示错误
                 Log.w("MainActivity", "Failed to acquire core", e)
             }
         }
@@ -106,7 +107,16 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** 先在 IO 线程经 CoreHolder 代理（必要时创建 core）GetSelf，据此选起始路由；等待期间只显示主题背景。 */
+/**
+ * 在 IO 线程先 acquire UI（同 owner 幂等；上次创建失败时这里会重新创建），再经代理 GetSelf。
+ * 代理自己不创建 core，所以重试必须经由这里。
+ */
+internal suspend fun fetchSelf(holder: CoreHolder): SelfInfo = withContext(Dispatchers.IO) {
+    holder.acquire(CoreHolder.UI)
+    holder.api.call<Response.SelfInfo>(Request.GetSelf).value
+}
+
+/** 据 [fetchSelf] 的结果选起始路由；等待期间只显示主题背景，失败显示错误并可重试。 */
 @Composable
 private fun Launcher(incoming: ShareData?, onShareConsumed: () -> Unit, shareVm: () -> SharePickViewModel) {
     var start by remember { mutableStateOf<String?>(null) }
@@ -115,9 +125,7 @@ private fun Launcher(incoming: ShareData?, onShareConsumed: () -> Unit, shareVm:
     LaunchedEffect(attempt) {
         failure = null
         try {
-            val self = withContext(Dispatchers.IO) {
-                ServiceLocator.coreHolder.api.call<Response.SelfInfo>(Request.GetSelf).value
-            }
+            val self = fetchSelf(ServiceLocator.coreHolder)
             start = if (self.initialized) Routes.CONVS else Routes.ONBOARDING
         } catch (e: CancellationException) {
             throw e

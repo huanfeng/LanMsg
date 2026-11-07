@@ -185,6 +185,52 @@ class CoreHolderTest {
         scope.cancel()
     }
 
+    @Test fun next_create_waits_for_timed_out_shutdown_to_finish() = runBlocking {
+        val gate = CountDownLatch(1)
+        val scope = CoroutineScope(SupervisorJob())
+        var n = 0
+        var gateOpenWhenSecondCreated = false
+        val holder = CoreHolder(
+            {
+                if (++n == 1) {
+                    BlockingShutdownCore(gate)
+                } else {
+                    gateOpenWhenSecondCreated = gate.count == 0L
+                    FakeCoreApi()
+                }
+            },
+            scope, Dispatchers.IO, shutdownTimeoutMillis = 100, pendingShutdownWaitMillis = 5_000,
+        )
+        holder.acquire("ui")
+        holder.release("ui")
+        // 旧 shutdown 超时（100ms）后才放开；新实例必须等到它结束才创建
+        val opener = launch(Dispatchers.Default) {
+            delay(500)
+            gate.countDown()
+        }
+        withTimeout(10_000) { holder.acquire("ui") }
+        opener.join()
+        assertEquals(2, n)
+        assertTrue(gateOpenWhenSecondCreated)
+        scope.cancel()
+    }
+
+    @Test fun pending_shutdown_wait_is_bounded() = runBlocking {
+        val gate = CountDownLatch(1)
+        val scope = CoroutineScope(SupervisorJob())
+        var n = 0
+        val holder = CoreHolder(
+            { if (++n == 1) BlockingShutdownCore(gate) else FakeCoreApi() },
+            scope, Dispatchers.IO, shutdownTimeoutMillis = 100, pendingShutdownWaitMillis = 100,
+        )
+        holder.acquire("ui")
+        holder.release("ui")
+        withTimeout(5_000) { holder.acquire("ui") } // gate 始终没放开，仍应放行
+        assertEquals(2, n)
+        gate.countDown()
+        scope.cancel()
+    }
+
     @Test fun proxy_does_not_add_ui_owner_when_core_already_running() = runTest {
         val fake = FakeCoreApi().apply { handler = { Response.Ok } }
         val holder = CoreHolder({ fake }, backgroundScope, StandardTestDispatcher(testScheduler))

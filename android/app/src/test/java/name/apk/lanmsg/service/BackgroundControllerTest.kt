@@ -127,4 +127,31 @@ class BackgroundControllerTest {
         runCurrent()
         assertEquals(listOf(BackgroundMode.OFF, BackgroundMode.REALTIME), seen)
     }
+
+    @Test fun mode_seen_is_written_only_when_mode_changes_and_failure_does_not_stop_collector() = runTest {
+        val actions = RecordingActions()
+        val holder = CoreHolder({ FakeCoreApi() }, backgroundScope, StandardTestDispatcher(testScheduler))
+        val cond = MutableStateFlow(Conditions(false, false, false, false))
+        val seen = mutableListOf<BackgroundMode>()
+        val c = BackgroundController(
+            holder, cond, backgroundScope, actions,
+            onModeSeen = { m ->
+                seen += m
+                if (m == BackgroundMode.POWER_SAVING) throw java.io.IOException("disk full")
+            },
+        )
+        c.start()
+        holder.onBackgroundModeChanged(BackgroundMode.POWER_SAVING)
+        runCurrent()
+        cond.value = cond.value.copy(charging = true)
+        runCurrent()
+        cond.value = cond.value.copy(appVisible = true)
+        runCurrent()
+        assertEquals(listOf(BackgroundMode.POWER_SAVING), seen) // 条件变化不重复写
+        assertEquals(listOf(false, true), actions.service) // 写入抛异常后 collector 仍在工作
+        holder.onBackgroundModeChanged(BackgroundMode.OFF)
+        runCurrent()
+        assertEquals(listOf(BackgroundMode.POWER_SAVING, BackgroundMode.OFF), seen)
+        assertEquals(listOf(false, true, false), actions.service)
+    }
 }

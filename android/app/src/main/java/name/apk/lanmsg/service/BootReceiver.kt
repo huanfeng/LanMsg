@@ -23,14 +23,14 @@ class BootReceiver : BroadcastReceiver() {
         ServiceLocator.appScope.launch {
             try {
                 startServiceFromLastMode({ ServiceLocator.localPrefs.lastBackgroundMode.first() }, actions)
+                ServiceLocator.backgroundController.start()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to start service from last known mode", e)
+                Log.w(TAG, "Failed to start service or controller on boot", e)
             } finally {
                 pending.finish()
             }
-            ServiceLocator.backgroundController.start()
         }
     }
 

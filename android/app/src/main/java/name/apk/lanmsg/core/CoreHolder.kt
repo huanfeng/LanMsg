@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,6 +28,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.lanmsg_api.BackgroundMode
 import uniffi.lanmsg_api.ErrorCode
 import uniffi.lanmsg_api.Event
@@ -49,6 +51,8 @@ class CoreHolder(
     private val downloadDir: () -> String? = { null },
     /** 关闭旧实例最多等多久，超时只记日志放行。 */
     private val shutdownTimeoutMillis: Long = 10_000,
+    /** 创建新实例前，对上次超时未结束的 shutdown 再等多久，仍未结束只记日志放行。 */
+    private val pendingShutdownWaitMillis: Long = 2_000,
 ) {
     /** 保护 [ownerSet] 与 [instance] 的写入；只做内存操作，持锁期间不挂起、不阻塞。 */
     private val lock = Any()
@@ -61,6 +65,9 @@ class CoreHolder(
     private val _running = MutableStateFlow(false)
     private val _mode = MutableStateFlow<BackgroundMode?>(null)
     private val hasStartedBefore = AtomicBoolean(false)
+
+    /** 超时后仍在运行的 shutdown 任务；只在持有 [lifecycle] 时读写。 */
+    private var pendingShutdown: Job? = null
 
     /** 当前持有者（只读快照）。 */
     val owners: StateFlow<Set<String>> = _owners.asStateFlow()
@@ -112,6 +119,10 @@ class CoreHolder(
      * 登记 [owner] 并返回实例，首次在 [io] 上创建；并发调用只创建一次，同一 owner 重复调用不重复计数。
      * owner 在创建完成前就被 [release] 掉时，丢弃刚创建的实例并抛 [CancellationException]；
      * 等待中被取消或创建失败时 owner 会被回收。
+     *
+     * 已知取舍：同名 owner 的两个并发 acquire 中，若其中一个被取消，会回收该 owner 的登记，
+     * 另一个随后创建完成时发现 owner 已空而按“已放手”处理（抛 [CancellationException]）。
+     * 实际调用方（UI、服务、worker 各自单次 acquire）不会同名并发，故不为此增加按次计数的复杂度。
      */
     suspend fun acquire(owner: String): CoreApi {
         synchronized(lock) {
@@ -138,6 +149,7 @@ class CoreHolder(
     private suspend fun createAsOwner(owner: String): CoreApi {
         return lifecycle.withLock {
             instance.value?.let { return it }
+            awaitPendingShutdown()
             val created = withContext(io + NonCancellable) { factory().also { applyDownloadDir(it) } } // 创建不可中断：半途取消会留下无人关闭的实例
             val publish = synchronized(lock) {
                 (ownerSet.isNotEmpty()).also {
@@ -153,6 +165,15 @@ class CoreHolder(
             }
             created
         }
+    }
+
+    /** 上次 shutdown 超时后仍在跑：新实例与旧实例会抢数据库与端口，创建前再等一小会儿。 */
+    private suspend fun awaitPendingShutdown() {
+        val job = pendingShutdown ?: return
+        if (job.isActive && withTimeoutOrNull(pendingShutdownWaitMillis) { job.join() } == null) {
+            Log.w(TAG, "Previous core shutdown still running; creating a new core anyway")
+        }
+        if (!job.isActive) pendingShutdown = null
     }
 
     /** 代理用：无实例时，仅当 "ui" 已登记才等待实例出现；"ui" 被放手或从未登记则报错。 */
@@ -230,6 +251,7 @@ class CoreHolder(
             withTimeout(shutdownTimeoutMillis) { job.await() }
         } catch (e: Exception) {
             Log.w(TAG, "Core shutdown failed or timed out", e)
+            if (job.isActive) pendingShutdown = job
         }
     }
 

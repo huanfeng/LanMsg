@@ -92,8 +92,18 @@ class BackgroundController(
     fun start() {
         if (!started.compareAndSet(false, true)) return
         scope.launch {
+            var lastSeen: BackgroundMode? = null
             combine(holder.backgroundMode.filterNotNull(), conditions) { m, c -> m to c }.collect { (m, c) ->
-                onModeSeen(m)
+                if (m != lastSeen) {
+                    lastSeen = m
+                    try {
+                        onModeSeen(m)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w("BackgroundController", "Failed to record background mode", e)
+                    }
+                }
                 val run = BackgroundPolicy.shouldRunService(m, c)
                 val blocked = startFailed && run && !c.appVisible
                 if (!blocked && run != lastRun) {
