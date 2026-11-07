@@ -25,6 +25,8 @@ import name.apk.lanmsg.core.NotifierPrefs
 import name.apk.lanmsg.core.call
 import name.apk.lanmsg.files.MediaStoreSaver
 import name.apk.lanmsg.ui.nav.Routes
+import uniffi.lanmsg_api.ConvKind
+import uniffi.lanmsg_api.ConversationSummary
 import uniffi.lanmsg_api.Event
 import uniffi.lanmsg_api.FileItemView
 import uniffi.lanmsg_api.MessageBodyView
@@ -62,6 +64,9 @@ class Notifier(
     /** 本人状态缓存：读取时刻 + 值；null = 还没读过。 */
     @Volatile private var statusReadAt: Long? = null
     @Volatile private var status = StatusDto.ONLINE
+
+    /** 本机设备 id；与 [status] 同时刷新，读取失败时为 null。 */
+    @Volatile private var selfDeviceId: String? = null
 
     private val lock = Any()
 
@@ -112,13 +117,19 @@ class Notifier(
     }
 
     private suspend fun onMessage(msg: MessageView) {
-        if (msg.isMine) return
+        // 先取状态（顺带刷新本机设备 id），再判断是否本机发出
         if (currentStatus() == StatusDto.BUSY) return
+        if (isFromThisDevice(msg)) return
         if (!canNotify()) return
         if (msg.conv in prefs.mutedConversations.first()) return
         if (appVisible() && VisibleConversation.isVisible(msg.conv)) return
         val body = truncate(bodyText(msg.body) ?: return, MAX_BODY_CODE_POINTS)
-        val title = truncate(conversationTitle(msg.conv) ?: msg.authorDeviceName, MAX_TITLE_CODE_POINTS)
+        val conv = conversationOf(msg.conv)
+        // “我的设备”会话与桌面一致：标题用发送设备名
+        val title = truncate(
+            if (conv == null || conv.kind == ConvKind.SELF_DEVICES) msg.authorDeviceName else conv.title,
+            MAX_TITLE_CODE_POINTS,
+        )
         val id = msg.conv.hashCode()
         // 用户划掉通知不会通知我们：通知已不在栏里时，累积的旧消息要丢弃
         if (nm.activeNotifications.none { it.id == id }) synchronized(lock) { history.remove(msg.conv) }
@@ -184,7 +195,7 @@ class Notifier(
     }
 
     private fun cacheFiles(msg: MessageView) {
-        if (msg.isMine) return
+        if (isFromThisDevice(msg)) return
         val items = filesOf(msg.body)
         if (items.isEmpty()) return
         synchronized(lock) { items.forEach { fileCache[it.hash] = CachedFile(msg.conv, it) } }
@@ -206,10 +217,28 @@ class Notifier(
         is MessageBodyView.Unsupported -> null
     }
 
-    private suspend fun canNotify(): Boolean = prefs.notificationsEnabled.first() && permissionGranted()
+    private suspend fun canNotify(): Boolean {
+        val enabled = prefs.notificationsEnabled.first()
+        val granted = permissionGranted()
+        if (!enabled || !granted) Log.w(TAG, "Notification suppressed: enabledInSettings=$enabled permissionGranted=$granted")
+        return enabled && granted
+    }
 
-    private suspend fun conversationTitle(conv: String): String? = try {
-        holder.api.call<Response.Conversations>(Request.ListConversations).value.firstOrNull { it.conv == conv }?.title
+    /**
+     * 是否本机发出的消息。core 的 isMine 表示“作者用户是自己”，会把“我的设备”里其他设备的消息也算进去，
+     * 所以优先比较作者设备与本机设备 id；本机设备 id 未知时退回 isMine。
+     */
+    private fun isFromThisDevice(msg: MessageView): Boolean {
+        val self = selfDeviceId
+        if (self.isNullOrEmpty()) {
+            Log.w(TAG, "Self device id unknown, falling back to isMine")
+            return msg.isMine
+        }
+        return msg.authorDevice == self
+    }
+
+    private suspend fun conversationOf(conv: String): ConversationSummary? = try {
+        holder.api.call<Response.Conversations>(Request.ListConversations).value.firstOrNull { it.conv == conv }
     } catch (ex: CancellationException) {
         throw ex
     } catch (ex: Exception) {
@@ -226,7 +255,9 @@ class Notifier(
 
     private suspend fun refreshStatus() {
         status = try {
-            holder.api.call<Response.SelfInfo>(Request.GetSelf).value.status
+            val info = holder.api.call<Response.SelfInfo>(Request.GetSelf).value
+            selfDeviceId = info.deviceId
+            info.status
         } catch (ex: CancellationException) {
             throw ex
         } catch (ex: Exception) {

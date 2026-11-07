@@ -17,14 +17,14 @@ import uniffi.lanmsg_api.SelfInfo
 import uniffi.lanmsg_api.StatusDto
 
 object Fixtures {
-    fun conv(id: String = "c1", title: String = "我的设备", unread: UInt = 0u, last: Long? = 1000): ConversationSummary =
+    fun conv(id: String = "c1", title: String = "我的设备", unread: UInt = 0u, last: Long? = 1000, kind: ConvKind = ConvKind.SELF_DEVICES): ConversationSummary =
         ConversationSummary(
-            conv = id, kind = ConvKind.SELF_DEVICES, title = title, lastText = null,
+            conv = id, kind = kind, title = title, lastText = null,
             lastHlcMillis = last, unread = unread, peerOnline = true,
         )
 
     private fun message(id: String, conv: String, mine: Boolean, millis: Long, body: MessageBodyView) = MessageView(
-        id = id, conv = conv, authorUser = "u1", authorDevice = "d1", authorDeviceName = "设备一",
+        id = id, conv = conv, authorUser = "u1", authorDevice = if (mine) "d1" else "d2", authorDeviceName = "设备一",
         isMine = mine, hlcMillis = millis, body = body, state = MessageState.SENT,
     )
 

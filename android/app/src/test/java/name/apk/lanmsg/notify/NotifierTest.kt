@@ -28,6 +28,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import uniffi.lanmsg_api.ConvKind
 import uniffi.lanmsg_api.ErrorCode
 import uniffi.lanmsg_api.Event
 import uniffi.lanmsg_api.MessageBodyView
@@ -89,7 +90,7 @@ class NotifierTest {
         fake.handler = { req ->
             when (req) {
                 is Request.GetSelf -> Response.SelfInfo(Fixtures.selfInfo().apply { status = selfStatus })
-                is Request.ListConversations -> Response.Conversations(listOf(Fixtures.conv("c1", "对端"), Fixtures.conv("c2", "另一个")))
+                is Request.ListConversations -> Response.Conversations(listOf(Fixtures.conv("c1", "对端", kind = ConvKind.DM), Fixtures.conv("c2", "另一个", kind = ConvKind.DM), Fixtures.conv("self", "我的设备")))
                 else -> throw ApiException(ErrorCode.INTERNAL, "unexpected ${req.javaClass.simpleName}")
             }
         }
@@ -140,6 +141,30 @@ class NotifierTest {
     @Test fun no_notification_for_own_message() = runTest {
         notifier().handle(Event.MessageAdded(Fixtures.textMsg("m1", mine = true)))
         assertEquals(0, active().size)
+    }
+
+    @Test fun notifies_for_message_from_my_other_device_with_device_name_title() = runTest {
+        // core 的 isMine 表示“作者用户是自己”：我的另一台设备发来的消息 isMine=true，但不是本机发的
+        val m = Fixtures.textMsg("m1", "self", mine = false).apply { isMine = true }
+        notifier().handle(Event.MessageAdded(m))
+        val a = active().single()
+        assertEquals("self".hashCode(), a.id)
+        assertEquals("设备一", titleOf(a.notification))
+    }
+
+    @Test fun falls_back_to_is_mine_when_self_device_id_unknown() = runTest {
+        fake.handler = { req ->
+            when (req) {
+                is Request.GetSelf -> throw ApiException(ErrorCode.INTERNAL, "core not running")
+                is Request.ListConversations -> Response.Conversations(emptyList())
+                else -> throw ApiException(ErrorCode.INTERNAL, "unexpected")
+            }
+        }
+        val n = notifier()
+        n.handle(Event.MessageAdded(Fixtures.textMsg("m1", mine = true)))
+        assertEquals(0, active().size)
+        n.handle(other("m2"))
+        assertEquals(1, active().size)
     }
 
     @Test fun no_notification_for_visible_conversation() = runTest {
@@ -266,7 +291,7 @@ class NotifierTest {
         val a = active().single().notification
         assertEquals("a".repeat(500) + "…", a.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
         fake.handler = { req ->
-            if (req is Request.ListConversations) Response.Conversations(listOf(Fixtures.conv("c2", "t".repeat(150)))) else Response.SelfInfo(Fixtures.selfInfo())
+            if (req is Request.ListConversations) Response.Conversations(listOf(Fixtures.conv("c2", "t".repeat(150), kind = ConvKind.DM))) else Response.SelfInfo(Fixtures.selfInfo())
         }
         n.handle(other("m2", "c2"))
         val title = titleOf(active().first { it.id == "c2".hashCode() }.notification).toString()
