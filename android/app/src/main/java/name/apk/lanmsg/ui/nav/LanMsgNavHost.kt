@@ -1,12 +1,9 @@
 package name.apk.lanmsg.ui.nav
 
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.Folder
@@ -21,7 +18,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
@@ -40,6 +36,9 @@ import name.apk.lanmsg.ui.chat.ImageViewerScreen
 import name.apk.lanmsg.ui.contacts.ContactDetailScreen
 import name.apk.lanmsg.ui.contacts.ContactsScreen
 import name.apk.lanmsg.ui.contacts.RequestsScreen
+import name.apk.lanmsg.ui.devices.DevicesScreen
+import name.apk.lanmsg.ui.devices.PairHostScreen
+import name.apk.lanmsg.ui.devices.PairJoinScreen
 import name.apk.lanmsg.ui.convs.ConversationListScreen
 import name.apk.lanmsg.ui.files.FilesScreen
 import name.apk.lanmsg.ui.forward.ForwardPickScreen
@@ -148,9 +147,27 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
             composable(Routes.ME) {
                 MeScreen(onOpenDevices = { nav.navigate(Routes.DEVICES) }, onOpenSettings = { nav.navigate(Routes.SETTINGS) })
             }
-            composable(Routes.DEVICES) { Placeholder(Routes.DEVICES) }
-            composable(Routes.PAIR_HOST) { Placeholder(Routes.PAIR_HOST) }
-            composable(Routes.PAIR_JOIN) { Placeholder(Routes.PAIR_JOIN) }
+            composable(Routes.DEVICES) {
+                DevicesScreen(
+                    onBack = { nav.popBackStack() },
+                    onAdd = { nav.navigate(Routes.PAIR_HOST) },
+                    onJoin = { nav.navigate(Routes.PAIR_JOIN) },
+                )
+            }
+            composable(Routes.PAIR_HOST) { PairHostScreen(onBack = { nav.popBackStack() }, onDone = { nav.popBackStack() }) }
+            composable(Routes.PAIR_JOIN) {
+                PairJoinScreen(
+                    onBack = { nav.popBackStack() },
+                    onDone = {
+                        // 引导流程中加入已有设备：配对完成后进入主界面并清掉引导页与配对页
+                        if (nav.previousBackStackEntry?.destination?.route == Routes.ONBOARDING) {
+                            nav.navigate(Routes.CONVS) { popUpTo(Routes.ONBOARDING) { inclusive = true } }
+                        } else {
+                            nav.popBackStack()
+                        }
+                    },
+                )
+            }
             composable(Routes.SETTINGS) { SettingsScreen(onBack = { nav.popBackStack() }) }
             composable(Routes.SHARE) {
                 val vm = shareVm()
@@ -211,13 +228,5 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                 )
             }
         }
-    }
-}
-
-// 占位页：后续任务逐个把上面的 composable 换成真实页面；阶段验收时全文搜索 Placeholder( 必须为 0 处调用。
-@Composable
-private fun Placeholder(route: String) {
-    Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.Center) {
-        Text(route, color = LanMsgColors.current.ink)
     }
 }
