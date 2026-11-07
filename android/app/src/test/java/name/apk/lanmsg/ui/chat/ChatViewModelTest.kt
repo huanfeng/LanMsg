@@ -17,6 +17,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.runner.RunWith
+import androidx.test.ext.junit.runners.AndroidJUnit4
 import uniffi.lanmsg_api.ErrorCode
 import uniffi.lanmsg_api.Event
 import uniffi.lanmsg_api.MessageState
@@ -24,6 +26,7 @@ import uniffi.lanmsg_api.MessageView
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
 
+@RunWith(AndroidJUnit4::class)
 class ChatViewModelTest {
     @get:Rule val main = MainDispatcherRule()
 
@@ -183,6 +186,33 @@ class ChatViewModelTest {
         assertNull(VisibleConversation.current.value)
         fake.emit(Event.MessageAdded(m("m4"))); advanceUntilIdle()
         assertEquals(2, fake.requests.count { it is Request.MarkRead })
+    }
+
+    @Test fun mark_read_failure_is_silent_and_retried_on_next_message() = runTest {
+        val fake = fakeWith { listOf(m("m1")) }
+        val base = fake.handler
+        var failing = true
+        fake.handler = { r ->
+            if (r is Request.MarkRead && failing) throw ApiException(ErrorCode.NOT_FOUND, "消息不存在") else base(r)
+        }
+        val vm = ChatViewModel(fake, "c1", VisibleConversation)
+        vm.onVisible(); advanceUntilIdle()
+        assertNull(vm.state.value.error)
+        failing = false
+        fake.emit(Event.MessageAdded(m("m2"))); advanceUntilIdle()
+        assertNull(vm.state.value.error)
+        assertEquals(Request.MarkRead("c1", "m2"), fake.requests.last { it is Request.MarkRead })
+        assertEquals(2, fake.requests.count { it is Request.MarkRead })
+    }
+
+    @Test fun import_and_send_flags_error_when_all_imports_fail() = runTest {
+        val vm = ChatViewModel(fakeWith { emptyList() }, "c1", VisibleConversation)
+        advanceUntilIdle()
+        val importer = object : name.apk.lanmsg.files.Importer {
+            override suspend fun import(uris: List<android.net.Uri>) = emptyList<String>()
+        }
+        vm.importAndSend(importer, listOf(android.net.Uri.EMPTY)); advanceUntilIdle()
+        assertEquals(ChatViewModel.ERROR_IMPORT_FAILED, vm.state.value.error)
     }
 
     @Test fun can_recall_only_own_within_two_minutes() = runTest {

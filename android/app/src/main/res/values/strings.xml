@@ -121,6 +121,7 @@
     <string name="share_empty">没有可用的会话</string>
     <string name="share_need_setup">请先完成初始化，再分享文件</string>
     <string name="share_import_failed">无法读取要发送的文件</string>
+    <string name="open_file_failed">无法打开此文件</string>
     <string name="path_vpn">VPN</string>
     <string name="path_internet">公网</string>
     <string name="path_relay">中继</string>

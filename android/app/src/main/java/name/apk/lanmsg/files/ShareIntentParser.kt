@@ -6,7 +6,10 @@ import androidx.core.content.IntentCompat
 
 object ShareIntentParser {
     /** ACTION_SEND 取单个 EXTRA_STREAM，SEND_MULTIPLE 取列表；其他返回空。 */
-    fun parse(intent: Intent): List<Uri> = when (intent.action) {
+    fun parse(intent: Intent): List<Uri> = parseAll(intent).filter { it.scheme == "content" }
+
+    /** 只放行 content://：file:// 会让本应用以自己的身份读取私有文件。 */
+    private fun parseAll(intent: Intent): List<Uri> = when (intent.action) {
         Intent.ACTION_SEND -> listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
         Intent.ACTION_SEND_MULTIPLE ->
             IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()

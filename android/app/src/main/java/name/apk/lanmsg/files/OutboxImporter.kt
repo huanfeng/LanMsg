@@ -7,6 +7,7 @@ import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.coroutines.cancellation.CancellationException
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -32,26 +33,25 @@ class OutboxImporter(
         uris.mapNotNull { uri ->
             try {
                 copyOne(uri, dir, root)
-            } catch (e: IOException) {
-                Log.w(TAG, "导入失败，已跳过：$uri", e)
-                null
-            } catch (e: SecurityException) {
-                Log.w(TAG, "无权读取，已跳过：$uri", e)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // provider 可能抛 IOException、SecurityException 乃至 IllegalStateException 等，一律跳过该项
+                Log.w(TAG, "Import failed, skipped: $uri", e)
                 null
             }
         }
     }
 
     private fun copyOne(uri: Uri, dir: File, root: File): String {
-        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("无法创建目录 $dir")
+        // 只接受外部 content://；file:// 或本应用自己的 FileProvider 会让我们以自己的身份读私有文件
+        if (uri.scheme != "content") throw IOException("Unsupported URI scheme: ${uri.scheme}")
+        if (uri.authority == FileOpener.AUTHORITY) throw IOException("Refusing to import own FileProvider file")
+        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Cannot create directory $dir")
         val name = sanitize(displayName(uri))
-        val target = reserve(dir, name)
+        val target = reserve(dir, name, root)
         try {
-            // 防目录穿越的第二道保险：即使 sanitize 有疏漏，也不写到 outbox 之外
-            if (!target.canonicalPath.startsWith(root.path + File.separator)) {
-                throw IOException("目标路径越界：${target.path}")
-            }
-            val input = ctx.contentResolver.openInputStream(uri) ?: throw IOException("无法打开 $uri")
+            val input = ctx.contentResolver.openInputStream(uri) ?: throw IOException("Cannot open $uri")
             input.use { src -> target.outputStream().use { dst -> src.copyTo(dst) } }
         } catch (e: Exception) {
             target.delete() // 部分写入的文件不留下
@@ -61,24 +61,24 @@ class OutboxImporter(
     }
 
     private fun displayName(uri: Uri): String? {
-        if (uri.scheme == "file") return uri.lastPathSegment
         return try {
             ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
                 if (c.moveToFirst()) c.getString(0) else null
             }
         } catch (e: RuntimeException) {
-            Log.w(TAG, "读取文件名失败：$uri", e)
+            Log.w(TAG, "Failed to read display name: $uri", e)
             null
         } ?: uri.lastPathSegment
     }
 
-    /** 用 createNewFile 原子占位；同名则在扩展名前追加 " (n)"。 */
-    private fun reserve(dir: File, name: String): File {
+    /** 用 createNewFile 原子占位；同名则在扩展名前追加 " (n)"。候选先校验位于 outbox 内（防目录穿越的第二道保险）再占位。 */
+    private fun reserve(dir: File, name: String, root: File): File {
         val dot = name.lastIndexOf('.')
         val (base, ext) = if (dot > 0) name.substring(0, dot) to name.substring(dot) else name to ""
         var n = 0
         while (true) {
             val f = File(dir, if (n == 0) name else "$base ($n)$ext")
+            if (!f.canonicalPath.startsWith(root.path + File.separator)) throw IOException("Target path escapes outbox: ${f.path}")
             if (f.createNewFile()) return f
             n++
         }
@@ -94,17 +94,37 @@ class OutboxImporter(
     companion object {
         private const val TAG = "OutboxImporter"
         private const val MAX_NAME = 120
+        private const val MAX_NAME_BYTES = 200 // 文件系统上限 255，给重名后缀留余量
 
-        /** 去掉路径分隔符与控制字符、首尾空白和点；空则 "file"；超长时截断主名并保留扩展名。 */
+        private fun utf8Len(s: String) = s.toByteArray(Charsets.UTF_8).size
+
+        /**
+         * 去掉路径分隔符、控制字符与 Unicode 格式字符（如 U+202E 双向覆盖）、首尾空白和点；空则 "file"；
+         * 超过 120 字符或 200 字节时按码点截断主名（不拆代理对）并保留扩展名。
+         */
         fun sanitize(displayName: String?): String {
             val cleaned = (displayName ?: "")
-                .filter { it != '/' && it != '\\' && !it.isISOControl() }
+                .filter { it != '/' && it != '\\' && !it.isISOControl() && Character.getType(it) != Character.FORMAT.toInt() }
                 .trim { it.isWhitespace() || it == '.' }
             if (cleaned.isEmpty()) return "file"
-            if (cleaned.length <= MAX_NAME) return cleaned
+            if (cleaned.length <= MAX_NAME && utf8Len(cleaned) <= MAX_NAME_BYTES) return cleaned
             val dot = cleaned.lastIndexOf('.')
-            val ext = if (dot > 0 && cleaned.length - dot <= 20) cleaned.substring(dot) else ""
-            return cleaned.substring(0, MAX_NAME - ext.length) + ext
+            val ext = if (dot > 0 && cleaned.length - dot <= 20 && utf8Len(cleaned.substring(dot)) <= 40) cleaned.substring(dot) else ""
+            val base = cleaned.substring(0, if (ext.isEmpty()) cleaned.length else dot)
+            var chars = ext.length
+            var bytes = utf8Len(ext)
+            var end = 0
+            while (end < base.length) {
+                val cp = base.codePointAt(end)
+                val n = Character.charCount(cp)
+                val b = String(Character.toChars(cp)).let(::utf8Len)
+                if (chars + n > MAX_NAME || bytes + b > MAX_NAME_BYTES) break
+                chars += n
+                bytes += b
+                end += n
+            }
+            val head = base.substring(0, end).trimEnd { it.isWhitespace() || it == '.' }
+            return if (head.isEmpty()) "file$ext" else head + ext
         }
     }
 }

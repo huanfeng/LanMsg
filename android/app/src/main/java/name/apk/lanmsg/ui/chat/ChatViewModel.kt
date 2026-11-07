@@ -1,6 +1,7 @@
 package name.apk.lanmsg.ui.chat
 
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -95,7 +96,10 @@ class ChatViewModel(
     /** 把外部 URI 落地到发件箱后发送；落地在 IO 线程，全部失败时不发请求。 */
     fun importAndSend(importer: Importer, uris: List<Uri>) {
         if (uris.isEmpty()) return
-        viewModelScope.launch { sendFiles(importer.import(uris)) }
+        viewModelScope.launch {
+            val paths = importer.import(uris)
+            if (paths.isEmpty()) _state.update { it.copy(error = ERROR_IMPORT_FAILED) } else sendFiles(paths)
+        }
     }
 
     fun download(hash: String) {
@@ -247,8 +251,9 @@ class ChatViewModel(
             try {
                 core.request(Request.MarkRead(conv, last))
             } catch (e: ApiException) {
+                // 准备中的文件消息尚未入库会 NotFound，静默处理（与桌面端一致），下条消息再试
+                Log.w(TAG, "MarkRead failed: ${e.code}", e)
                 lastMarked = null
-                _state.update { it.copy(error = errorText(e)) }
             }
         }
     }
@@ -266,6 +271,8 @@ class ChatViewModel(
 
     companion object {
         const val ERROR_PEER_OFFLINE = "peer_offline"
+        const val ERROR_IMPORT_FAILED = "import_failed"
+        private const val TAG = "ChatViewModel"
         private const val PAGE = 50u
         private const val RECALL_WINDOW_MS = 120_000L
 

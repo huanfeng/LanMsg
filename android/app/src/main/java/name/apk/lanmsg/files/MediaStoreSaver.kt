@@ -25,10 +25,11 @@ class MediaStoreSaver(private val ctx: Context) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) saveScoped(src, mime, name, isImage) else saveLegacy(src, mime, name, isImage)
         } catch (e: IOException) {
-            Log.w(TAG, "保存到相册失败：$localPath", e)
+            Log.w(TAG, "Save to gallery failed: $localPath", e)
             null
-        } catch (e: SecurityException) {
-            Log.w(TAG, "保存到相册无权限：$localPath", e)
+        } catch (e: RuntimeException) {
+            // SecurityException、resolver.insert 的 IllegalArgumentException 等
+            Log.w(TAG, "Save to gallery failed: $localPath", e)
             null
         }
     }
@@ -44,7 +45,7 @@ class MediaStoreSaver(private val ctx: Context) {
         }
         val uri = resolver.insert(collection, values) ?: return null
         try {
-            val out = resolver.openOutputStream(uri) ?: throw IOException("无法打开 $uri")
+            val out = resolver.openOutputStream(uri) ?: throw IOException("Cannot open $uri")
             out.use { dst -> src.inputStream().use { it.copyTo(dst) } }
             resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
         } catch (e: Exception) {
@@ -58,7 +59,7 @@ class MediaStoreSaver(private val ctx: Context) {
     private fun saveLegacy(src: File, mime: String, name: String, isImage: Boolean): Uri {
         val pub = Environment.getExternalStoragePublicDirectory(if (isImage) Environment.DIRECTORY_PICTURES else Environment.DIRECTORY_MOVIES)
         val dir = File(pub, "LanMsg")
-        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("无法创建目录 $dir")
+        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Cannot create directory $dir")
         val dot = name.lastIndexOf('.')
         val (base, ext) = if (dot > 0) name.substring(0, dot) to name.substring(dot) else name to ""
         var n = 0

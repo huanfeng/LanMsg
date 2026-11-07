@@ -1,5 +1,7 @@
 package name.apk.lanmsg.ui.chat
 
+import android.os.Build
+import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -89,7 +91,7 @@ fun ChatScreen(
         onStopOrDispose { vm.onHidden() }
     }
     val ctx = LocalContext.current
-    val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_PICK_ITEMS)) { uris ->
+    val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(maxPickItems())) { uris ->
         vm.importAndSend(ServiceLocator.importer, uris)
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -118,6 +120,10 @@ fun ChatScreen(
 }
 
 private const val MAX_PICK_ITEMS = 30
+
+/** 系统上限随版本而异，超过会让 PickMultipleVisualMedia 抛异常；低版本用 30。 */
+private fun maxPickItems(): Int =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) minOf(MAX_PICK_ITEMS, MediaStore.getPickImagesMaxLimit()) else MAX_PICK_ITEMS
 
 private sealed interface ChatRow {
     data class Separator(val millis: Long) : ChatRow
@@ -148,7 +154,11 @@ fun ChatContent(
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
     val errorText = state.error?.let {
-        if (it == ChatViewModel.ERROR_PEER_OFFLINE) stringResource(R.string.err_peer_offline) else stringResource(R.string.err_generic, it)
+        when (it) {
+            ChatViewModel.ERROR_PEER_OFFLINE -> stringResource(R.string.err_peer_offline)
+            ChatViewModel.ERROR_IMPORT_FAILED -> stringResource(R.string.share_import_failed)
+            else -> stringResource(R.string.err_generic, it)
+        }
     }
     LaunchedEffect(errorText) {
         if (errorText != null) {

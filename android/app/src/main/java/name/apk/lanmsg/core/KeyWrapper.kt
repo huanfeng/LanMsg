@@ -49,7 +49,7 @@ class AndroidKeystoreWrapper : KeyWrapper {
     }
 
     override fun decrypt(blob: ByteArray): ByteArray {
-        require(blob.size > IV_LEN) { "密文过短" }
+        require(blob.size > IV_LEN) { "Ciphertext too short" }
         val cipher = Cipher.getInstance(TRANSFORM)
         cipher.init(Cipher.DECRYPT_MODE, masterKey(), GCMParameterSpec(128, blob, 0, IV_LEN))
         return cipher.doFinal(blob, IV_LEN, blob.size - IV_LEN)

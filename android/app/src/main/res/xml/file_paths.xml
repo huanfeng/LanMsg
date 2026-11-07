@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <files-path name="lanmsg" path="lanmsg/" />
+    <!-- 只暴露需要给外部 App 打开的子目录：core 默认下载目录（data_dir/downloads，见 settings.rs default_settings）
+         与发件箱副本；lanmsg/ 其余部分（数据库等）与 keys/ 不对外 -->
+    <files-path name="downloads_core" path="lanmsg/downloads/" />
     <files-path name="outbox" path="outbox/" />
-    <external-files-path name="downloads" path="Download/" />
 </paths>

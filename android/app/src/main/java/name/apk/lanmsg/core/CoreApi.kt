@@ -23,5 +23,5 @@ interface CoreApi {
 /** 发送请求并断言响应类型，类型不符抛 [ApiException]。 */
 suspend inline fun <reified T : Response> CoreApi.call(req: Request): T {
     val resp = request(req)
-    return resp as? T ?: throw ApiException(ErrorCode.INTERNAL, "响应类型不符")
+    return resp as? T ?: throw ApiException(ErrorCode.INTERNAL, "Unexpected response type")
 }

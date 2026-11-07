@@ -248,6 +248,7 @@
 | share_empty | 没有可用的会话 |
 | share_need_setup | 请先完成初始化，再分享文件 |
 | share_import_failed | 无法读取要发送的文件 |
+| open_file_failed | 无法打开此文件 |
 | path_vpn | VPN |
 | path_internet | 公网 |
 | path_relay | 中继 |

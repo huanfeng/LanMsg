@@ -24,7 +24,7 @@ class Thumbnailer(@Suppress("unused") private val ctx: Context) {
             else -> null
         }
     } catch (t: Throwable) {
-        Log.w(TAG, "缩略图生成失败: $path", t)
+        Log.w(TAG, "Thumbnail generation failed: $path", t)
         null
     }
 

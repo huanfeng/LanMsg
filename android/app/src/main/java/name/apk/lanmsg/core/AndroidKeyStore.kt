@@ -16,8 +16,8 @@ class AndroidKeyStore(private val dir: File, private val wrapper: KeyWrapper) : 
         return try {
             wrapper.decrypt(f.readBytes())
         } catch (e: Exception) {
-            Log.w(TAG, "读取密钥失败: $name", e)
-            throw FfiException.Api(ErrorCode.INTERNAL, "密钥文件损坏: $name")
+            Log.w(TAG, "Failed to read key: $name", e)
+            throw FfiException.Api(ErrorCode.INTERNAL, "Key file corrupted: $name")
         }
     }
 
@@ -26,10 +26,10 @@ class AndroidKeyStore(private val dir: File, private val wrapper: KeyWrapper) : 
         try {
             dir.mkdirs()
             tmp.writeBytes(wrapper.encrypt(bytes))
-            if (!tmp.renameTo(file(name))) throw java.io.IOException("重命名失败")
+            if (!tmp.renameTo(file(name))) throw java.io.IOException("Rename failed")
         } catch (e: Exception) {
-            Log.w(TAG, "保存密钥失败: $name", e)
-            throw FfiException.Api(ErrorCode.IO, "保存密钥失败: $name")
+            Log.w(TAG, "Failed to save key: $name", e)
+            throw FfiException.Api(ErrorCode.IO, "Failed to save key: $name")
         } finally {
             tmp.delete() // 成功时已被重命名，delete 为空操作；失败时清掉残留
         }

@@ -24,6 +24,13 @@ class ShareIntentParserTest {
         assertEquals(listOf(a, b), ShareIntentParser.parse(i))
     }
 
+    @Test fun non_content_schemes_are_dropped() {
+        val evil = Uri.parse("file:///data/data/name.apk.lanmsg/files/keys/k")
+        val i = Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM, arrayListOf(evil, a))
+        assertEquals(listOf(a), ShareIntentParser.parse(i))
+        assertTrue(ShareIntentParser.parse(Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, evil)).isEmpty())
+    }
+
     @Test fun send_text_only() {
         val i = Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_TEXT, "hi")
         assertTrue(ShareIntentParser.parse(i).isEmpty())

@@ -17,11 +17,11 @@ internal class EventPump(
     fun onEvent(event: Event) {
         try {
             if (!events.tryEmit(event)) {
-                Log.w(TAG, "事件缓冲已满，丢弃事件并触发全量重拉")
+                Log.w(TAG, "Event buffer full, dropping event and triggering full reload")
                 lagged.tryEmit(Unit)
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "onEvent 处理失败", t)
+            Log.e(TAG, "onEvent handler failed", t)
         }
     }
 
@@ -29,7 +29,7 @@ internal class EventPump(
         try {
             lagged.tryEmit(Unit)
         } catch (t: Throwable) {
-            Log.e(TAG, "onLagged 处理失败", t)
+            Log.e(TAG, "onLagged handler failed", t)
         }
     }
 

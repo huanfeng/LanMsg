@@ -33,6 +33,7 @@ class FakeSharedProvider : ContentProvider() {
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         if (uri.getQueryParameter("fail") != null) throw FileNotFoundException("boom")
+        if (uri.getQueryParameter("crash") != null) throw IllegalStateException("provider crashed")
         val f = File.createTempFile("share", ".bin")
         f.writeText(uri.lastPathSegment.orEmpty())
         return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
@@ -63,6 +64,47 @@ class OutboxImporterTest {
         assertEquals("file", OutboxImporter.sanitize("  ..  "))
         assertEquals("file", OutboxImporter.sanitize(null))
         assertTrue(OutboxImporter.sanitize("a".repeat(300) + ".jpg").let { it.length <= 120 && it.endsWith(".jpg") })
+        assertEquals("file", OutboxImporter.sanitize("\u202E\u200F"))
+    }
+
+    @Test fun long_cjk_name_is_truncated_by_bytes_and_imports() = runTest {
+        val name = "汉".repeat(300) + ".jpg"
+        val s = OutboxImporter.sanitize(name)
+        assertTrue(s.endsWith(".jpg"))
+        assertTrue(s.toByteArray(Charsets.UTF_8).size <= 200)
+        val paths = importer().import(listOf(uri("x", name)))
+        assertEquals(1, paths.size)
+        assertEquals(s, File(paths.single()).name)
+    }
+
+    @Test fun truncation_does_not_split_surrogate_pairs() {
+        val s = OutboxImporter.sanitize("\uD83D\uDE00".repeat(100) + ".png")
+        assertTrue(s.endsWith(".png"))
+        assertTrue(s.dropLast(4).chunked(2).all { it == "\uD83D\uDE00" })
+    }
+
+    @Test fun sanitize_strips_format_control_characters() {
+        assertEquals("exe.txt", OutboxImporter.sanitize("\u202Eexe.txt"))
+        assertEquals("ab.txt", OutboxImporter.sanitize("a\u200Eb\u200F.txt"))
+    }
+
+    @Test fun non_content_and_own_provider_uris_are_skipped() = runTest {
+        val imp = importer()
+        val secret = File(tmp.root, "secret.txt").apply { writeText("s") }
+        val paths = imp.import(
+            listOf(
+                Uri.fromFile(secret),
+                Uri.parse("content://${FileOpener.AUTHORITY}/lanmsg/x"),
+                uri("ok", "ok.bin"),
+            ),
+        )
+        assertEquals(listOf("ok.bin"), paths.map { File(it).name })
+    }
+
+    @Test fun provider_runtime_exception_is_skipped() = runTest {
+        val imp = importer()
+        val paths = imp.import(listOf(uri("bad", "bad.bin", "&crash=1"), uri("ok", "ok.bin")))
+        assertEquals(listOf("ok.bin"), paths.map { File(it).name })
     }
 
     @Test fun import_dedupes_same_name() = runTest {
