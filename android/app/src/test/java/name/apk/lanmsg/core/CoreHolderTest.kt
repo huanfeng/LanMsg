@@ -6,6 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,7 +31,6 @@ import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import uniffi.lanmsg_api.BackgroundMode
@@ -194,12 +194,9 @@ class CoreHolderTest {
         val scope = CoroutineScope(SupervisorJob())
         val holder = CoreHolder({ FakeCoreApi() }, scope, Dispatchers.IO)
         holder.acquire("service") // 实例已由 service 持有，acquire 本可走快路径
-        val job = Job().also { it.cancel() }
-        try {
-            withContext(job) { holder.acquire("ui") }
-            fail("expected CancellationException")
-        } catch (_: CancellationException) {
-        }
+        // 在协程内部取消后再 acquire：ensureActive 必须在快路径之前生效
+        val result = runCatching { withContext(Job()) { currentCoroutineContext().cancel(); holder.acquire("ui") } }
+        assertTrue(result.exceptionOrNull() is CancellationException)
         assertEquals(setOf("service"), holder.owners.value)
         assertTrue(holder.running.value)
         scope.cancel()
