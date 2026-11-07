@@ -184,6 +184,8 @@ async fn on_recall(svc: &Inner, m: &StoredMessage, target: &MsgId) {
                     &t,
                 ),
             });
+            // 目标若是会话最后一条，预览变为“已撤回”。
+            crate::service::notify_conversation(svc, &t.env.conv);
         }
         _ => {
             if let Err(e) = svc.store.undo_recall(target) {

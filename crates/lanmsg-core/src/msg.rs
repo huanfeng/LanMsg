@@ -231,22 +231,7 @@ impl Messaging {
                 msg: msg_view.clone(),
             });
 
-            let peer_online = match conv_row.kind {
-                ConvKindRow::Dm => conv_row.peer_user.is_some_and(|pu| {
-                    self.conns
-                        .peers()
-                        .iter()
-                        .any(|p| p.cert.as_ref().is_some_and(|c| c.user == pu))
-                }),
-                _ => false,
-            };
-            let summary = conv_summary(
-                self.store.as_ref(),
-                Some(&self_user),
-                &conv_row,
-                peer_online,
-            );
-            let _ = self.events.send(Event::ConversationUpdated { summary });
+            self.emit_conv_updated(&conv_row, &self_user);
         }
 
         // 7. 计算投递目标 targets(conv)（Dm → 对端 + 自己其他设备转交；
@@ -270,6 +255,21 @@ impl Messaging {
         }
 
         Ok(env.id)
+    }
+
+    /// 重算并广播会话摘要（预览、时间、未读、对端在线）。
+    fn emit_conv_updated(&self, conv_row: &ConvRow, self_user: &UserId) {
+        let peer_online = match conv_row.kind {
+            ConvKindRow::Dm => conv_row.peer_user.is_some_and(|pu| {
+                self.conns
+                    .peers()
+                    .iter()
+                    .any(|p| p.cert.as_ref().is_some_and(|c| c.user == pu))
+            }),
+            _ => false,
+        };
+        let summary = conv_summary(self.store.as_ref(), Some(self_user), conv_row, peer_online);
+        let _ = self.events.send(Event::ConversationUpdated { summary });
     }
 
     /// 把他人发来的消息转交给自己其他在线设备（后台发送，不阻塞事件循环）。
@@ -471,6 +471,8 @@ impl Messaging {
                         ),
                     });
                 }
+                // 准备完成后信封才入 messages，会话预览/时间此刻才变化。
+                self.emit_conv_updated(&conv_row, &self_user);
             }
             Err(e) => {
                 warn!(error = %e, "文件准备失败");

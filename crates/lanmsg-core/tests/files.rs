@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use common::{befriend, node, TestNode};
 use lanmsg_api::types::{
-    BlobState, ErrorCode, Event, FileFilter, FileKindFilter, FileView, MessageBodyView, Request,
-    Response,
+    BlobState, ErrorCode, Event, FileFilter, FileKindFilter, FileView, LastMessageKind,
+    MessageBodyView, Request, Response,
 };
 use lanmsg_core::discovery::MemoryBus;
 
@@ -413,4 +413,70 @@ async fn forward_deleted_or_recalled_file_is_not_found() {
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::NotFound);
     }
+}
+
+/// 回归：文件准备完成后（信封才入库）、对端收到文件、撤回后，
+/// 两端都必须收到带最新 last_kind 的 ConversationUpdated，会话列表预览才会刷新。
+#[tokio::test]
+async fn conversation_summary_refreshes_after_file_and_recall() {
+    let bus = MemoryBus::new();
+    let mut a = node(&bus).await;
+    a.init_first("A").await;
+    let mut b = node(&bus).await;
+    b.init_first("B").await;
+    befriend(&mut a, &mut b).await;
+    let conv = open_dm(&a, &b).await;
+    let src = tempfile::tempdir().unwrap();
+    a.call(Request::SendFiles {
+        conv: conv.clone(),
+        paths: vec![write(src.path(), "doc.bin", b"hello")],
+    })
+    .await;
+
+    let is_file = |e: &Event| {
+        matches!(e, Event::ConversationUpdated { summary }
+            if summary.conv == conv
+                && matches!(&summary.last_kind, Some(LastMessageKind::File { name, .. }) if name == "doc.bin"))
+    };
+    b.wait_event(is_file, 10).await;
+
+    let rows = query(&a, filter(FileKindFilter::All, 50)).await;
+    a.call(Request::Recall {
+        msg: rows[0].msg.clone(),
+    })
+    .await;
+    let is_recalled = |e: &Event| {
+        matches!(e, Event::ConversationUpdated { summary }
+            if summary.conv == conv && summary.last_kind == Some(LastMessageKind::Recalled))
+    };
+    a.wait_event(is_recalled, 10).await;
+    b.wait_event(is_recalled, 10).await;
+}
+
+/// 回归：单节点（自设备会话，无对端消息干扰）发文件，准备完成后必须发带
+/// last_kind 的 ConversationUpdated——此前只发 MessageUpdated，会话列表预览不刷新。
+#[tokio::test]
+async fn conversation_summary_refreshes_when_file_preparation_finishes() {
+    let bus = MemoryBus::new();
+    let mut a = node(&bus).await;
+    a.init_first("A").await;
+    let conv = match a.call(Request::ListConversations).await {
+        Response::Conversations { value } => value[0].conv.clone(),
+        other => panic!("期望 Conversations，实际 {other:?}"),
+    };
+    let src = tempfile::tempdir().unwrap();
+    a.call(Request::SendFiles {
+        conv: conv.clone(),
+        paths: vec![write(src.path(), "solo.bin", b"hello")],
+    })
+    .await;
+    a.wait_event(
+        |e| {
+            matches!(e, Event::ConversationUpdated { summary }
+                if summary.conv == conv
+                    && matches!(&summary.last_kind, Some(LastMessageKind::File { name, .. }) if name == "solo.bin"))
+        },
+        10,
+    )
+    .await;
 }

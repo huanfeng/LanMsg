@@ -821,6 +821,7 @@ async fn recall(inner: &Inner, msg: String) -> Result<Response, ApiError> {
         let _ = inner.events.send(Event::MessageUpdated {
             msg: message_view(inner.store.as_ref(), &self_device, &peers, &fresh),
         });
+        crate::service::notify_conversation(inner, &fresh.env.conv);
     }
     Ok(Response::Ok)
 }
