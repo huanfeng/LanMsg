@@ -54,7 +54,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="局域网设备间实时消息接收" />
+                android:value="Real-time message delivery between devices on the local network" />
         </service>
 
         <receiver

@@ -10,6 +10,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -128,9 +130,11 @@ class CoreHolder(
         synchronized(lock) {
             ownerSet += owner
             _owners.value = ownerSet.toSet()
-            instance.value?.let { return it }
         }
         try {
+            // 登记之后再检查取消：已取消的调用即使走快路径也要经 catch 回收刚登记的 owner
+            currentCoroutineContext().ensureActive()
+            instance.value?.let { return it }
             return createAsOwner(owner)
         } catch (e: ReleasedBeforeStart) {
             throw e

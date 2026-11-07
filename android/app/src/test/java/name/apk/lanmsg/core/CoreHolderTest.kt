@@ -3,7 +3,10 @@
 package name.apk.lanmsg.core
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -27,6 +30,7 @@ import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import uniffi.lanmsg_api.BackgroundMode
@@ -183,6 +187,21 @@ class CoreHolderTest {
         withTimeout(2_000) { while (!fake.shutdownCalled) delay(10) }
         assertEquals(emptySet<String>(), holder.owners.value)
         assertFalse(holder.running.value)
+        scope.cancel()
+    }
+
+    @Test fun acquire_already_cancelled_with_running_instance_reclaims_owner() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        val holder = CoreHolder({ FakeCoreApi() }, scope, Dispatchers.IO)
+        holder.acquire("service") // 实例已由 service 持有，acquire 本可走快路径
+        val job = Job().also { it.cancel() }
+        try {
+            withContext(job) { holder.acquire("ui") }
+            fail("expected CancellationException")
+        } catch (_: CancellationException) {
+        }
+        assertEquals(setOf("service"), holder.owners.value)
+        assertTrue(holder.running.value)
         scope.cancel()
     }
 
