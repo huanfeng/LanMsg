@@ -324,7 +324,7 @@ fn hit_item(ui: &UiState, r: HitRow) -> Element {
         .on_click(move |_| ui_click.open_from_search(conv.clone()))
         .child(head)
         .child(
-            Element::label(format!("{}：{}", r.author, r.snippet))
+            Element::label(strings::with_colon(&r.author, &r.snippet))
                 .font_size(style::FONT_META)
                 .fg_role(Role::TextMuted)
                 .max_lines(2)

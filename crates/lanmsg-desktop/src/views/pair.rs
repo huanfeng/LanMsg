@@ -63,10 +63,9 @@ pub fn format_sas(code: &str) -> String {
 
 /// 数字确认页：对端自报的名称与类型（可能被伪造，所以单独标注“自称”）。
 pub fn sas_peer_name_line(name: &str, device_type: &str) -> String {
-    format!(
-        "{}：{name}（{}）",
+    strings::with_colon(
         strings::PAIR_SAS_PEER,
-        device_type_label(device_type)
+        &strings::paren(name, &device_type_label(device_type)),
     )
 }
 

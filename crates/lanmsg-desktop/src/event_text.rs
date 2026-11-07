@@ -53,19 +53,19 @@ pub fn request_preview_text(p: &RequestPreviewView) -> Option<String> {
         } => {
             let size = human_size(*total_size);
             Some(if *count <= 1 {
-                format!("{first_name}（{size}）")
+                strings::paren(first_name, &size)
             } else {
-                format!(
-                    "{first_name}{}{count}{}（{size}）",
+                let head = format!(
+                    "{first_name}{}{count}{}",
                     strings::REQ_PREVIEW_FILES_ETC_MID,
                     strings::REQ_PREVIEW_FILES_UNIT
-                )
+                );
+                strings::paren(&head, &size)
             })
         }
-        RequestPreviewView::Folder { name, count } => Some(format!(
-            "{}{name}（{count}{}）",
-            strings::REQ_PREVIEW_FOLDER_PREFIX,
-            strings::REQ_PREVIEW_FILES_UNIT
+        RequestPreviewView::Folder { name, count } => Some(strings::paren(
+            &format!("{}{name}", strings::REQ_PREVIEW_FOLDER_PREFIX),
+            &format!("{count}{}", strings::REQ_PREVIEW_FILES_UNIT),
         )),
     }
 }

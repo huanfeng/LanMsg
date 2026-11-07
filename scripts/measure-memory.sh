@@ -21,9 +21,10 @@ set -euo pipefail
 DATA_DIR="${1:?用法: measure-memory.sh <data_dir> [seconds=60]}"
 SECONDS_IDLE="${2:-60}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN_DIR="${LANMSG_BIN_DIR:-$ROOT/target/release}"
-BIN_D="$BIN_DIR/lanmsgd"
-BIN_CLI="$BIN_DIR/lanmsg-cli"
+REPO="$ROOT"
+# shellcheck source=lib/e2e-bins.sh
+source "$ROOT/scripts/lib/e2e-bins.sh"
+e2e_resolve_bins release   # 目录：LANMSG_BIN_DIR > $CARGO_TARGET_DIR/release > $REPO/target/release
 BIN_UI="$BIN_DIR/lanmsg"
 CPU_SECONDS="${CPU_SECONDS:-30}"
 THRESHOLD_KB="${THRESHOLD_KB:-15360}"

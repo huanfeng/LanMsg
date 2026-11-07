@@ -55,7 +55,7 @@ Windows 下文件名带 `.exe`。
 
 ## 开发约定
 
-日志（`tracing`）与错误消息一律英文，界面文案只放本地化资源（桌面 `crates/lanmsg-desktop/src/strings.rs`、lanmsgd `crates/lanmsgd/src/strings.rs`、Android `strings.xml`）。提交前运行下面的检查，非测试、非注释的 Rust 字符串字面量里出现汉字会让它以退出码 1 失败并逐行列出 `文件:行号`：
+日志（`tracing`）与错误消息一律英文，界面文案只放本地化资源（桌面 `crates/lanmsg-desktop/src/strings.rs`、lanmsgd `crates/lanmsgd/src/strings.rs`、Android `strings.xml`）。提交前运行下面的检查，非测试、非注释的 Rust 字符串字面量里出现汉字或全角标点会让它以退出码 1 失败并逐行列出 `文件:行号`。不在检查范围内的有：白名单文件（两个 `strings.rs` 与桌面演示数据 `fixtures.rs`）、`tests/` 目录、`#[cfg(test)]` 修饰的 `mod`（按花括号配对，只剔除该模块本身）以及注释。脚本自带反例自测：`python3 scripts/check-no-cjk.py --self-test`。
 
 ```sh
 python3 scripts/check-no-cjk.py

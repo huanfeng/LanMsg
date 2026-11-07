@@ -1754,6 +1754,7 @@ dependencies = [
  "clap",
  "lanmsg-api",
  "lanmsg-core",
+ "libc",
  "serde_json",
  "tokio",
 ]

@@ -372,7 +372,7 @@ fn request_card(ui: &UiState, r: &RequestView, confirm: ConfirmState) -> Element
             confirm.open(Confirm {
                 id: block_id.clone(),
                 title: strings::BLOCK_TITLE,
-                message: format!("{block_name}：{}", strings::BLOCK_MESSAGE_SUFFIX),
+                message: strings::with_colon(&block_name, strings::BLOCK_MESSAGE_SUFFIX),
                 action: strings::REQUEST_BLOCK,
             })
         });
@@ -522,7 +522,7 @@ fn nearby_card(ui: &UiState, n: &Nearby) -> Element {
                     .weight(1.0)
                     .spacing(style::SPACE_XS)
                     .child(title)
-                    .child(meta(n.devices.join("、")))
+                    .child(meta(n.devices.join(strings::LIST_SEPARATOR)))
                     .child(meta(format!("{} {}", strings::NEARBY_FINGERPRINT, n.short))),
             )
             .child(Element::button(strings::CONTACT_ADD).on_click(move |_| {

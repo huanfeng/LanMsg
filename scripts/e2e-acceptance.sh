@@ -201,6 +201,12 @@ sc_text_chat() {
         got="$(texts "$who" "$conv")"$'\n'
         [ "$got" = "$expect" ] || fail "$who 的消息顺序/内容不符。期望：$(echo "$expect" | tr '\n' ',') 实际：$(echo "$got" | tr '\n' ',')"
     done
+    # CLI 的输出被管道对端提前关闭（`| head`、`| grep -q`）时不得 panic：读端立即退出，
+    # CLI 写 stdout 必遇 EPIPE，stderr 里不应出现 panic 信息。
+    c a log "$conv" --limit 500 2>"$SC/sigpipe.err" | true || true
+    if grep -qE 'panicked|failed printing' "$SC/sigpipe.err"; then
+        fail "CLI 在管道提前关闭时 panic：$(cat "$SC/sigpipe.err")"
+    fi
     echo "text_chat：双方各 6 条且顺序一致"
 }
 

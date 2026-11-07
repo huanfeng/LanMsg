@@ -159,8 +159,19 @@ fn status_from_str(s: &str) -> StatusDto {
     }
 }
 
+/// Rust 默认忽略 SIGPIPE，管道对端（如 `| head`、`| grep -q`）提前退出时 `println!` 会
+/// panic。CLI 要常用于管道，恢复默认行为：被 SIGPIPE 静默终止。
+fn restore_sigpipe() {
+    #[cfg(unix)]
+    // SAFETY: 进程启动早期、单线程时把 SIGPIPE 设回默认处理；signal 本身不会失败到影响内存安全。
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    restore_sigpipe();
     let cli = Cli::parse();
     let client = connect_or_die(&cli.data_dir).await;
 

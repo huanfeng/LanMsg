@@ -3,9 +3,10 @@
 # 用法（先设好 REPO）：source scripts/lib/e2e-bins.sh; e2e_resolve_bins
 # 目录优先级：LANMSG_BIN_DIR > $CARGO_TARGET_DIR/debug > $REPO/target/debug。
 # 设置 BIN_DIR、BIN_D（守护进程）、BIN_CLI。
+# 可选参数：构建档位，默认 debug（性能/内存脚本传 release）。
 
 e2e_resolve_bins() {
-    BIN_DIR="${LANMSG_BIN_DIR:-${CARGO_TARGET_DIR:-$REPO/target}/debug}"
+    BIN_DIR="${LANMSG_BIN_DIR:-${CARGO_TARGET_DIR:-$REPO/target}/${1:-debug}}"
     BIN_D="$BIN_DIR/lanmsgd"
     BIN_CLI="$BIN_DIR/lanmsg-cli"
 }

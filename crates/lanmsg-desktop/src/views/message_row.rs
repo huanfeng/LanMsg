@@ -478,9 +478,10 @@ fn folder_card(ui: &UiState, name: &str, items: &[FileItemView]) -> Element {
         style::ICON_FILES,
         name,
         format!(
-            "{} {}，{}",
+            "{} {}{}{}",
             items.len(),
             strings::FILE_COUNT_UNIT,
+            strings::COMMA,
             human_size(total)
         ),
         &source,

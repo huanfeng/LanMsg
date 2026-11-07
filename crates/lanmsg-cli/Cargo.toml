@@ -15,3 +15,7 @@ lanmsg-api = { version = "0.1.0", path = "../lanmsg-api" }
 lanmsg-core = { version = "0.1.0", path = "../lanmsg-core" }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+
+# 恢复 SIGPIPE 默认行为（libc 已在 workspace 依赖图里，只多一条直接依赖）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

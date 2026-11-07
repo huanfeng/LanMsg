@@ -173,7 +173,7 @@ pub fn header_info(m: &Model) -> Option<HeaderInfo> {
 fn header(info: Signal<Option<HeaderInfo>>) -> Element {
     let title = info.map(|i| i.as_ref().map(|i| i.title.clone()).unwrap_or_default());
     let subtitle = info.map(|i| match i {
-        Some(i) if i.online && !i.devices.is_empty() => i.devices.join("、"),
+        Some(i) if i.online && !i.devices.is_empty() => i.devices.join(strings::LIST_SEPARATOR),
         Some(i) if i.online => strings::CHAT_ONLINE.to_string(),
         _ => strings::CHAT_OFFLINE.to_string(),
     });

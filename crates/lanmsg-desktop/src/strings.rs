@@ -111,6 +111,20 @@ pub const DEVICE_TYPE_DESKTOP: &str = "台式机";
 pub const DEVICE_TYPE_LAPTOP: &str = "笔记本";
 pub const DEVICE_TYPE_PHONE: &str = "手机";
 pub const DEVICE_TYPE_TABLET: &str = "平板";
+/// 排版用的中文标点：列表分隔、冒号、括号、逗号；界面里拼接文案一律经由这里。
+pub const LIST_SEPARATOR: &str = "、";
+pub const COMMA: &str = "，";
+
+/// `{label}：{value}`。
+pub fn with_colon(label: &str, value: &str) -> String {
+    format!("{label}：{value}")
+}
+
+/// `{text}（{note}）`。
+pub fn paren(text: &str, note: &str) -> String {
+    format!("{text}（{note}）")
+}
+
 /// 自设备会话的标题（core 给空串，界面按 kind 显示）。
 pub const SELF_DEVICES_TITLE: &str = "我的设备";
 pub const MSG_UNSUPPORTED: &str = "不支持的消息类型，请升级";

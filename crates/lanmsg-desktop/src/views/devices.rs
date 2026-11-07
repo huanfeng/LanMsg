@@ -100,7 +100,7 @@ pub fn device_row(d: &DeviceView, confirm: Option<ConfirmState>) -> Element {
                     confirm.open(Confirm {
                         id: id.clone(),
                         title: strings::DEVICES_REMOVE_TITLE,
-                        message: format!("{name}：{}", strings::DEVICES_REMOVE_MESSAGE),
+                        message: strings::with_colon(&name, strings::DEVICES_REMOVE_MESSAGE),
                         action: strings::DEVICES_REMOVE,
                     })
                 }),
