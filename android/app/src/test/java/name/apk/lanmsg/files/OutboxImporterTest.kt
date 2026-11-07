@@ -96,6 +96,12 @@ class OutboxImporterTest {
         assertEquals("ab", OutboxImporter.sanitize("a\u2066\u061Cb"))
     }
 
+    @Test fun sanitize_strips_zero_width_but_keeps_emoji_tag_sequences() {
+        assertEquals("ab.txt", OutboxImporter.sanitize("a\u200Bb\u2060\uFEFF.txt"))
+        val flag = "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC65\uDB40\uDC6E\uDB40\uDC67\uDB40\uDC7F.png" // 🏴 + tag 序列
+        assertEquals(flag, OutboxImporter.sanitize(flag))
+    }
+
     @Test fun non_content_and_own_provider_uris_are_skipped() = runTest {
         val imp = importer()
         val secret = File(tmp.root, "secret.txt").apply { writeText("s") }

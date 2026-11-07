@@ -124,6 +124,20 @@ class FilesViewModelTest {
         assertEquals(before + 1, fake.queries().size)
     }
 
+    @Test fun message_updated_requeries_with_same_debounce() = runTest {
+        val fake = fake()
+        FilesViewModel(fake, null)
+        advanceUntilIdle()
+        val before = fake.queries().size
+        fake.emit(Event.MessageUpdated(Fixtures.fileMsg("m1", "h1")))
+        fake.emit(Event.MessageUpdated(Fixtures.fileMsg("m1", "h1")))
+        advanceTimeBy(300)
+        assertEquals(before, fake.queries().size)
+        advanceTimeBy(300)
+        runCurrent()
+        assertEquals(before + 1, fake.queries().size)
+    }
+
     @Test fun lagged_requeries_immediately() = runTest {
         val fake = fake()
         FilesViewModel(fake, null)
@@ -191,6 +205,6 @@ class FilesViewModelTest {
         val devices = vm.state.value.devices
         assertEquals(listOf("d1", "d2", "d3"), devices.map { it.deviceId })
         assertTrue(devices[0].self)
-        assertNotNull(devices.firstOrNull { it.deviceId == "d3" && it.label.contains("老王") })
+        assertNotNull(devices.firstOrNull { it.deviceId == "d3" && it.subLabel == "老王" })
     }
 }

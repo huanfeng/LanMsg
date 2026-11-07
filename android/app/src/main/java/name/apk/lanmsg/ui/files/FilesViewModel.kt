@@ -22,8 +22,8 @@ import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
 
 class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewModel() {
-    /** 来源设备筛选的候选项；[self] 为本机（界面显示 devices_this）。 */
-    data class DeviceOption(val deviceId: String, val label: String, val self: Boolean)
+    /** 来源设备筛选的候选项；[self] 为本机（界面显示 devices_this）；[subLabel] 为他人设备的显示名。 */
+    data class DeviceOption(val deviceId: String, val label: String, val self: Boolean, val subLabel: String? = null)
 
     data class UiState(
         val filter: FileFilter,
@@ -103,7 +103,7 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
 
     private fun onEvent(e: Event) {
         when (e) {
-            is Event.MessageAdded -> scheduleRefresh()
+            is Event.MessageAdded, is Event.MessageUpdated -> scheduleRefresh()
             is Event.TransferProgress -> {
                 transfers[e.hash] = e.transfer
                 _state.update { it.copy(progress = it.progress + (e.hash to (e.done to e.total))) }
@@ -156,7 +156,7 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
                 val known = mine.mapTo(HashSet()) { it.deviceId }
                 val others = core.call<Response.Peers>(Request.ListPeers).value
                     .filter { it.deviceId !in known }
-                    .map { DeviceOption(it.deviceId, "${it.displayName} ${it.deviceName}", false) }
+                    .map { DeviceOption(it.deviceId, it.deviceName, false, it.displayName) }
                 _state.update { it.copy(devices = mine + others) }
             } catch (e: ApiException) {
                 // 候选项只是筛选便利，失败不打扰用户

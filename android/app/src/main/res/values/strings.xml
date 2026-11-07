@@ -53,6 +53,8 @@
     <string name="files_other">其他</string>
     <string name="files_state_downloaded">已下载</string>
     <string name="files_state_remote">未下载</string>
+    <string name="files_filter">筛选</string>
+    <string name="files_source_device">%1$s（%2$s）</string>
     <string name="files_search_hint">搜索文件名</string>
     <string name="files_empty">还没有收发过文件</string>
     <string name="contacts_requests">新的请求 (%1$d)</string>

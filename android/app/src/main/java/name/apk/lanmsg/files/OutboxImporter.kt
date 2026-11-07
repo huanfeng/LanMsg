@@ -98,9 +98,13 @@ class OutboxImporter(
 
         private fun utf8Len(s: String) = s.toByteArray(Charsets.UTF_8).size
 
-        /** 双向文本控制符（可用于伪装扩展名）；ZWJ/ZWNJ 等其他格式字符要保留，否则会破坏 emoji 序列与部分文字。 */
+        /**
+         * 双向文本控制符（可用于伪装扩展名）与不可见零宽字符（ZWSP/WJ/BOM，可造出视觉相同的文件名）；
+         * ZWJ/ZWNJ 与 emoji tag 序列（U+E0020–E007F）要保留，否则会破坏 emoji 序列与部分文字。
+         */
         private fun isBidiControl(cp: Int) =
-            cp in 0x202A..0x202E || cp in 0x2066..0x2069 || cp == 0x200E || cp == 0x200F || cp == 0x061C
+            cp in 0x202A..0x202E || cp in 0x2066..0x2069 || cp == 0x200E || cp == 0x200F || cp == 0x061C ||
+                cp == 0x200B || cp == 0x2060 || cp == 0xFEFF
 
         /**
          * 去掉路径分隔符、控制字符与双向控制符（如 U+202E，按码点判断；保留 ZWJ/ZWNJ）、首尾空白和点；空则 "file"；

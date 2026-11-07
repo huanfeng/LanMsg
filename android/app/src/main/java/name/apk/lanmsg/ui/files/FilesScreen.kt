@@ -146,9 +146,13 @@ fun FilesContent(
                     title = { Text(stringResource(R.string.tab_files)) },
                     actions = {
                         Box {
-                            // 文案表没有“筛选”键，菜单项本身（全部/已下载/设备名）已自解释，图标暂无描述
                             IconButton(onClick = { filterMenu = true }) {
-                                Icon(Icons.Outlined.FilterList, contentDescription = null)
+                                val active = state.filter.state != null || state.filter.sourceDevice != null
+                                Icon(
+                                    Icons.Outlined.FilterList,
+                                    contentDescription = stringResource(R.string.files_filter),
+                                    tint = if (active) c.signal else c.ink,
+                                )
                             }
                             FilterMenu(state, filterMenu, { filterMenu = false }, onState, onDevice)
                         }
@@ -205,7 +209,7 @@ fun FilesContent(
                 state.items.isEmpty() -> EmptyState(stringResource(R.string.files_empty), Icons.Outlined.Folder)
                 else -> LazyColumn(Modifier.fillMaxSize()) {
                     items(state.items, key = { it.msg + it.item.hash }) { v ->
-                        FileRow(v, state.progress[v.item.hash], onClick, onCancel, onOpenChat, onForward)
+                        FileRow(v, state.filter.conv == null, state.progress[v.item.hash], onClick, onCancel, onOpenChat, onForward)
                     }
                 }
             }
@@ -236,7 +240,11 @@ private fun FilterMenu(
         }
         if (state.devices.isNotEmpty()) HorizontalDivider(color = c.line)
         for (d in state.devices) {
-            val label = if (d.self) stringResource(R.string.devices_this) else d.label
+            val label = when {
+                d.self -> stringResource(R.string.devices_this)
+                d.subLabel != null -> stringResource(R.string.files_source_device, d.label, d.subLabel)
+                else -> d.label
+            }
             MenuItem(label, f.sourceDevice == d.deviceId) {
                 onDismiss(); onDevice(if (f.sourceDevice == d.deviceId) null else d.deviceId)
             }
@@ -260,6 +268,7 @@ private fun MenuItem(text: String, selected: Boolean, onClick: () -> Unit) {
 @Composable
 private fun FileRow(
     v: FileView,
+    showConvTitle: Boolean,
     progress: Pair<ULong, ULong>?,
     onClick: (FileView) -> Unit,
     onCancel: (String) -> Unit,
@@ -283,10 +292,13 @@ private fun FileRow(
                 Column(Modifier.weight(1f)) {
                     Text(middleEllipsis(item.name), color = c.ink, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(Format.size(item.size.toLong()), color = c.inkMuted, fontSize = 12.sp)
-                    Text(
-                        listOf(item.sourceLabel, v.convTitle).filter { it.isNotEmpty() }.joinToString(" / "),
-                        color = c.inkSubtle, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
+                    if (item.sourceLabel.isNotEmpty()) {
+                        Text(item.sourceLabel, color = c.inkSubtle, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    // 已在某个会话范围内时标题是重复信息，不再显示
+                    if (showConvTitle && v.convTitle.isNotEmpty()) {
+                        Text(v.convTitle, color = c.inkSubtle, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
                 Spacer(Modifier.width(8.dp))
                 Column(horizontalAlignment = Alignment.End) {
