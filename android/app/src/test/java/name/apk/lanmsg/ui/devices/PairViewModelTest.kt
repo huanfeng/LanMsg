@@ -150,8 +150,39 @@ class PairViewModelTest {
         assertEquals(PairViewModel.JoinMode.PICK, vm.state.value.joinMode)
         assertEquals(listOf("d2"), vm.state.value.candidates.map { it.deviceId })
         vm.pick("d2")
-        advanceUntilIdle() // 发起加入后轮询已取消，可以跑到空闲
+        // 轮询是无限循环，绝不能 advanceUntilIdle：用有限推进断言轮询已停
+        runCurrent()
+        advanceTimeBy(PairViewModel.POLL_MILLIS * 3)
         assertEquals(listOf<Request>(Request.PairJoin(PairTarget.Device("d2"))), pairRequests(f))
+        assertEquals(1, f.requests.count { it == Request.ListPeers })
+    }
+
+    @Test fun pick_failure_in_pick_mode_resumes_polling() = runTest {
+        val f = fake()
+        val ok = f.handler
+        f.handler = { req -> if (req is Request.PairJoin) throw ApiException(ErrorCode.PEER_OFFLINE, "offline") else ok(req) }
+        val vm = PairViewModel(f, PairViewModel.Role.JOIN)
+        vm.switchToSas()
+        runCurrent()
+        vm.pick("d2")
+        runCurrent()
+        assertTrue(vm.state.value.error != null)
+        val afterFailure = f.requests.count { it == Request.ListPeers }
+        advanceTimeBy(PairViewModel.POLL_MILLIS + 1)
+        assertTrue(f.requests.count { it == Request.ListPeers } > afterFailure)
+        vm.leave()
+    }
+
+    @Test fun leave_stops_polling() = runTest {
+        val f = fake()
+        val vm = PairViewModel(f, PairViewModel.Role.JOIN)
+        vm.switchToSas()
+        runCurrent()
+        vm.leave()
+        runCurrent()
+        val n = f.requests.count { it == Request.ListPeers }
+        advanceTimeBy(PairViewModel.POLL_MILLIS * 3)
+        assertEquals(n, f.requests.count { it == Request.ListPeers })
     }
 
     @Test fun pick_mode_polls_every_3s_until_leaving_pick() = runTest {

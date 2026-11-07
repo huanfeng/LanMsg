@@ -171,6 +171,8 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
                 onSession(info.session, info.qrUri)
             } catch (e: ApiException) {
                 _state.update { it.copy(error = e.message ?: e.code.name) }
+                // 加入失败仍停留在选设备页：恢复候选轮询
+                if (_state.value.joinMode == JoinMode.PICK) startPolling()
             } finally {
                 requesting = false
             }
