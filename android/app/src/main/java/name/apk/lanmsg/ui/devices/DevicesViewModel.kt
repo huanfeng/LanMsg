@@ -12,6 +12,7 @@ import name.apk.lanmsg.core.CoreApi
 import name.apk.lanmsg.core.call
 import uniffi.lanmsg_api.DeviceView
 import uniffi.lanmsg_api.Event
+import uniffi.lanmsg_api.PairStateDto
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
 
@@ -26,7 +27,7 @@ class DevicesViewModel(private val core: CoreApi) : ViewModel() {
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     init {
-        viewModelScope.launch { core.events.collect { if (it == Event.DevicesChanged) load() } }
+        viewModelScope.launch { core.events.collect { if (affectsDevices(it)) load() } }
         viewModelScope.launch { core.lagged.collect { load() } }
         load()
     }
@@ -49,6 +50,13 @@ class DevicesViewModel(private val core: CoreApi) : ViewModel() {
             }
             load()
         }
+    }
+
+    /** 设备列表受影响的事件：配对完成时设备行与在线状态可能晚于 DevicesChanged 才就绪，所以一并重拉。 */
+    private fun affectsDevices(e: Event): Boolean = when (e) {
+        Event.DevicesChanged, is Event.PeerOnline, is Event.PeerOffline -> true
+        is Event.PairStatus -> e.state == PairStateDto.Done
+        else -> false
     }
 
     private fun load() {

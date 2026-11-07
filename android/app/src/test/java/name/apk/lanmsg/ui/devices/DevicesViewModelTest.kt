@@ -7,6 +7,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import name.apk.lanmsg.core.ApiException
 import name.apk.lanmsg.testutil.FakeCoreApi
+import name.apk.lanmsg.testutil.Fixtures
 import name.apk.lanmsg.testutil.MainDispatcherRule
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -16,6 +17,7 @@ import org.junit.runner.RunWith
 import uniffi.lanmsg_api.DeviceView
 import uniffi.lanmsg_api.ErrorCode
 import uniffi.lanmsg_api.Event
+import uniffi.lanmsg_api.PairStateDto
 import uniffi.lanmsg_api.PathClassDto
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
@@ -85,6 +87,24 @@ class DevicesViewModelTest {
         f.emit(Event.DevicesChanged)
         advanceUntilIdle()
         assertEquals(2, vm.state.value.devices.size)
+    }
+
+    @Test fun pair_done_and_peer_online_reload() = runTest {
+        var devices = listOf(self)
+        val f = fake { devices }
+        val vm = DevicesViewModel(f)
+        advanceUntilIdle()
+        devices = listOf(self, other)
+        f.emit(Event.PairStatus("s1", PairStateDto.Verifying))
+        advanceUntilIdle()
+        assertEquals(1, vm.state.value.devices.size) // 配对未完成不重拉
+        f.emit(Event.PairStatus("s1", PairStateDto.Done))
+        advanceUntilIdle()
+        assertEquals(2, vm.state.value.devices.size)
+        devices = listOf(self, other, other.copy(deviceId = "d3"))
+        f.emit(Event.PeerOnline(Fixtures.peer("d3")))
+        advanceUntilIdle()
+        assertEquals(3, vm.state.value.devices.size)
     }
 
     @Test fun remove_failure_sets_error() = runTest {
