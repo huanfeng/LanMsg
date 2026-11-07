@@ -143,6 +143,9 @@ pub enum Request {
     PairConfirm {
         session: String,
         matches: bool,
+        /// 用户确认时界面上显示的数字；确认“一致”时必须与当前会话的数字相同，
+        /// 否则拒绝（会话可能已被新连接覆盖）。拒绝（matches=false）时不检查。
+        code: String,
     },
     PairCancel {
         session: String,

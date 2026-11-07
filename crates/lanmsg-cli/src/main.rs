@@ -75,8 +75,13 @@ enum Cmd {
     },
     /// 加入配对：参数以 lanmsg:// 开头视为 URI，否则视为对端设备 hex
     PairJoin { target: String },
-    /// 对指定配对会话做数字比对确认（yes|no）
-    PairConfirm { session: String, answer: String },
+    /// 对指定配对会话做数字比对确认（yes|no）；yes 时需用 --code 给出本端显示的数字
+    PairConfirm {
+        session: String,
+        answer: String,
+        #[arg(long)]
+        code: Option<String>,
+    },
     /// 列出我的设备
     Devices,
     /// 移除一台我的设备
@@ -375,7 +380,11 @@ async fn main() -> Result<()> {
             println!("已发起加入，等待配对状态…");
             watch_pair_any(rx).await;
         }
-        Cmd::PairConfirm { session, answer } => {
+        Cmd::PairConfirm {
+            session,
+            answer,
+            code,
+        } => {
             let matches = match answer.as_str() {
                 "yes" => true,
                 "no" => false,
@@ -384,8 +393,17 @@ async fn main() -> Result<()> {
                     exit(1);
                 }
             };
+            let code = code.unwrap_or_default();
+            if matches && code.is_empty() {
+                eprintln!("确认一致时需要 --code <本端显示的数字>");
+                exit(1);
+            }
             let resp = client
-                .call(Request::PairConfirm { session, matches })
+                .call(Request::PairConfirm {
+                    session,
+                    matches,
+                    code,
+                })
                 .await
                 .map_err(api_err)?;
             match resp {

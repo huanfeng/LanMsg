@@ -118,7 +118,7 @@ class PairViewModelTest {
         vm.confirm(true)
         vm.confirm(true)
         advanceUntilIdle()
-        assertEquals(1, f.requests.count { it == Request.PairConfirm("s1", true) })
+        assertEquals(1, f.requests.count { it == Request.PairConfirm("s1", true, "123456") })
         assertEquals(1, f.requests.count { it is Request.PairConfirm })
     }
 

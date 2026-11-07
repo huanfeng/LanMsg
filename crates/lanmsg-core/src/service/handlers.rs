@@ -72,7 +72,11 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
         Request::RemoveDevice { device } => remove_device(inner, device).await,
         Request::PairStart { method } => pair_start(inner, method).await,
         Request::PairJoin { target } => pair_join(inner, target).await,
-        Request::PairConfirm { session, matches } => pair_confirm(inner, session, matches).await,
+        Request::PairConfirm {
+            session,
+            matches,
+            code,
+        } => pair_confirm(inner, session, matches, code).await,
         Request::PairCancel { session } => pair_cancel(inner, session).await,
         Request::SetUiFocus { conv } => {
             // 先解析再赋值：非法输入不改变现有焦点。
@@ -580,8 +584,13 @@ async fn pair_join(inner: &Inner, target: PairTarget) -> Result<Response, ApiErr
 }
 
 /// Sas 数字确认。
-async fn pair_confirm(inner: &Inner, session: String, matches: bool) -> Result<Response, ApiError> {
-    inner.pairing.confirm(&session, matches).await?;
+async fn pair_confirm(
+    inner: &Inner,
+    session: String,
+    matches: bool,
+    code: String,
+) -> Result<Response, ApiError> {
+    inner.pairing.confirm(&session, matches, &code).await?;
     Ok(Response::Ok)
 }
 

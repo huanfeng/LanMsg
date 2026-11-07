@@ -60,14 +60,18 @@ pub fn format_sas(code: &str) -> String {
     }
 }
 
-/// 数字确认页的对端说明：`对方：名称（类型 · 指纹 xxx）`，让用户知道去哪台设备核对。
-pub fn sas_peer_line(name: &str, device_type: &str, short: &str) -> String {
+/// 数字确认页：对端自报的名称与类型（可能被伪造，所以单独标注“自称”）。
+pub fn sas_peer_name_line(name: &str, device_type: &str) -> String {
     format!(
-        "{}：{name}（{} · {} {short}）",
+        "{}：{name}（{}）",
         strings::PAIR_SAS_PEER,
-        device_type_label(device_type),
-        strings::CONTACT_FINGERPRINT,
+        device_type_label(device_type)
     )
+}
+
+/// 数字确认页：对端设备指纹（由证书校验得出，单独一行）。
+pub fn sas_peer_fingerprint_line(short: &str) -> String {
+    format!("{} {short}", strings::CONTACT_FINGERPRINT)
 }
 
 /// 对话框宿主，放在页面最上层（向导与主界面共用）；随配对界面开关重建。
@@ -178,11 +182,16 @@ fn showing(qr_uri: Option<&str>, state: &PairStateDto) -> Element {
             peer_short,
         } => col
             .child(
-                Element::label(sas_peer_line(peer_name, peer_type, peer_short))
+                Element::label(sas_peer_name_line(peer_name, peer_type))
                     .font_size(style::FONT_HEADING)
                     .font_weight(style::WEIGHT_STRONG)
                     .fg_role(Role::Text)
                     .max_lines(2),
+            )
+            .child(
+                Element::label(sas_peer_fingerprint_line(peer_short))
+                    .font_size(style::FONT_META)
+                    .fg_role(Role::TextSubtle),
             )
             .child(muted(strings::PAIR_SAS_GO))
             .child(sas_digits(&format_sas(code)))
@@ -463,11 +472,12 @@ mod tests {
     }
 
     #[test]
-    fn sas_peer_line_names_the_device_and_fingerprint() {
+    fn sas_peer_lines_separate_claimed_name_from_fingerprint() {
         assert_eq!(
-            sas_peer_line("我的手机", "phone", "a1b2c3d4"),
-            "对方：我的手机（手机 · 指纹 a1b2c3d4）"
+            sas_peer_name_line("我的手机", "phone"),
+            "对方自称：我的手机（手机）"
         );
+        assert_eq!(sas_peer_fingerprint_line("a1b2c3d4"), "指纹 a1b2c3d4");
     }
 
     #[test]

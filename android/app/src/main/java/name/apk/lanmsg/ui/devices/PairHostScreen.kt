@@ -151,9 +151,15 @@ internal fun PairProgress(state: PairViewModel.UiState, onConfirm: (Boolean) -> 
     when (val s = state.pairState) {
         is PairStateDto.ShowSas -> {
             Text(
-                stringResource(R.string.pair_sas_peer, s.peerName, deviceTypeLabel(s.peerType), s.peerShort),
+                stringResource(R.string.pair_sas_peer, s.peerName, deviceTypeLabel(s.peerType)),
                 color = c.ink,
                 style = MaterialTheme.typography.titleMedium,
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                stringResource(R.string.pair_sas_fingerprint, s.peerShort),
+                color = c.inkSubtle,
+                style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center,
             )
             Spacer(Modifier.height(4.dp))

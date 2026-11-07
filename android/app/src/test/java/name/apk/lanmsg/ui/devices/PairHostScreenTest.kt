@@ -34,7 +34,8 @@ class PairHostScreenTest {
             }
         }
         compose.onNodeWithText("123 456").assertExists()
-        compose.onNodeWithText("对方：我的电脑（台式机 · 指纹 a1b2c3d4）").assertExists()
+        compose.onNodeWithText("对方自称：我的电脑（台式机）").assertExists()
+        compose.onNodeWithText("指纹 a1b2c3d4").assertExists()
         compose.onNodeWithText("请到该设备上核对数字").assertExists()
         compose.onNodeWithText("一致").performClick()
         assertEquals(listOf(true), confirmed)

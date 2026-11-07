@@ -268,8 +268,8 @@ sas_pair() {
     [ "$code_a" = "$code_n" ] || fail "两端数字不同：A=$code_a N=$code_n"
     sess_n="$(awk '/^session:/{print $2}' "$pj" | head -1)"
     [ -n "$sess_n" ] || fail "pair-join 未打印 session：$(cat "$pj")"
-    c "$a" pair-confirm "$sess_start" "$ans_a" >/dev/null
-    c "$n" pair-confirm "$sess_n" "$ans_n" >/dev/null
+    c "$a" pair-confirm "$sess_start" "$ans_a" --code "$code_a" >/dev/null
+    c "$n" pair-confirm "$sess_n" "$ans_n" --code "$code_n" >/dev/null
     SAS_CODE="$code_a"
 }
 

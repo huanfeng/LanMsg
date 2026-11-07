@@ -104,11 +104,13 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
     fun confirm(matches: Boolean) {
         val s = _state.value
         val session = s.session ?: return
+        // 随请求带上界面当前显示的数字，核心据此拒绝过期的确认
+        val code = (s.pairState as? PairStateDto.ShowSas)?.code ?: return
         if (s.confirmSent) return
         _state.update { it.copy(confirmSent = true) }
         viewModelScope.launch {
             try {
-                core.call<Response.Ok>(Request.PairConfirm(session, matches))
+                core.call<Response.Ok>(Request.PairConfirm(session, matches, code))
             } catch (e: ApiException) {
                 _state.update { it.copy(confirmSent = false, error = e.message ?: e.code.name) }
             }

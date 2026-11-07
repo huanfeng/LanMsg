@@ -281,6 +281,8 @@ struct ASession {
     /// 已被授权接收配对包的对端：Qr 在 Proof 校验通过时、Sas 在双方确认时持锁设置。
     /// a_send_bundle 只向它发送，避免会话被覆盖后把密钥包发给未经验证的设备。
     authorized_peer: Option<DeviceId>,
+    /// 配对包已（开始）发送：防止重复确认帧再次进入 a_send_bundle。
+    bundle_sent: bool,
 }
 
 /// B 侧（加入方）进行中的配对会话。
@@ -535,16 +537,22 @@ impl Pairing {
     }
 
     /// 第 3 步（Sas）：本端用户确认数字是否一致。
-    pub async fn confirm(&self, session: &str, matches: bool) -> Result<(), CoreError> {
+    pub async fn confirm(&self, session: &str, matches: bool, code: &str) -> Result<(), CoreError> {
         let peer = {
             let mut g = self.inner.active.lock().unwrap();
             match g.as_mut() {
                 Some(a) if a.session == session => match &mut a.role {
                     Role::A(s) if matches!(s.method, PairMethodWire::Sas) => {
+                        if matches && sas_code(&s.exporter) != code {
+                            return Err(CoreError::InvalidArgument("SAS code mismatch".into()));
+                        }
                         s.local_confirmed = matches;
                         s.peer
                     }
                     Role::B(s) if matches!(s.method, PairMethodWire::Sas) => {
+                        if matches && sas_code(&s.exporter) != code {
+                            return Err(CoreError::InvalidArgument("SAS code mismatch".into()));
+                        }
                         s.local_confirmed = matches;
                         s.a_device
                     }
@@ -663,16 +671,46 @@ impl Pairing {
                 .await;
             return Ok(());
         };
-        // 已有进行中的会话且对端仍在线、不是同一设备：拒绝新的 Begin，不覆盖旧会话。
-        // 同一对端重发 Begin（重连重试）仍允许覆盖。
-        let busy = {
-            let g = self.inner.active.lock().unwrap();
-            g.as_ref().is_some_and(|a| match &a.role {
+        // Sas：加入方的会话 ID 由其本地生成，A 侧一律使用窗口会话 ID，
+        // 使事件与 PairStart 返回值一致（两端会话 ID 各自独立）。
+        let session = if matches!(method, PairMethodWire::Sas) {
+            w.session.clone()
+        } else {
+            begin_session.unwrap_or_else(random_session)
+        };
+        let (peer_name, peer_type) = (device_name, device_type);
+        // 检查与写入在同一把锁内完成：已有进行中的会话且对端仍在线、不是同一设备时
+        // 拒绝新的 Begin，不覆盖旧会话；同一对端重发 Begin（重连重试）仍允许覆盖。
+        let accepted = {
+            let mut g = self.inner.active.lock().unwrap();
+            let busy = g.as_ref().is_some_and(|a| match &a.role {
                 Role::A(s) => s.peer != from.device && self.inner.conns.peer(&s.peer).is_some(),
                 Role::B(_) => true,
-            })
+            });
+            if !busy {
+                *g = Some(Active {
+                    session: session.clone(),
+                    role: Role::A(ASession {
+                        method,
+                        // Qr 窗口的口令只属于 Qr 会话，不交给 Sas 对端
+                        secret: matches!(method, PairMethodWire::Qr)
+                            .then_some(w.secret)
+                            .flatten(),
+                        exporter: from.tls_exporter,
+                        peer: from.device,
+                        peer_name: peer_name.clone(),
+                        peer_type,
+                        new_cert: None,
+                        local_confirmed: false,
+                        peer_confirmed: false,
+                        authorized_peer: None,
+                        bundle_sent: false,
+                    }),
+                });
+            }
+            !busy
         };
-        if busy {
+        if !accepted {
             tracing::debug!(peer = %from.device, "Begin rejected: another pairing session is active");
             let _ = self
                 .inner
@@ -685,36 +723,6 @@ impl Pairing {
                 )
                 .await;
             return Ok(());
-        }
-        // Sas：加入方的会话 ID 由其本地生成，A 侧一律使用窗口会话 ID，
-        // 使事件与 PairStart 返回值一致（两端会话 ID 各自独立）。
-        let session = if matches!(method, PairMethodWire::Sas) {
-            w.session.clone()
-        } else {
-            begin_session.unwrap_or_else(random_session)
-        };
-        let (peer_name, peer_type) = (device_name, device_type);
-        {
-            let mut g = self.inner.active.lock().unwrap();
-            // 并发配对会话：新 Begin 覆盖旧会话。
-            *g = Some(Active {
-                session: session.clone(),
-                role: Role::A(ASession {
-                    method,
-                    // Qr 窗口的口令只属于 Qr 会话，不交给 Sas 对端
-                    secret: matches!(method, PairMethodWire::Qr)
-                        .then_some(w.secret)
-                        .flatten(),
-                    exporter: from.tls_exporter,
-                    peer: from.device,
-                    peer_name: peer_name.clone(),
-                    peer_type,
-                    new_cert: None,
-                    local_confirmed: false,
-                    peer_confirmed: false,
-                    authorized_peer: None,
-                }),
-            });
         }
         if matches!(method, PairMethodWire::Sas) {
             self.emit_status(
@@ -1093,11 +1101,17 @@ impl Pairing {
     /// 第 4 步：A 签发 B 的证书、组配对包并发送。
     async fn a_send_bundle(&self, session: &str) -> Result<(), CoreError> {
         let (peer, peer_name, peer_type) = {
-            let g = self.inner.active.lock().unwrap();
-            match g.as_ref() {
-                Some(a) => match &a.role {
-                    // 只向已授权的对端发送；peer 在此一次读出，之后不再重读
-                    Role::A(s) if a.session == session && s.authorized_peer == Some(s.peer) => {
+            let mut g = self.inner.active.lock().unwrap();
+            match g.as_mut() {
+                Some(a) => match &mut a.role {
+                    // 只向已授权的对端发送；peer 在此一次读出，之后不再重读。
+                    // bundle_sent 在同一把锁内检查并置位：重复的确认帧不会再次签发证书。
+                    Role::A(s)
+                        if a.session == session
+                            && s.authorized_peer == Some(s.peer)
+                            && !s.bundle_sent =>
+                    {
+                        s.bundle_sent = true;
                         (s.peer, s.peer_name.clone(), s.peer_type)
                     }
                     _ => return Ok(()),
@@ -1479,5 +1493,145 @@ mod tests {
             assert!(s.secret.is_none(), "Sas 会话不持有二维码口令");
         }
         assert!(!is_initialized(&b.0));
+    }
+
+    fn active_snapshot(p: &Pairing) -> Option<(DeviceId, bool, bool, Option<DeviceId>)> {
+        let g = p.inner.active.lock().unwrap();
+        match g.as_ref().map(|a| &a.role) {
+            Some(Role::A(s)) => Some((
+                s.peer,
+                s.new_cert.is_some(),
+                s.bundle_sent,
+                s.authorized_peer,
+            )),
+            _ => None,
+        }
+    }
+
+    /// 两个不同设备的 Begin 并发到达：检查与写入在同一把锁内，只有一个被受理
+    /// （受理 = 发出 ShowSas 事件）。多线程运行时下重复多轮。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_begins_from_two_peers_accept_exactly_one() {
+        let (a, _b, _c, pb, pc, _session) = three_nodes(PairMethodWire::Sas).await;
+        let (ap, _) = a.0.pairing_parts();
+        let mut rx = a.0.subscribe();
+        for round in 0..200 {
+            *ap.inner.active.lock().unwrap() = None;
+            while rx.try_recv().is_ok() {}
+            let (p1, p2) = (ap.clone(), ap.clone());
+            let (fb, fc) = (pb.clone(), pc.clone());
+            let t1 = tokio::spawn(async move { p1.on_pair_frame(&fb, begin_sas()).await });
+            let t2 = tokio::spawn(async move { p2.on_pair_frame(&fc, begin_sas()).await });
+            t1.await.unwrap().unwrap();
+            t2.await.unwrap().unwrap();
+            let mut shown = 0;
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(
+                    ev,
+                    lanmsg_api::types::Event::PairStatus {
+                        state: PairStateDto::ShowSas { .. },
+                        ..
+                    }
+                ) {
+                    shown += 1;
+                }
+            }
+            assert_eq!(shown, 1, "第 {round} 轮应只受理一个 Begin");
+        }
+    }
+
+    /// 会话被同一对端以新连接（新数字）覆盖后，用旧数字确认“一致”被拒绝。
+    #[tokio::test]
+    async fn confirm_with_stale_code_is_rejected_after_overwrite() {
+        let (a, _b, _c, pb, _pc, session) = three_nodes(PairMethodWire::Sas).await;
+        let (ap, _) = a.0.pairing_parts();
+        ap.on_pair_frame(&pb, begin_sas()).await.unwrap();
+        let old_code = sas_code(&pb.tls_exporter);
+        let mut pb_new = pb.clone();
+        pb_new.tls_exporter = [9u8; 32];
+        ap.on_pair_frame(&pb_new, begin_sas()).await.unwrap();
+        let new_code = sas_code(&pb_new.tls_exporter);
+        assert_ne!(old_code, new_code);
+        assert!(ap.confirm(&session, true, &old_code).await.is_err());
+        // 旧数字被拒后不应留下本端确认位
+        {
+            let g = ap.inner.active.lock().unwrap();
+            let Some(Active {
+                role: Role::A(s), ..
+            }) = g.as_ref()
+            else {
+                panic!("会话应存在");
+            };
+            assert!(!s.local_confirmed);
+        }
+        assert!(ap.confirm(&session, true, &new_code).await.is_ok());
+    }
+
+    /// 授权之后被同一对端重发 Begin 覆盖：授权被清除，不会发包。
+    #[tokio::test]
+    async fn rebegin_after_authorization_clears_it_and_sends_nothing() {
+        let (a, _b, _c, pb, _pc, session) = three_nodes(PairMethodWire::Sas).await;
+        let (ap, _) = a.0.pairing_parts();
+        ap.on_pair_frame(&pb, begin_sas()).await.unwrap();
+        {
+            let mut g = ap.inner.active.lock().unwrap();
+            if let Some(Active {
+                role: Role::A(s), ..
+            }) = g.as_mut()
+            {
+                s.authorized_peer = Some(pb.device);
+            }
+        }
+        ap.on_pair_frame(&pb, begin_sas()).await.unwrap();
+        ap.a_send_bundle(&session).await.unwrap();
+        let (_, cert_issued, sent, authorized) = active_snapshot(&ap).unwrap();
+        assert!(!cert_issued && !sent && authorized.is_none());
+    }
+
+    /// 旧对端已离线时，其他设备的 Begin 可以覆盖旧会话。
+    #[tokio::test]
+    async fn begin_overwrites_session_whose_peer_went_offline() {
+        let (a, _b, _c, pb, pc, _session) = three_nodes(PairMethodWire::Sas).await;
+        let (ap, ac) = a.0.pairing_parts();
+        ap.on_pair_frame(&pb, begin_sas()).await.unwrap();
+        ac.disconnect(&pb.device).await;
+        for _ in 0..50 {
+            if ac.peer(&pb.device).is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(ac.peer(&pb.device).is_none());
+        ap.on_pair_frame(&pc, begin_sas()).await.unwrap();
+        assert_eq!(active_snapshot(&ap).unwrap().0, pc.device);
+    }
+
+    /// 配对包发出后，重复的对端确认帧不会再次进入 a_send_bundle、重复签发证书。
+    #[tokio::test]
+    async fn duplicate_sas_confirm_does_not_issue_second_bundle() {
+        let (a, _b, _c, pb, _pc, session) = three_nodes(PairMethodWire::Sas).await;
+        let (ap, _) = a.0.pairing_parts();
+        ap.on_pair_frame(&pb, begin_sas()).await.unwrap();
+        let code = sas_code(&pb.tls_exporter);
+        ap.confirm(&session, true, &code).await.unwrap();
+        ap.on_pair_frame(&pb, PairMsg::SasConfirm { ok: true })
+            .await
+            .unwrap();
+        let (_, cert_issued, sent, _) = active_snapshot(&ap).unwrap();
+        assert!(cert_issued && sent, "双方确认后应发出一次配对包");
+        // 清掉证书记录，模拟“再次签发会重新写入”：重复帧不应再写
+        {
+            let mut g = ap.inner.active.lock().unwrap();
+            if let Some(Active {
+                role: Role::A(s), ..
+            }) = g.as_mut()
+            {
+                s.new_cert = None;
+            }
+        }
+        ap.on_pair_frame(&pb, PairMsg::SasConfirm { ok: true })
+            .await
+            .unwrap();
+        assert!(!active_snapshot(&ap).unwrap().1, "重复确认不应再次签发");
     }
 }

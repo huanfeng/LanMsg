@@ -230,7 +230,8 @@
 | pair_use_sas | 改用数字比对 |
 | pair_host_sas_hint | 在另一台设备上进入“加入我已有的设备”（已在使用的手机：“我”→“我的设备”→“加入其他设备”），选“改用数字比对”，再选中这台手机。电脑已在使用则无法加入，请改在电脑上点“添加我的设备”。 |
 | pair_sas_hint | 请确认两台设备上显示的数字一致 |
-| pair_sas_peer | 对方：%1$s（%2$s · 指纹 %3$s） |
+| pair_sas_peer | 对方自称：%1$s（%2$s） |
+| pair_sas_fingerprint | 指纹 %1$s |
 | pair_sas_go | 请到该设备上核对数字 |
 | pair_type_desktop | 台式机 |
 | pair_type_laptop | 笔记本 |

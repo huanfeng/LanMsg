@@ -276,10 +276,11 @@ async fn sas_pairing_via_static_peer_without_discovery() {
     let code_a = wait_show_sas(&mut a, &session_a).await;
     let code_b = wait_show_sas(&mut b, &session).await;
     assert_eq!(code_a, code_b);
-    for (n, s) in [(&a, &session_a), (&b, &session)] {
+    for (n, s, code) in [(&a, &session_a, &code_a), (&b, &session, &code_b)] {
         n.try_call(Request::PairConfirm {
             session: s.clone(),
             matches: true,
+            code: code.clone(),
         })
         .await
         .expect("PairConfirm 失败");
@@ -326,6 +327,7 @@ async fn sas_pairing_requires_both_confirmations() {
     a.try_call(Request::PairConfirm {
         session: session_a.clone(),
         matches: true,
+        code: code_a.clone(),
     })
     .await
     .expect("PairConfirm 失败");
@@ -337,6 +339,7 @@ async fn sas_pairing_requires_both_confirmations() {
     b.try_call(Request::PairConfirm {
         session: session.clone(),
         matches: true,
+        code: code_b.clone(),
     })
     .await
     .expect("PairConfirm 失败");
@@ -386,6 +389,7 @@ async fn qr_window_accepts_sas_join_and_needs_both_confirmations() {
     a.try_call(Request::PairConfirm {
         session: session_a.clone(),
         matches: true,
+        code: code_a.clone(),
     })
     .await
     .expect("PairConfirm 失败");
@@ -396,6 +400,7 @@ async fn qr_window_accepts_sas_join_and_needs_both_confirmations() {
     b.try_call(Request::PairConfirm {
         session: session.clone(),
         matches: true,
+        code: code_b.clone(),
     })
     .await
     .expect("PairConfirm 失败");
@@ -432,6 +437,7 @@ async fn qr_window_sas_join_mismatch_fails_both() {
     a.try_call(Request::PairConfirm {
         session: session_a.clone(),
         matches: false,
+        code: String::new(),
     })
     .await
     .expect("PairConfirm 失败");
@@ -468,8 +474,8 @@ async fn second_peer_is_rejected_while_session_active_and_first_completes() {
     };
     let a_dev = a.device_id().await;
     let session_b = join_device(&b, &a_dev).await;
-    let _ = wait_show_sas(&mut a, &session_a).await;
-    let _ = wait_show_sas(&mut b, &session_b).await;
+    let code_a = wait_show_sas(&mut a, &session_a).await;
+    let code_b = wait_show_sas(&mut b, &session_b).await;
 
     // C 在 B 的会话进行中加入：被拒绝
     let session_c = join_device(&c, &a_dev).await;
@@ -478,10 +484,11 @@ async fn second_peer_is_rejected_while_session_active_and_first_completes() {
     assert_uninitialized(&c).await;
 
     // 原会话照常完成
-    for (n, s) in [(&a, &session_a), (&b, &session_b)] {
+    for (n, s, code) in [(&a, &session_a, &code_a), (&b, &session_b, &code_b)] {
         n.try_call(Request::PairConfirm {
             session: s.clone(),
             matches: true,
+            code: code.clone(),
         })
         .await
         .expect("PairConfirm 失败");
@@ -578,6 +585,7 @@ async fn sas_mismatch_fails_both() {
     b.try_call(Request::PairConfirm {
         session: session.clone(),
         matches: false,
+        code: String::new(),
     })
     .await
     .expect("PairConfirm 失败");

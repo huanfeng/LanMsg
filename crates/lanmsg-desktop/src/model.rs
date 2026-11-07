@@ -1114,10 +1114,12 @@ impl Model {
             return Vec::new();
         };
         let session = session.clone();
-        // 仅在等待比对时有效；点“一致”后本地置为验证中，避免先一致后又点不一致
-        if !matches!(state, PairStateDto::ShowSas { .. }) {
+        // 仅在等待比对时有效；点“一致”后本地置为验证中，避免先一致后又点不一致。
+        // 随请求带上界面当前显示的数字，核心据此拒绝过期的确认。
+        let PairStateDto::ShowSas { code, .. } = &*state else {
             return Vec::new();
-        }
+        };
+        let code = code.clone();
         *state = if matches {
             PairStateDto::Verifying
         } else {
@@ -1126,7 +1128,11 @@ impl Model {
             }
         };
         vec![call(
-            Request::PairConfirm { session, matches },
+            Request::PairConfirm {
+                session,
+                matches,
+                code,
+            },
             ReplyTag::Generic,
         )]
     }
@@ -2839,7 +2845,8 @@ mod tests {
         ));
         let fx = m.pair_confirm(true);
         assert!(has(&fx, |r| matches!(r,
-            Request::PairConfirm { session, matches: true } if session == "s1")));
+            Request::PairConfirm { session, matches: true, code }
+                if session == "s1" && code == "123456")));
     }
 
     #[test]
@@ -3091,7 +3098,8 @@ mod tests {
         m.apply(pair_event("s1", sas_dto("123456")));
         let fx = m.pair_confirm(true);
         assert!(has(&fx, |r| matches!(r,
-            Request::PairConfirm { session, matches: true } if session == "s1")));
+            Request::PairConfirm { session, matches: true, code }
+                if session == "s1" && code == "123456")));
         // 已点“一致”后进入验证中；另起会话验证“不一致”
         let mut m = Model::new();
         m.pair_start(PairMethod::Sas);
