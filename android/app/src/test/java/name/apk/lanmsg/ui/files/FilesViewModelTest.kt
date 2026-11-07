@@ -150,7 +150,7 @@ class FilesViewModelTest {
 
     @Test fun not_implemented_sets_core_outdated() = runTest {
         val fake = fake().apply {
-            handler = { throw ApiException(ErrorCode.INTERNAL, "未实现：QueryFiles") }
+            handler = { throw ApiException(ErrorCode.UNIMPLEMENTED, "unimplemented: QueryFiles") }
         }
         val vm = FilesViewModel(fake, null)
         advanceUntilIdle()

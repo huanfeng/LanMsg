@@ -121,7 +121,7 @@ impl OsKeyStore {
                 KEYSTORE_BACKEND_OS => Ok(Some(Mode::Os)),
                 KEYSTORE_BACKEND_FILE => Ok(Some(Mode::File)),
                 other => Err(KeyStoreError::Corrupt(format!(
-                    "密钥库后端标记 {} 内容为空或非法（{other:?}），可删除该文件后重试",
+                    "keystore backend marker {} is empty or invalid ({other:?}); delete the file and retry",
                     self.marker.display()
                 ))),
             },
@@ -218,7 +218,7 @@ impl OsKeyStore {
             match primary.get(name)? {
                 Some(back) if back == *v => Ok(()),
                 _ => Err(KeyStoreError::Corrupt(format!(
-                    "密钥 {name} 写入系统密钥库后读回不一致"
+                    "key {name} read back from the system keystore does not match what was written"
                 ))),
             }
         });
@@ -259,7 +259,9 @@ fn probe(primary: &dyn SecretBackend) -> Result<(), KeyStoreError> {
     if back.as_deref() == Some(PROBE_VALUE) {
         Ok(())
     } else {
-        Err(KeyStoreError::Corrupt("探测条目读回不一致".into()))
+        Err(KeyStoreError::Corrupt(
+            "probe entry read back mismatch".into(),
+        ))
     }
 }
 
@@ -281,7 +283,7 @@ impl SecretBackend for NoBackend {
 /// 系统库出错时统一包装，提示用户解锁后重试。
 fn os_unavailable(e: KeyStoreError) -> KeyStoreError {
     KeyStoreError::Io(std::io::Error::other(format!(
-        "系统密钥库暂不可用，请解锁后重试: {e}"
+        "system keystore unavailable, unlock it and retry: {e}"
     )))
 }
 
@@ -576,7 +578,7 @@ mod tests {
             msg.contains(&marker(dir.path()).display().to_string()),
             "{msg}"
         );
-        assert!(msg.contains("可删除该文件后重试"), "{msg}");
+        assert!(msg.contains("delete the file and retry"), "{msg}");
         // 不得自动当作无标记：标记原样保留。
         assert_eq!(marker_text(dir.path()), "");
     }

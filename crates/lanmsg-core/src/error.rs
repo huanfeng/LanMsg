@@ -10,48 +10,48 @@ use crate::store::StoreError;
 #[derive(Debug, thiserror::Error)]
 pub enum KeyStoreError {
     /// IO 错误。
-    #[error("IO 错误: {0}")]
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     /// 数据损坏。
-    #[error("数据损坏: {0}")]
+    #[error("corrupt data: {0}")]
     Corrupt(String),
 }
 
 /// 核心库错误。
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
-    /// 服务尚未初始化。
-    #[error("服务尚未初始化")]
+    /// service not initialized。
+    #[error("service not initialized")]
     NotInitialized,
-    /// 服务已初始化，不允许重复初始化。
-    #[error("服务已初始化")]
+    /// service already initialized，不允许重复初始化。
+    #[error("service already initialized")]
     AlreadyInitialized,
     /// 请求的资源不存在。
-    #[error("资源不存在: {0}")]
+    #[error("not found: {0}")]
     NotFound(String),
     /// 参数非法。
-    #[error("参数非法: {0}")]
+    #[error("invalid argument: {0}")]
     InvalidArgument(String),
-    /// 对端设备不在线。
-    #[error("对端设备不在线")]
+    /// peer device offline。
+    #[error("peer device offline")]
     PeerOffline,
     /// 请求被拒绝。
-    #[error("请求被拒绝: {0}")]
+    #[error("request rejected: {0}")]
     Rejected(String),
     /// IO 错误。
-    #[error("IO 错误: {0}")]
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     /// 存储层错误。
-    #[error("存储错误: {0}")]
+    #[error("store error: {0}")]
     Store(#[from] StoreError),
     /// 密钥库错误。
-    #[error("密钥库错误: {0}")]
+    #[error("keystore error: {0}")]
     KeyStore(#[from] KeyStoreError),
     /// 协议序列化错误。
-    #[error("协议错误: {0}")]
+    #[error("protocol error: {0}")]
     Proto(String),
     /// TLS 错误。
-    #[error("TLS 错误: {0}")]
+    #[error("TLS error: {0}")]
     Tls(String),
 }
 

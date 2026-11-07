@@ -80,7 +80,7 @@ class ForwardPickViewModelTest {
     @Test fun not_implemented_sets_core_outdated() = runTest {
         val fake = fake().apply {
             val inner = handler
-            handler = { req -> if (req is Request.ForwardFiles) throw ApiException(ErrorCode.INTERNAL, "未实现：ForwardFiles") else inner(req) }
+            handler = { req -> if (req is Request.ForwardFiles) throw ApiException(ErrorCode.UNIMPLEMENTED, "unimplemented: ForwardFiles") else inner(req) }
         }
         val vm = ForwardPickViewModel(fake, listOf("h1"))
         advanceUntilIdle()

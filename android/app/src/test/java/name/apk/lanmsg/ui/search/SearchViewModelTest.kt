@@ -108,7 +108,7 @@ class SearchViewModelTest {
     @Test fun not_implemented_sets_core_outdated() = runTest {
         val fake = fake().apply {
             val inner = handler
-            handler = { req -> if (req is Request.SearchMessages) throw ApiException(ErrorCode.INTERNAL, "未实现：SearchMessages") else inner(req) }
+            handler = { req -> if (req is Request.SearchMessages) throw ApiException(ErrorCode.UNIMPLEMENTED, "unimplemented: SearchMessages") else inner(req) }
         }
         val vm = SearchViewModel(fake)
         vm.setQuery("a")

@@ -29,7 +29,7 @@ pub struct AlreadyRunning;
 
 impl std::fmt::Display for AlreadyRunning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "lanmsgd 已在运行")
+        write!(f, "lanmsgd is already running")
     }
 }
 
@@ -61,7 +61,7 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
         .worker_threads(2)
         .enable_all()
         .build()
-        .context("创建 tokio 运行时失败")?;
+        .context("failed to create tokio runtime")?;
 
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let (service, accept_task) = rt.block_on(async {
@@ -72,7 +72,7 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 return Err(anyhow::Error::new(AlreadyRunning))
             }
-            Err(e) => return Err(anyhow::Error::new(e).context("绑定 IPC 端点失败")),
+            Err(e) => return Err(anyhow::Error::new(e).context("failed to bind IPC endpoint")),
         };
 
         // IPC 已绑定即视为启动成功：删除上次主动退出留下的标记。
@@ -96,7 +96,7 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
             localsend_port: LOCALSEND_PORT,
         })
         .await
-        .context("启动服务失败（若数据目录标记使用系统密钥库而系统库不可用，请检查密钥库服务）")?;
+        .context("failed to start service (if the data directory marker selects the system keystore but it is unavailable, check the keystore service)")?;
         tracing::info!("lanmsgd 已启动，IPC 端点: {endpoint}");
 
         // IPC 接入循环。

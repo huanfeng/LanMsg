@@ -99,12 +99,15 @@ impl LanMsgCore {
         self.runtime
             .as_ref()
             .map(|r| r.handle())
-            .ok_or_else(|| internal("已关闭"))
+            .ok_or_else(|| internal("closed"))
     }
 
     fn current_service(&self) -> Result<Service, FfiError> {
-        let guard = self.service.lock().map_err(|_| internal("状态锁已损坏"))?;
-        guard.clone().ok_or_else(|| internal("已关闭"))
+        let guard = self
+            .service
+            .lock()
+            .map_err(|_| internal("state lock poisoned"))?;
+        guard.clone().ok_or_else(|| internal("closed"))
     }
 
     fn abort_forwarder(&self) {
@@ -141,7 +144,7 @@ impl LanMsgCore {
             .thread_name("lanmsg-core")
             .enable_all()
             .build()
-            .map_err(|e| internal(format!("创建运行时失败: {e}")))?;
+            .map_err(|e| internal(format!("failed to create runtime: {e}")))?;
         let cfg = ServiceConfig {
             data_dir: data_dir.into(),
             listen_port: SERVICE_PORT,
@@ -153,7 +156,7 @@ impl LanMsgCore {
         };
         let service = runtime
             .block_on(Service::start(cfg))
-            .map_err(|e| internal(format!("启动失败: {e}")))?;
+            .map_err(|e| internal(format!("failed to start: {e}")))?;
         tracing::info!("core started");
         Ok(Arc::new(Self {
             runtime: Some(runtime),
@@ -168,7 +171,7 @@ impl LanMsgCore {
         let handle = self.handle()?.clone();
         match handle.spawn(async move { service.handle(req).await }).await {
             Ok(r) => r.map_err(FfiError::from),
-            Err(e) => Err(internal(format!("请求任务异常: {e}"))),
+            Err(e) => Err(internal(format!("request task failed: {e}"))),
         }
     }
 

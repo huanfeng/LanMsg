@@ -192,7 +192,7 @@ impl ConnManager {
         .map_err(|_| {
             CoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("拨号 {addr} 超时"),
+                format!("dial to {addr} timed out"),
             ))
         })??;
 
@@ -439,12 +439,14 @@ impl ConnManager {
             let cert = inner.hello_rx.borrow().cert.clone();
             cert
         }
-        .ok_or_else(|| CoreError::Rejected("本机身份未初始化，数据通道不可用".into()))?;
+        .ok_or_else(|| {
+            CoreError::Rejected("local identity not initialized, data channel unavailable".into())
+        })?;
 
         let stream = TcpStream::connect(addr).await.map_err(CoreError::Io)?;
         let (_server_config, client_config) = make_tls_configs(&device_key)?;
         let domain = ServerName::try_from(TLS_SNI.as_bytes())
-            .map_err(|e| CoreError::Tls(format!("非法 SNI: {e}")))?;
+            .map_err(|e| CoreError::Tls(format!("invalid SNI: {e}")))?;
         let mut tls_stream = tokio_rustls::TlsStream::from(
             TlsConnector::from(client_config)
                 .connect(domain, stream)
@@ -591,7 +593,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
             .unwrap_or_else(|_| {
                 Err(CoreError::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    "入站握手超时",
+                    "inbound handshake timed out",
                 )))
             });
             match accepted {

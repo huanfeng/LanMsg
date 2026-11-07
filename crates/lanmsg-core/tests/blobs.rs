@@ -176,7 +176,7 @@ fn send_folder_rejects_too_many_entries() {
     // 上限 2 → InvalidArgument；上限 10 → 正常列出 3 项。
     match walk_folder(dir.path(), 2) {
         Err(lanmsg_core::error::CoreError::InvalidArgument(m)) => {
-            assert!(m.contains("文件夹文件数超过"), "实际错误: {m}");
+            assert!(m.contains("folder has more than"), "actual error: {m}");
         }
         other => panic!("期望 InvalidArgument，实际 {other:?}"),
     }

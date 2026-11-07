@@ -57,6 +57,8 @@ pub enum ErrorCode {
     Io,
     /// 内部错误。
     Internal,
+    /// 请求对应的功能尚未实现。
+    Unimplemented,
 }
 
 // ===== Request =====

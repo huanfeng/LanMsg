@@ -65,16 +65,16 @@ struct ErrorPayload {
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
     /// 帧超过最大长度。
-    #[error("帧超过最大长度 {0} 字节")]
+    #[error("frame exceeds maximum length of {0} bytes")]
     TooLarge(usize),
     /// CBOR 编解码失败。
-    #[error("CBOR 编解码错误: {0}")]
+    #[error("CBOR codec error: {0}")]
     Cbor(String),
     /// IO 错误。
-    #[error("IO 错误: {0}")]
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    /// 数据被截断。
-    #[error("数据被截断")]
+    /// data truncated。
+    #[error("data truncated")]
     Truncated,
 }
 

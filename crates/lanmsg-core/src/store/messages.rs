@@ -98,7 +98,7 @@ impl MsgStateRow {
             "failed" => Ok(MsgStateRow::Failed),
             "recalled" => Ok(MsgStateRow::Recalled),
             _ => Err(crate::store::StoreError::Codec(format!(
-                "未知消息状态: {s}"
+                "unknown message state: {s}"
             ))),
         }
     }
@@ -457,7 +457,10 @@ impl Store {
                     r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
                 ids.push(MsgId {
                     author: DeviceId(author.try_into().map_err(|bytes: Vec<u8>| {
-                        crate::store::StoreError::Codec(format!("author 长度非法: {}", bytes.len()))
+                        crate::store::StoreError::Codec(format!(
+                            "author invalid length: {}",
+                            bytes.len()
+                        ))
                     })?),
                     seq: seq as u64,
                 });
@@ -515,7 +518,10 @@ impl Store {
             let (author, seq) = r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
             ids.push(MsgId {
                 author: DeviceId(author.try_into().map_err(|bytes: Vec<u8>| {
-                    crate::store::StoreError::Codec(format!("author 长度非法: {}", bytes.len()))
+                    crate::store::StoreError::Codec(format!(
+                        "author invalid length: {}",
+                        bytes.len()
+                    ))
                 })?),
                 seq: seq as u64,
             });
@@ -718,7 +724,7 @@ impl Store {
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
                     rusqlite::types::Type::Blob,
-                    format!("author 长度非法: {}", bytes.len()).into(),
+                    format!("author invalid length: {}", bytes.len()).into(),
                 )
             })?);
             let contiguous: i64 = row.get(1)?;

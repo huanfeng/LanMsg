@@ -34,7 +34,7 @@ pub fn shell_thumbnail(path: &Path, edge: u32) -> Result<Rgba, MediaError> {
         }
     })
     .join()
-    .map_err(|_| MediaError::Decode("Shell 缩略图线程异常".into()))?
+    .map_err(|_| MediaError::Decode("shell thumbnail thread failed".into()))?
 }
 
 unsafe fn shell_thumbnail_inner(path: &Path, edge: u32) -> Result<Rgba, MediaError> {
@@ -54,7 +54,7 @@ unsafe fn shell_thumbnail_inner(path: &Path, edge: u32) -> Result<Rgba, MediaErr
         Some(&mut bm as *mut _ as *mut _),
     );
     let (w, h) = (bm.bmWidth, bm.bmHeight);
-    let mut out = Err(MediaError::Decode("位图尺寸无效".into()));
+    let mut out = Err(MediaError::Decode("invalid bitmap dimensions".into()));
     if w > 0 && h > 0 {
         let mut info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {

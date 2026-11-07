@@ -18,13 +18,13 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum IdError {
     /// 十六进制字符串包含非法字符。
-    #[error("无效的十六进制编码")]
+    #[error("invalid hex encoding")]
     BadHex,
     /// 字节长度不为 32。
-    #[error("长度不为 32 字节")]
+    #[error("length is not 32 bytes")]
     BadLength,
     /// MsgId 字符串格式不符合 "{author_hex}:{seq}"。
-    #[error("无效的 MsgId 字符串")]
+    #[error("invalid MsgId string")]
     BadMsgId,
 }
 
@@ -75,7 +75,7 @@ macro_rules! id32 {
                 impl<'de> de::Visitor<'de> for IdVisitor {
                     type Value = $Name;
                     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                        write!(f, "32 字节字节串")
+                        write!(f, "a 32-byte string")
                     }
                     fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
                         if v.len() != 32 {
@@ -231,7 +231,7 @@ impl<'de> Deserialize<'de> for MsgId {
         impl<'de> de::Visitor<'de> for MsgIdVisitor {
             type Value = MsgId;
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                write!(f, "MsgId 字符串，格式为 <author_hex>:<seq>")
+                write!(f, "a MsgId string in the form <author_hex>:<seq>")
             }
             fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
                 v.parse::<MsgId>().map_err(E::custom)

@@ -14,10 +14,10 @@ use crate::types::{Announce, DeviceCert, Envelope, Revocation, Signature64};
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SignError {
     /// 公钥字节不合法。
-    #[error("无效的公钥字节")]
+    #[error("invalid public key bytes")]
     BadKey,
     /// 签名不合法或验证失败。
-    #[error("签名验证失败")]
+    #[error("signature verification failed")]
     BadSignature,
 }
 
@@ -25,13 +25,13 @@ pub enum SignError {
 #[derive(Debug, Error)]
 pub enum CodecError {
     /// 帧超过最大长度。
-    #[error("帧超过最大长度 {0} 字节")]
+    #[error("frame exceeds maximum length of {0} bytes")]
     TooLarge(usize),
     /// CBOR 编解码失败。
-    #[error("CBOR 编解码错误: {0}")]
+    #[error("CBOR codec error: {0}")]
     Cbor(String),
-    /// 数据被截断。
-    #[error("数据被截断")]
+    /// data truncated。
+    #[error("data truncated")]
     Truncated,
 }
 
@@ -120,7 +120,7 @@ pub fn to_cbor<T: Serialize>(v: &T) -> Vec<u8> {
     let mut buf = Vec::new();
     match ciborium::into_writer(v, &mut buf) {
         Ok(()) => buf,
-        Err(e) => panic!("CBOR 编码失败: {e}"),
+        Err(e) => panic!("CBOR encoding failed: {e}"),
     }
 }
 

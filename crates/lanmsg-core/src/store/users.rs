@@ -164,7 +164,7 @@ impl Store {
             return Ok(None);
         };
         let user = UserId(user_bytes.try_into().map_err(|bytes: Vec<u8>| {
-            crate::store::StoreError::Codec(format!("user_id 长度非法: {}", bytes.len()))
+            crate::store::StoreError::Codec(format!("user_id invalid length: {}", bytes.len()))
         })?);
         let cert: DeviceCert = lanmsg_proto::from_cbor(&cert_bytes)
             .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
@@ -177,7 +177,7 @@ impl Store {
             "Web" => DeviceType::Web,
             _ => {
                 return Err(crate::store::StoreError::Codec(format!(
-                    "未知设备类型: {device_type}"
+                    "unknown device type: {device_type}"
                 )))
             }
         };
@@ -189,7 +189,7 @@ impl Store {
             Some("Relay") => Some(PathClass::Relay),
             Some(other) => {
                 return Err(crate::store::StoreError::Codec(format!(
-                    "未知路径类型: {other}"
+                    "unknown path kind: {other}"
                 )))
             }
         };
@@ -224,7 +224,7 @@ impl Store {
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
                     rusqlite::types::Type::Blob,
-                    format!("device_id 长度非法: {}", bytes.len()).into(),
+                    format!("device_id invalid length: {}", bytes.len()).into(),
                 )
             })?);
             let cert_bytes: Vec<u8> = row.get(1)?;
@@ -250,7 +250,7 @@ impl Store {
                         rusqlite::types::Type::Text,
                         Box::new(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
-                            "未知设备类型",
+                            "unknown device type",
                         )),
                     ))
                 }
@@ -269,7 +269,7 @@ impl Store {
                         rusqlite::types::Type::Text,
                         Box::new(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
-                            "未知路径类型",
+                            "unknown path kind",
                         )),
                     ))
                 }

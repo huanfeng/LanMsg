@@ -1,5 +1,5 @@
 // 请求处理器：把 `Request` 各变体分派到消息、信任、配对、文件等模块（C5 全部变体）。
-// 仍未实现的变体（若有）统一返回 `未实现：<变体名>`，见文件末尾 `variant_name`。
+// 仍未实现的变体（若有）统一返回 `ErrorCode::Unimplemented`（message 为 `unimplemented: <变体名>`），见文件末尾 `variant_name`。
 // 注释中文，标识符英文。
 
 use std::net::SocketAddr;
@@ -99,7 +99,8 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
             let hashes = hashes
                 .iter()
                 .map(|h| {
-                    BlobHash::from_hex(h).map_err(|_| invalid_arg(format!("非法文件哈希: {h}")))
+                    BlobHash::from_hex(h)
+                        .map_err(|_| invalid_arg(format!("invalid file hash: {h}")))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let id = crate::service::files::forward_files(inner, &conv, &hashes).await?;
@@ -113,8 +114,8 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
             Ok(Response::Ok)
         }
         other => Err(ApiError {
-            code: ErrorCode::Internal,
-            message: format!("未实现：{}", variant_name(&other)),
+            code: ErrorCode::Unimplemented,
+            message: format!("unimplemented: {}", variant_name(&other)),
         }),
     }
 }
@@ -153,7 +154,7 @@ async fn init(
             if initialized {
                 return Err(ApiError {
                     code: ErrorCode::AlreadyInitialized,
-                    message: "服务已初始化".into(),
+                    message: "service already initialized".into(),
                 });
             }
             inner
@@ -185,7 +186,7 @@ async fn init(
 
     let user = inner.identity.read().unwrap().user_id().ok_or(ApiError {
         code: ErrorCode::Internal,
-        message: "初始化后缺少用户身份".into(),
+        message: "user identity missing after initialization".into(),
     })?;
 
     // 覆盖用户显示名（init_first_device 先以 device_name 填充）。
@@ -340,7 +341,9 @@ async fn list_messages(
 ) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
     let before = match before {
-        Some(s) => Some(MsgId::from_str(&s).map_err(|_| invalid_arg(format!("非法消息 ID: {s}")))?),
+        Some(s) => {
+            Some(MsgId::from_str(&s).map_err(|_| invalid_arg(format!("invalid message ID: {s}")))?)
+        }
         None => None,
     };
     let msgs = inner
@@ -434,9 +437,9 @@ async fn add_manual_peer(inner: &Arc<Inner>, addr: String) -> Result<Response, A
         Ok(a) => a,
         Err(_) => tokio::net::lookup_host(&addr)
             .await
-            .map_err(|_| invalid_arg(format!("无法解析地址: {addr}")))?
+            .map_err(|_| invalid_arg(format!("cannot resolve address: {addr}")))?
             .next()
-            .ok_or_else(|| invalid_arg(format!("无法解析地址: {addr}")))?,
+            .ok_or_else(|| invalid_arg(format!("cannot resolve address: {addr}")))?,
     };
     inner.conns.connect(addr, false).await?;
     // 连上后登记为静态对端：断线（含对端重启、无 FIN 消失）后按退避自动重连。
@@ -493,7 +496,7 @@ async fn respond_request(
         .map_err(crate::error::CoreError::from)?
         .ok_or_else(|| ApiError {
             code: ErrorCode::NotFound,
-            message: format!("请求不存在: {request}"),
+            message: format!("request not found: {request}"),
         })?;
     match row.kind {
         crate::store::RequestKindRow::Contact => {
@@ -540,7 +543,7 @@ async fn list_my_devices(inner: &Inner) -> Result<Response, ApiError> {
         .self_user
         .ok_or_else(|| ApiError {
             code: ErrorCode::NotInitialized,
-            message: "服务尚未初始化".into(),
+            message: "service not initialized".into(),
         })?;
     let rows = inner
         .store
@@ -559,8 +562,8 @@ async fn list_my_devices(inner: &Inner) -> Result<Response, ApiError> {
 /// RemoveDevice：吊销自己的指定设备（本机 → InvalidArgument；非自己的设备
 /// → NotFound），分发 Revocation 并断开该设备。
 async fn remove_device(inner: &Inner, device: String) -> Result<Response, ApiError> {
-    let device =
-        DeviceId::from_hex(&device).map_err(|_| invalid_arg(format!("非法设备 ID: {device}")))?;
+    let device = DeviceId::from_hex(&device)
+        .map_err(|_| invalid_arg(format!("invalid device ID: {device}")))?;
     inner.trust.revoke(&inner.msg, &device).await?;
     Ok(Response::Ok)
 }
@@ -613,7 +616,7 @@ async fn get_settings(inner: &Inner) -> Result<Response, ApiError> {
 async fn set_settings(inner: &Inner, settings: SettingsDto) -> Result<Response, ApiError> {
     // 校验：下载目录 trim 后非空（阈值 u64 恒 ≥ 0，无需检查）。
     if settings.download_dir.trim().is_empty() {
-        return Err(invalid_arg("下载目录不能为空".into()));
+        return Err(invalid_arg("download directory must not be empty".into()));
     }
 
     let mut settings = settings;
@@ -687,7 +690,7 @@ async fn set_profile(inner: &Inner, display_name: String) -> Result<Response, Ap
         .self_user
         .ok_or_else(|| ApiError {
             code: ErrorCode::NotInitialized,
-            message: "服务尚未初始化".into(),
+            message: "service not initialized".into(),
         })?;
 
     // users 表自己行（is_self 保持）。
@@ -745,19 +748,20 @@ async fn set_profile(inner: &Inner, display_name: String) -> Result<Response, Ap
 /// 有变化则向会话发隐藏 Read{upto}（同步到对端与我的其他设备）并重算 unread。
 async fn mark_read(inner: &Inner, conv: String, upto: String) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
-    let upto = MsgId::from_str(&upto).map_err(|_| invalid_arg(format!("非法消息 ID: {upto}")))?;
+    let upto =
+        MsgId::from_str(&upto).map_err(|_| invalid_arg(format!("invalid message ID: {upto}")))?;
     let m = inner
         .store
         .get_message(&upto)
         .map_err(CoreError::from)?
         .ok_or_else(|| ApiError {
             code: ErrorCode::NotFound,
-            message: format!("消息不存在: {upto}"),
+            message: format!("message not found: {upto}"),
         })?;
     if m.env.conv != conv {
         return Err(ApiError {
             code: ErrorCode::NotFound,
-            message: format!("会话中不存在该消息: {upto}"),
+            message: format!("message not in conversation: {upto}"),
         });
     }
     // 隐藏消息（Read/Recall 等）不能作为已读位置：否则把 Read 当 upto 再发 Read，
@@ -787,7 +791,7 @@ async fn mark_read(inner: &Inner, conv: String, upto: String) -> Result<Response
 /// DownloadBlob：发起 Blob 下载，返回 transfer_id（P2 Task 12）。
 async fn download_blob(inner: &Inner, hash: String) -> Result<Response, ApiError> {
     let h =
-        BlobHash::from_hex(&hash).map_err(|_| invalid_arg(format!("非法 Blob 哈希: {hash}")))?;
+        BlobHash::from_hex(&hash).map_err(|_| invalid_arg(format!("invalid blob hash: {hash}")))?;
     let id = inner.transfer.clone().download(h).await?;
     Ok(Response::TransferId { value: id })
 }
@@ -801,7 +805,8 @@ async fn cancel_transfer(inner: &Inner, transfer: &str) -> Result<Response, ApiE
 /// Recall：仅本人消息、时限内可撤回；已撤回幂等返回 Ok。发送隐藏
 /// Recall{target}（各端存储层入库时置 Recalled），本地发 MessageUpdated。
 async fn recall(inner: &Inner, msg: String) -> Result<Response, ApiError> {
-    let id = MsgId::from_str(&msg).map_err(|_| invalid_arg(format!("非法消息 ID: {msg}")))?;
+    let id =
+        MsgId::from_str(&msg).map_err(|_| invalid_arg(format!("invalid message ID: {msg}")))?;
     let self_user = inner
         .state
         .read()
@@ -809,7 +814,7 @@ async fn recall(inner: &Inner, msg: String) -> Result<Response, ApiError> {
         .self_user
         .ok_or_else(|| ApiError {
             code: ErrorCode::NotInitialized,
-            message: "服务尚未初始化".into(),
+            message: "service not initialized".into(),
         })?;
     let m = inner
         .store
@@ -817,7 +822,7 @@ async fn recall(inner: &Inner, msg: String) -> Result<Response, ApiError> {
         .map_err(CoreError::from)?
         .ok_or_else(|| ApiError {
             code: ErrorCode::NotFound,
-            message: format!("消息不存在: {id}"),
+            message: format!("message not found: {id}"),
         })?;
     check_recall(&inner.store, now_millis(), &m, &self_user)?;
     if m.state == MsgStateRow::Recalled {
@@ -839,8 +844,8 @@ async fn recall(inner: &Inner, msg: String) -> Result<Response, ApiError> {
     Ok(Response::Ok)
 }
 
-/// 撤回资格判定：非本人消息 → InvalidArgument("只能撤回自己的消息")；
-/// 超过 RECALL_WINDOW → InvalidArgument("超过撤回时限")。
+/// 撤回资格判定：非本人消息 → InvalidArgument("only own messages can be recalled")；
+/// 超过 RECALL_WINDOW → InvalidArgument("recall time limit exceeded")。
 /// 注：计划签名为 (now, msg, self_user)，因 StoredMessage 不携带作者用户、
 /// 判定「本人」需查 devices 表，故增加 store 参数。
 pub(crate) fn check_recall(
@@ -855,12 +860,16 @@ pub(crate) fn check_recall(
         .flatten()
         .map(|r| r.user);
     if author_user.as_ref() != Some(self_user) {
-        return Err(CoreError::InvalidArgument("只能撤回自己的消息".into()));
+        return Err(CoreError::InvalidArgument(
+            "only own messages can be recalled".into(),
+        ));
     }
     if now.saturating_sub(msg.env.hlc.millis)
         > lanmsg_proto::consts::RECALL_WINDOW.as_millis() as i64
     {
-        return Err(CoreError::InvalidArgument("超过撤回时限".into()));
+        return Err(CoreError::InvalidArgument(
+            "recall time limit exceeded".into(),
+        ));
     }
     Ok(())
 }
@@ -875,7 +884,7 @@ async fn delete_local(
 ) -> Result<Response, ApiError> {
     let mut ids = Vec::with_capacity(msgs.len());
     for s in &msgs {
-        ids.push(MsgId::from_str(s).map_err(|_| invalid_arg(format!("非法消息 ID: {s}")))?);
+        ids.push(MsgId::from_str(s).map_err(|_| invalid_arg(format!("invalid message ID: {s}")))?);
     }
     // also_my_devices 需要已初始化（SelfDevices 会话依赖 self_user）。
     let self_user = if also_my_devices {
@@ -887,7 +896,7 @@ async fn delete_local(
                 .self_user
                 .ok_or_else(|| ApiError {
                     code: ErrorCode::NotInitialized,
-                    message: "服务尚未初始化".into(),
+                    message: "service not initialized".into(),
                 })?,
         )
     } else {
@@ -924,11 +933,11 @@ async fn delete_local(
 // ---- 辅助 ----
 
 fn parse_conv(s: &str) -> Result<ConvId, ApiError> {
-    ConvId::from_hex(s).map_err(|_| invalid_arg(format!("非法会话 ID: {s}")))
+    ConvId::from_hex(s).map_err(|_| invalid_arg(format!("invalid conversation ID: {s}")))
 }
 
 fn parse_user(s: &str) -> Result<UserId, ApiError> {
-    UserId::from_hex(s).map_err(|_| invalid_arg(format!("非法用户 ID: {s}")))
+    UserId::from_hex(s).map_err(|_| invalid_arg(format!("invalid user ID: {s}")))
 }
 
 fn invalid_arg(message: String) -> ApiError {
@@ -1070,8 +1079,8 @@ mod tests {
             received_at: 0,
         };
         match check_recall(&store, now_millis(), &msg, &self_user) {
-            Err(CoreError::InvalidArgument(m)) => assert_eq!(m, "超过撤回时限"),
-            other => panic!("期望超过撤回时限错误，实际 {other:?}"),
+            Err(CoreError::InvalidArgument(m)) => assert_eq!(m, "recall time limit exceeded"),
+            other => panic!("expected recall time limit error, got {other:?}"),
         }
     }
 }

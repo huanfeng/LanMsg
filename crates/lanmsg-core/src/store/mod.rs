@@ -32,10 +32,10 @@ use crate::store::schema::MIGRATIONS;
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     /// SQLite 错误。
-    #[error("SQLite 错误: {0}")]
+    #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     /// 编解码错误。
-    #[error("编解码错误: {0}")]
+    #[error("codec error: {0}")]
     Codec(String),
 }
 

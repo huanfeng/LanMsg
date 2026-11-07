@@ -123,7 +123,7 @@ impl NameMatch {
 
 fn arr32(v: Vec<u8>, what: &str) -> Result<[u8; 32], StoreError> {
     v.try_into()
-        .map_err(|b: Vec<u8>| StoreError::Codec(format!("{what} 长度非法: {}", b.len())))
+        .map_err(|b: Vec<u8>| StoreError::Codec(format!("{what} invalid length: {}", b.len())))
 }
 
 /// `rel_path` 的文件名部分（兼容 `/` 与 `\`）。

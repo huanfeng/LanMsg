@@ -59,7 +59,8 @@ pub fn load_settings(store: &Store) -> Result<SettingsDto, CoreError> {
     let mut s = match store.get_setting(SETTING_SETTINGS)? {
         Some(hex) => {
             let bytes = hex_decode(&hex)?;
-            from_cbor(&bytes).map_err(|e| CoreError::Proto(format!("settings 解码失败: {e}")))?
+            from_cbor(&bytes)
+                .map_err(|e| CoreError::Proto(format!("failed to decode settings: {e}")))?
         }
         None => default_settings(&data_dir, &device_name),
     };

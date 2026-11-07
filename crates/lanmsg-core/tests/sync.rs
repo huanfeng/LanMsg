@@ -868,7 +868,7 @@ async fn recall_others_message_rejected() {
         .await
         .expect_err("撤回他人消息应被拒绝");
     assert_eq!(err.code, ErrorCode::InvalidArgument);
-    assert_eq!(err.message, "只能撤回自己的消息");
+    assert_eq!(err.message, "only own messages can be recalled");
 }
 
 /// A 本地删除（含我的设备）→ B 不再显示；X 侧仍在。

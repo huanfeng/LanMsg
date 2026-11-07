@@ -184,7 +184,7 @@ impl Messaging {
         let conv_row = self
             .store
             .get_conversation(conv)?
-            .ok_or_else(|| CoreError::NotFound(format!("会话不存在: {conv}")))?;
+            .ok_or_else(|| CoreError::NotFound(format!("conversation not found: {conv}")))?;
 
         // 3. next_seqs → 构造 Envelope。
         let (seq, conv_seq) = self.store.next_seqs(&self_device, conv)?;
@@ -358,7 +358,7 @@ impl Messaging {
         };
         self.store
             .get_conversation(conv)?
-            .ok_or_else(|| CoreError::NotFound(format!("会话不存在: {conv}")))?;
+            .ok_or_else(|| CoreError::NotFound(format!("conversation not found: {conv}")))?;
 
         // 2. next_seqs + clock.now → insert_preparing。paths 约定：Folder 时
         //    paths[0] 为根目录，其余为条目文件（视图与恢复共用该约定）。
@@ -558,7 +558,9 @@ impl Messaging {
                 }
             }
             (PreparingKind::Folder, None) => {
-                return Err(CoreError::Proto("preparing 行缺少文件夹根路径".into()))
+                return Err(CoreError::Proto(
+                    "preparing row is missing folder root path".into(),
+                ))
             }
         };
 
@@ -791,7 +793,10 @@ impl Messaging {
 
                                 let conv_row =
                                     self.store.get_conversation(&env.conv)?.ok_or_else(|| {
-                                        CoreError::NotFound(format!("会话不存在: {}", env.conv))
+                                        CoreError::NotFound(format!(
+                                            "conversation not found: {}",
+                                            env.conv
+                                        ))
                                     })?;
                                 let peer_online = match conv_row.kind {
                                     ConvKindRow::Dm => conv_row.peer_user.is_some_and(|pu| {

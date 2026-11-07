@@ -50,7 +50,7 @@ pub struct Hlc {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionVector(pub BTreeMap<DeviceId, u64>);
 
-/// 64 字节签名，serde 序列化为 bytes（与 32 字节标识类型一致）。
+/// a 64-byte signature，serde 序列化为 bytes（与 32 字节标识类型一致）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signature64(pub [u8; 64]);
 
@@ -66,11 +66,11 @@ impl<'de> Deserialize<'de> for Signature64 {
         impl<'de> de::Visitor<'de> for SigVisitor {
             type Value = Signature64;
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                write!(f, "64 字节签名")
+                write!(f, "a 64-byte signature")
             }
             fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
                 if v.len() != 64 {
-                    return Err(E::custom("签名长度不为 64 字节"));
+                    return Err(E::custom("signature length is not 64 bytes"));
                 }
                 let mut arr = [0u8; 64];
                 arr.copy_from_slice(v);

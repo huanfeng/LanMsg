@@ -45,7 +45,7 @@ fn run_with_timeout(mut cmd: Command, deadline: Instant) -> Result<Vec<u8>, Medi
     let mut stdout = child
         .stdout
         .take()
-        .ok_or_else(|| MediaError::Decode("无法获取子进程输出".into()))?;
+        .ok_or_else(|| MediaError::Decode("cannot get child process output".into()))?;
     // 单独线程读 stdout，避免管道写满导致子进程阻塞
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -69,12 +69,14 @@ fn run_with_timeout(mut cmd: Command, deadline: Instant) -> Result<Vec<u8>, Medi
     };
     let out = reader
         .join()
-        .map_err(|_| MediaError::Decode("读取子进程输出的线程异常".into()))?;
+        .map_err(|_| MediaError::Decode("child output reader thread failed".into()))?;
     if out.len() as u64 > MAX_TOOL_OUTPUT {
         return Err(MediaError::TooLarge);
     }
     if !status.success() {
-        return Err(MediaError::Decode(format!("外部工具退出码 {status}")));
+        return Err(MediaError::Decode(format!(
+            "external tool exit status {status}"
+        )));
     }
     Ok(out)
 }
@@ -145,7 +147,9 @@ pub fn frame_and_probe(path: &Path) -> Result<(Rgba, MediaInfo), MediaError> {
     let width = stream["width"].as_u64().unwrap_or(0) as u32;
     let height = stream["height"].as_u64().unwrap_or(0) as u32;
     if width == 0 || height == 0 {
-        return Err(MediaError::Decode("ffprobe 未返回视频尺寸".into()));
+        return Err(MediaError::Decode(
+            "ffprobe returned no video dimensions".into(),
+        ));
     }
     let duration_ms = json["format"]["duration"]
         .as_str()

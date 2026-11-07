@@ -39,7 +39,7 @@ impl BlobLocalKind {
             "source" => Ok(BlobLocalKind::Source),
             "downloaded" => Ok(BlobLocalKind::Downloaded),
             _ => Err(crate::store::StoreError::Codec(format!(
-                "未知 blob 本地类型: {s}"
+                "unknown blob local kind: {s}"
             ))),
         }
     }
@@ -78,7 +78,7 @@ impl PreparingKind {
             "files" => Ok(PreparingKind::Files),
             "folder" => Ok(PreparingKind::Folder),
             _ => Err(crate::store::StoreError::Codec(format!(
-                "未知 preparing 类型: {s}"
+                "unknown preparing kind: {s}"
             ))),
         }
     }
@@ -113,7 +113,7 @@ impl TransferState {
             "failed" => Ok(TransferState::Failed),
             "cancelled" => Ok(TransferState::Cancelled),
             _ => Err(crate::store::StoreError::Codec(format!(
-                "未知传输状态: {s}"
+                "unknown transfer state: {s}"
             ))),
         }
     }
@@ -293,7 +293,10 @@ impl Store {
         for r in rows {
             let bytes = r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
             out.push(DeviceId(bytes.try_into().map_err(|bytes: Vec<u8>| {
-                crate::store::StoreError::Codec(format!("device_id 长度非法: {}", bytes.len()))
+                crate::store::StoreError::Codec(format!(
+                    "device_id invalid length: {}",
+                    bytes.len()
+                ))
             })?));
         }
         Ok(out)
@@ -433,7 +436,7 @@ impl Store {
         let metas: Vec<&BlobMeta> = items_with_rel.iter().map(|(m, _)| *m).collect();
         for (hash, seg) in segs {
             let meta = metas.iter().find(|m| m.hash == *hash).ok_or_else(|| {
-                crate::store::StoreError::Codec(format!("segs 中的 hash 无对应元数据: {hash:?}"))
+                crate::store::StoreError::Codec(format!("hash in segs has no metadata: {hash:?}"))
             })?;
             tx.execute(
                 "INSERT INTO blobs(hash, size, mime, segment_hashes) VALUES(?1, ?2, ?3, ?4)
@@ -715,7 +718,7 @@ fn transfer_from_tuple(
     Ok(TransferRow {
         transfer_id,
         hash: BlobHash(hash.try_into().map_err(|bytes: Vec<u8>| {
-            crate::store::StoreError::Codec(format!("hash 长度非法: {}", bytes.len()))
+            crate::store::StoreError::Codec(format!("hash invalid length: {}", bytes.len()))
         })?),
         state: TransferState::parse(&state)?,
         part_path: PathBuf::from(part_path),
@@ -759,7 +762,7 @@ fn preparing_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PreparingRow> {
                     rusqlite::Error::FromSqlConversionFailure(
                         0,
                         rusqlite::types::Type::Blob,
-                        format!("author 长度非法: {}", bytes.len()).into(),
+                        format!("author invalid length: {}", bytes.len()).into(),
                     )
                 })?,
         ),
@@ -771,7 +774,7 @@ fn preparing_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PreparingRow> {
                     rusqlite::Error::FromSqlConversionFailure(
                         2,
                         rusqlite::types::Type::Blob,
-                        format!("conv_id 长度非法: {}", bytes.len()).into(),
+                        format!("conv_id invalid length: {}", bytes.len()).into(),
                     )
                 })?,
         ),
@@ -802,7 +805,7 @@ fn message_blob_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageBlobR
                         rusqlite::Error::FromSqlConversionFailure(
                             0,
                             rusqlite::types::Type::Blob,
-                            format!("author 长度非法: {}", bytes.len()).into(),
+                            format!("author invalid length: {}", bytes.len()).into(),
                         )
                     })?,
             ),
@@ -816,7 +819,7 @@ fn message_blob_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageBlobR
                     rusqlite::Error::FromSqlConversionFailure(
                         3,
                         rusqlite::types::Type::Blob,
-                        format!("conv_id 长度非法: {}", bytes.len()).into(),
+                        format!("conv_id invalid length: {}", bytes.len()).into(),
                     )
                 })?,
         ),

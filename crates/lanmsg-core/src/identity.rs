@@ -14,27 +14,39 @@ fn validate_name(raw: &str, what: &str, max: usize) -> Result<String, CoreError>
     let name = raw.trim();
     let n = name.chars().count();
     if n == 0 {
-        return Err(CoreError::InvalidArgument(format!("{what}不能为空")));
+        return Err(CoreError::InvalidArgument(format!(
+            "{what} must not be empty"
+        )));
     }
     if n > max {
         return Err(CoreError::InvalidArgument(format!(
-            "{what}不能超过 {max} 个字符"
+            "{what} must not exceed {max} characters"
         )));
     }
     if name.chars().any(|c| c.is_control()) {
-        return Err(CoreError::InvalidArgument(format!("{what}含有控制字符")));
+        return Err(CoreError::InvalidArgument(format!(
+            "{what} contains control characters"
+        )));
     }
     Ok(name.to_string())
 }
 
 /// 校验用户显示名（C 约束：1–32 字符、无控制字符）。
 pub(crate) fn validate_display_name(raw: &str) -> Result<String, CoreError> {
-    validate_name(raw, "显示名", lanmsg_proto::consts::DISPLAY_NAME_MAX_CHARS)
+    validate_name(
+        raw,
+        "display name",
+        lanmsg_proto::consts::DISPLAY_NAME_MAX_CHARS,
+    )
 }
 
 /// 校验设备名（规则同显示名，上限 DEVICE_NAME_MAX_CHARS）。
 pub(crate) fn validate_device_name(raw: &str) -> Result<String, CoreError> {
-    validate_name(raw, "设备名", lanmsg_proto::consts::DEVICE_NAME_MAX_CHARS)
+    validate_name(
+        raw,
+        "device name",
+        lanmsg_proto::consts::DEVICE_NAME_MAX_CHARS,
+    )
 }
 
 pub const KEY_DEVICE: &str = "device.key";
@@ -61,7 +73,7 @@ impl Identity {
             Some(bytes) => {
                 let arr: [u8; 32] = bytes
                     .try_into()
-                    .map_err(|_| CoreError::InvalidArgument("设备密钥长度非法".into()))?;
+                    .map_err(|_| CoreError::InvalidArgument("invalid device key length".into()))?;
                 DeviceKey::from_bytes(&arr)
             }
             None => {
@@ -75,7 +87,7 @@ impl Identity {
             Some(bytes) => {
                 let arr: [u8; 32] = bytes
                     .try_into()
-                    .map_err(|_| CoreError::InvalidArgument("用户密钥长度非法".into()))?;
+                    .map_err(|_| CoreError::InvalidArgument("invalid user key length".into()))?;
                 Some(UserKey::from_bytes(&arr))
             }
             None => None,
@@ -275,7 +287,7 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
 
 pub(crate) fn hex_decode(s: &str) -> Result<Vec<u8>, CoreError> {
     if !s.len().is_multiple_of(2) {
-        return Err(CoreError::InvalidArgument("hex 长度必须为偶数".into()));
+        return Err(CoreError::InvalidArgument("hex length must be even".into()));
     }
     let mut out = Vec::with_capacity(s.len() / 2);
     let bytes = s.as_bytes();
@@ -292,7 +304,7 @@ fn hex_val(c: u8) -> Result<u8, CoreError> {
         b'0'..=b'9' => Ok(c - b'0'),
         b'a'..=b'f' => Ok(c - b'a' + 10),
         b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(CoreError::InvalidArgument("非法 hex 字符".into())),
+        _ => Err(CoreError::InvalidArgument("invalid hex character".into())),
     }
 }
 

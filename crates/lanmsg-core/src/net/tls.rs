@@ -34,7 +34,7 @@ fn build_self_signed_cert(device: &DeviceKey) -> Result<(Vec<u8>, Vec<u8>), Core
         &rustls::pki_types::PrivatePkcs8KeyDer::from(pkcs8.clone()),
         &PKCS_ED25519,
     )
-    .map_err(|e| CoreError::Tls(format!("从设备密钥构建 KeyPair 失败: {e}")))?;
+    .map_err(|e| CoreError::Tls(format!("failed to build KeyPair from device key: {e}")))?;
 
     let mut params = CertificateParams::default();
     let mut distinguished_name = DistinguishedName::new();
@@ -48,7 +48,7 @@ fn build_self_signed_cert(device: &DeviceKey) -> Result<(Vec<u8>, Vec<u8>), Core
 
     let cert = params
         .self_signed(&key_pair)
-        .map_err(|e| CoreError::Tls(format!("生成证书失败: {e}")))?;
+        .map_err(|e| CoreError::Tls(format!("failed to generate certificate: {e}")))?;
 
     let cert_der = cert.der().to_vec();
     let key_der = key_pair.serialize_der();
@@ -76,7 +76,9 @@ impl ServerClientCertVerifier for AnyClientCertVerifier {
         _now: UnixTime,
     ) -> Result<ServerClientCertVerified, TlsError> {
         if end_entity.is_empty() {
-            return Err(TlsError::General("客户端未提供证书".into()));
+            return Err(TlsError::General(
+                "client did not present a certificate".into(),
+            ));
         }
         Ok(ServerClientCertVerified::assertion())
     }
@@ -87,7 +89,7 @@ impl ServerClientCertVerifier for AnyClientCertVerifier {
         _cert: &CertificateDer<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        Err(TlsError::General("TLS 1.2 不允许".into()))
+        Err(TlsError::General("TLS 1.2 not allowed".into()))
     }
 
     fn verify_tls13_signature(
@@ -97,14 +99,14 @@ impl ServerClientCertVerifier for AnyClientCertVerifier {
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
         let provider = CryptoProvider::get_default()
-            .ok_or_else(|| TlsError::General("无签名验证提供程序".into()))?;
+            .ok_or_else(|| TlsError::General("no signature verification provider".into()))?;
         verify_tls13_signature(
             message,
             cert,
             dss,
             &provider.signature_verification_algorithms,
         )
-        .map_err(|e| TlsError::General(format!("TLS 1.3 签名验证失败: {e}")))
+        .map_err(|e| TlsError::General(format!("TLS 1.3 signature verification failed: {e}")))
     }
 
     fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
@@ -153,7 +155,7 @@ impl ClientServerCertVerifier for AnyServerCertVerifier {
         _cert: &CertificateDer<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        Err(TlsError::General("TLS 1.2 不允许".into()))
+        Err(TlsError::General("TLS 1.2 not allowed".into()))
     }
 
     fn verify_tls13_signature(
@@ -163,14 +165,14 @@ impl ClientServerCertVerifier for AnyServerCertVerifier {
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
         let provider = CryptoProvider::get_default()
-            .ok_or_else(|| TlsError::General("无签名验证提供程序".into()))?;
+            .ok_or_else(|| TlsError::General("no signature verification provider".into()))?;
         verify_tls13_signature(
             message,
             cert,
             dss,
             &provider.signature_verification_algorithms,
         )
-        .map_err(|e| TlsError::General(format!("TLS 1.3 签名验证失败: {e}")))
+        .map_err(|e| TlsError::General(format!("TLS 1.3 signature verification failed: {e}")))
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -198,9 +200,9 @@ pub fn make_tls_configs_expecting(
             .with_single_cert(
                 vec![CertificateDer::from(cert_der.clone())],
                 PrivateKeyDer::try_from(key_der.clone())
-                    .map_err(|e| CoreError::Tls(format!("私钥格式错误: {e}")))?,
+                    .map_err(|e| CoreError::Tls(format!("invalid private key format: {e}")))?,
             )
-            .map_err(|e| CoreError::Tls(format!("构建服务端配置失败: {e}")))?;
+            .map_err(|e| CoreError::Tls(format!("failed to build server config: {e}")))?;
 
     let client_config =
         rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
@@ -209,9 +211,9 @@ pub fn make_tls_configs_expecting(
             .with_client_auth_cert(
                 vec![CertificateDer::from(cert_der)],
                 PrivateKeyDer::try_from(key_der)
-                    .map_err(|e| CoreError::Tls(format!("私钥格式错误: {e}")))?,
+                    .map_err(|e| CoreError::Tls(format!("invalid private key format: {e}")))?,
             )
-            .map_err(|e| CoreError::Tls(format!("构建客户端配置失败: {e}")))?;
+            .map_err(|e| CoreError::Tls(format!("failed to build client config: {e}")))?;
 
     Ok((Arc::new(server_config), Arc::new(client_config)))
 }
@@ -220,7 +222,7 @@ pub fn make_tls_configs_expecting(
 pub fn peer_device_id(conn: &rustls::CommonState) -> Result<DeviceId, CoreError> {
     let certs = conn
         .peer_certificates()
-        .ok_or_else(|| CoreError::Tls("对端未提供证书".into()))?;
+        .ok_or_else(|| CoreError::Tls("peer did not present a certificate".into()))?;
 
     device_id_from_cert(&certs[0])
 }
@@ -228,7 +230,7 @@ pub fn peer_device_id(conn: &rustls::CommonState) -> Result<DeviceId, CoreError>
 /// 从设备自签证书（DER）中取 Ed25519 公钥，即设备 ID。
 fn device_id_from_cert(end_entity: &[u8]) -> Result<DeviceId, CoreError> {
     let (_remain, x509_cert) = parse_x509_certificate(end_entity)
-        .map_err(|e| CoreError::Tls(format!("解析对端证书失败: {e}")))?;
+        .map_err(|e| CoreError::Tls(format!("failed to parse peer certificate: {e}")))?;
 
     let pki = &x509_cert.tbs_certificate.subject_pki;
     let alg_oid = &pki.algorithm.algorithm;
@@ -236,13 +238,13 @@ fn device_id_from_cert(end_entity: &[u8]) -> Result<DeviceId, CoreError> {
     // 检查算法 OID 是否为 Ed25519 (1.3.101.112)
     if alg_oid.to_string() != "1.3.101.112" {
         return Err(CoreError::Tls(format!(
-            "对端证书非 Ed25519 算法: {alg_oid}"
+            "peer certificate is not Ed25519: {alg_oid}"
         )));
     }
 
     let spki_data = &pki.subject_public_key.data;
     if spki_data.len() != 32 {
-        return Err(CoreError::Tls("Ed25519 公钥长度非 32 字节".into()));
+        return Err(CoreError::Tls("Ed25519 public key is not 32 bytes".into()));
     }
 
     let mut pk = [0u8; 32];

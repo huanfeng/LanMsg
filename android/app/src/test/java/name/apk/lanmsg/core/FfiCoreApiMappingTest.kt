@@ -27,9 +27,9 @@ class FfiCoreApiMappingTest {
         assertEquals(ErrorCode.INTERNAL, e.code)
     }
 
-    @Test fun is_not_implemented_matches_placeholder_error() {
-        assertTrue(ApiException(ErrorCode.INTERNAL, "未实现：QueryFiles").isNotImplemented())
-        assertFalse(ApiException(ErrorCode.INTERNAL, "别的错误").isNotImplemented())
-        assertFalse(ApiException(ErrorCode.IO, "未实现：x").isNotImplemented())
+    @Test fun is_not_implemented_follows_error_code() {
+        assertTrue(ApiException(ErrorCode.UNIMPLEMENTED, "unimplemented: QueryFiles").isNotImplemented())
+        assertFalse(ApiException(ErrorCode.INTERNAL, "any message").isNotImplemented())
+        assertFalse(ApiException(ErrorCode.IO, "unimplemented: x").isNotImplemented())
     }
 }

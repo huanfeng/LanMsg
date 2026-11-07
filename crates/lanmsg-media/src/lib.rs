@@ -17,16 +17,16 @@ pub use thumb::make_thumbnail;
 /// 媒体处理错误。
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
-    #[error("不支持的媒体格式")]
+    #[error("unsupported media format")]
     Unsupported,
-    #[error("图片尺寸超出解码上限")]
+    #[error("image dimensions exceed decode limit")]
     TooLarge,
-    #[error("解码失败: {0}")]
+    #[error("decode failed: {0}")]
     Decode(String),
-    #[error("IO 错误: {0}")]
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("缺少 ffmpeg/ffprobe")]
+    #[error("ffmpeg/ffprobe missing")]
     ToolMissing,
-    #[error("外部工具执行超时")]
+    #[error("external tool timed out")]
     Timeout,
 }

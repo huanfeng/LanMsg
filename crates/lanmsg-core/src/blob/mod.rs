@@ -30,7 +30,7 @@ pub struct FileSource {
 /// InvalidArgument。阻塞函数，调用方需在 spawn_blocking 中执行。
 pub fn collect_file_sources(paths: &[PathBuf]) -> Result<Vec<FileSource>, CoreError> {
     if paths.is_empty() {
-        return Err(CoreError::InvalidArgument("文件列表为空".into()));
+        return Err(CoreError::InvalidArgument("file list is empty".into()));
     }
     let mut out = Vec::with_capacity(paths.len());
     for p in paths {
@@ -44,7 +44,9 @@ pub fn collect_file_sources(paths: &[PathBuf]) -> Result<Vec<FileSource>, CoreEr
 /// 调用方需在 spawn_blocking 中执行。返回 (文件夹名, 条目)。
 pub fn collect_folder_sources(root: &Path) -> Result<(String, Vec<FileSource>), CoreError> {
     if !root.is_dir() {
-        return Err(CoreError::InvalidArgument("文件夹根路径不是目录".into()));
+        return Err(CoreError::InvalidArgument(
+            "folder root is not a directory".into(),
+        ));
     }
     let entries = walk_folder(root, MAX_FOLDER_ENTRIES)?;
     let name = root
@@ -85,7 +87,7 @@ fn walk_dir(
         } else if ft.is_file() {
             if out.len() >= max_entries {
                 return Err(CoreError::InvalidArgument(format!(
-                    "文件夹文件数超过 {max_entries}"
+                    "folder has more than {max_entries} files"
                 )));
             }
             out.push(file_source(&entry.path(), Some(rel_to_string(&child_rel)))?);
@@ -101,11 +103,12 @@ fn rel_to_string(rel: &Path) -> String {
 
 /// 单个文件的元信息收集；不存在或不是普通文件 → InvalidArgument。
 fn file_source(path: &Path, rel_path: Option<String>) -> Result<FileSource, CoreError> {
-    let meta = std::fs::metadata(path)
-        .map_err(|_| CoreError::InvalidArgument(format!("路径不存在: {}", path.display())))?;
+    let meta = std::fs::metadata(path).map_err(|_| {
+        CoreError::InvalidArgument(format!("path does not exist: {}", path.display()))
+    })?;
     if !meta.is_file() {
         return Err(CoreError::InvalidArgument(format!(
-            "不是普通文件: {}",
+            "not a regular file: {}",
             path.display()
         )));
     }

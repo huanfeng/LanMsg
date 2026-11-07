@@ -157,7 +157,7 @@ impl Trust {
             .store
             .get_device(&env.id.author)?
             .map(|r| r.user)
-            .ok_or_else(|| CoreError::Rejected("作者设备未入库".into()))?;
+            .ok_or_else(|| CoreError::Rejected("author device not in store".into()))?;
 
         // 规则 2：作者用户是自己 → Accept。
         if self_user.is_some_and(|u| u == author_user) {
@@ -340,7 +340,7 @@ impl Trust {
         let self_user = self.self_user().await?;
         let rec = self
             .contact_record(user)?
-            .ok_or_else(|| CoreError::NotFound(format!("联系人不存在: {user}")))?;
+            .ok_or_else(|| CoreError::NotFound(format!("contact not found: {user}")))?;
         let conv = ConvId::self_devices(&self_user);
         msg.send_hidden(
             &conv,
@@ -374,14 +374,16 @@ impl Trust {
     pub async fn request_contact(&self, msg: &Messaging, user: &UserId) -> Result<(), CoreError> {
         let self_user = self.self_user().await?;
         if *user == self_user {
-            return Err(CoreError::InvalidArgument("不能添加自己为联系人".into()));
+            return Err(CoreError::InvalidArgument(
+                "cannot add self as contact".into(),
+            ));
         }
         let current = self.store.get_contact(user)?.map(|r| r.state);
         match current {
             Some(ContactState::Accepted) => return Ok(()),
             Some(ContactState::Blocked) => {
                 return Err(CoreError::InvalidArgument(
-                    "该用户已被屏蔽，先解除屏蔽再添加".into(),
+                    "user is blocked, unblock before adding".into(),
                 ));
             }
             Some(ContactState::Incoming) => {
@@ -524,7 +526,7 @@ impl Trust {
         match action {
             RequestAction::AcceptOnce => {
                 return Err(CoreError::InvalidArgument(
-                    "联系人请求不支持接收一次".into(),
+                    "contact request does not support accept-once".into(),
                 ));
             }
             RequestAction::AddContact => {
@@ -580,9 +582,9 @@ impl Trust {
         now: i64,
     ) -> Result<(), CoreError> {
         use lanmsg_api::types::RequestAction;
-        let conv = req
-            .conv
-            .ok_or_else(|| CoreError::InvalidArgument("消息请求缺少会话".into()))?;
+        let conv = req.conv.ok_or_else(|| {
+            CoreError::InvalidArgument("message request is missing conversation".into())
+        })?;
         let user = req.from_user;
         match action {
             RequestAction::AcceptOnce => {
@@ -657,7 +659,7 @@ impl Trust {
         let conv_row = self
             .store
             .get_conversation(conv)?
-            .ok_or_else(|| CoreError::NotFound(format!("会话不存在: {conv}")))?;
+            .ok_or_else(|| CoreError::NotFound(format!("conversation not found: {conv}")))?;
         let peer_online = match conv_row.kind {
             ConvKindRow::Dm => conv_row.peer_user.is_some_and(|pu| {
                 self.conns
@@ -690,7 +692,7 @@ impl Trust {
         let prev = self
             .store
             .get_contact(user)?
-            .ok_or_else(|| CoreError::NotFound(format!("非联系人: {user}")))?;
+            .ok_or_else(|| CoreError::NotFound(format!("not a contact: {user}")))?;
         let row = ContactRow {
             user: *user,
             state: prev.state,
@@ -808,14 +810,18 @@ impl Trust {
         let self_user = self.self_user().await?;
         let self_device = self.identity.read().unwrap().device_id();
         if *device == self_device {
-            return Err(CoreError::InvalidArgument("不能移除本机".into()));
+            return Err(CoreError::InvalidArgument(
+                "cannot remove this device".into(),
+            ));
         }
         let row = self
             .store
             .get_device(device)?
-            .ok_or_else(|| CoreError::NotFound(format!("设备不存在: {device}")))?;
+            .ok_or_else(|| CoreError::NotFound(format!("device not found: {device}")))?;
         if row.user != self_user {
-            return Err(CoreError::NotFound(format!("设备不属于当前用户: {device}")));
+            return Err(CoreError::NotFound(format!(
+                "device does not belong to current user: {device}"
+            )));
         }
         // 吊销记录须由用户密钥签发（读锁作用域内取引用，无 await 穿越锁）。
         let rev = {
@@ -860,17 +866,23 @@ impl Trust {
     /// 返回是否新插入。
     pub async fn on_revocation(&self, from: &PeerInfo, r: Revocation) -> Result<bool, CoreError> {
         if r.verify().is_err() {
-            return Err(CoreError::Rejected("吊销记录验签失败".into()));
+            return Err(CoreError::Rejected(
+                "revocation signature verification failed".into(),
+            ));
         }
         let self_device = self.identity.read().unwrap().device_id();
         let self_user = self_user_now_sync(&self.identity);
         let is_self_user = self_user.is_some_and(|u| u == r.user);
         if !is_self_user && !self.is_contact(&r.user) {
-            return Err(CoreError::Rejected("吊销发布者非自己或联系人".into()));
+            return Err(CoreError::Rejected(
+                "revocation publisher is neither self nor a contact".into(),
+            ));
         }
         if let Some(row) = self.store.get_device(&r.device)? {
             if row.user != r.user {
-                return Err(CoreError::Rejected("吊销设备不属于该用户".into()));
+                return Err(CoreError::Rejected(
+                    "revoked device does not belong to the user".into(),
+                ));
             }
         }
         if !self.store.insert_revocation(&r)? {
@@ -1042,15 +1054,16 @@ fn validate_peer_devices(from: &PeerInfo, devices: &[DeviceCert]) -> Result<User
     let cert = from
         .cert
         .as_ref()
-        .ok_or_else(|| CoreError::Rejected("请求方未提供证书".into()))?;
+        .ok_or_else(|| CoreError::Rejected("requester did not provide a certificate".into()))?;
     for c in devices {
         if c.user != cert.user {
             return Err(CoreError::Rejected(
-                "请求中设备证书用户与发送方不一致".into(),
+                "user of device certificate in request does not match sender".into(),
             ));
         }
-        c.verify()
-            .map_err(|e| CoreError::Rejected(format!("设备证书验签失败: {e}")))?;
+        c.verify().map_err(|e| {
+            CoreError::Rejected(format!("device certificate verification failed: {e}"))
+        })?;
     }
     Ok(cert.user)
 }

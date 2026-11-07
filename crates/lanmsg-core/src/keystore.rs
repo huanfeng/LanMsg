@@ -27,7 +27,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8], mode_0600: bool) -> io::Re
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "路径缺少文件名"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
     let tmp_path = path.with_file_name(format!(
         "{name}.tmp.{}.{:016x}",
         std::process::id(),

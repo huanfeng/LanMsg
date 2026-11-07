@@ -85,9 +85,9 @@ impl Store {
         let mut out = Vec::new();
         for row in rows {
             let (author, seq) = row?;
-            let author: [u8; 32] = author
-                .try_into()
-                .map_err(|b: Vec<u8>| StoreError::Codec(format!("author 长度非法: {}", b.len())))?;
+            let author: [u8; 32] = author.try_into().map_err(|b: Vec<u8>| {
+                StoreError::Codec(format!("author invalid length: {}", b.len()))
+            })?;
             out.push(MsgId {
                 author: DeviceId(author),
                 seq: seq as u64,

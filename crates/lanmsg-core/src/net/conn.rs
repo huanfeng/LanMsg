@@ -154,7 +154,7 @@ impl Connection {
         // 带期望设备时，握手内（客户端证书发出前）就校验服务端身份。
         let (_server_config, client_config) = make_tls_configs_expecting(device_key, expect)?;
         let domain = ServerName::try_from(TLS_SNI.as_bytes())
-            .map_err(|e| CoreError::Tls(format!("非法 SNI: {e}")))?;
+            .map_err(|e| CoreError::Tls(format!("invalid SNI: {e}")))?;
         let connector = TlsConnector::from(client_config);
         let tls_stream = connector
             .connect(domain, stream)
@@ -172,7 +172,7 @@ impl Connection {
         let mut tls_exporter = [0u8; 32];
         session
             .export_keying_material(&mut tls_exporter, PAIR_TLS_EXPORTER_LABEL, None)
-            .map_err(|e| CoreError::Tls(format!("导出密钥材料失败: {e}")))?;
+            .map_err(|e| CoreError::Tls(format!("failed to export keying material: {e}")))?;
         // 拨号方声明通道：控制通道。
         let mut tls_stream = tls_stream;
         tls_stream
@@ -211,31 +211,35 @@ impl Connection {
             Some(Ok(Frame::Hello(h))) => h,
             Some(Ok(Frame::Error { code, message })) => {
                 return Err(CoreError::Rejected(format!(
-                    "对端拒绝连接: code={code} message={message}"
+                    "peer refused connection: code={code} message={message}"
                 )));
             }
             Some(Ok(other)) => {
                 return Err(CoreError::Proto(format!(
-                    "期望 Hello 帧，收到类型 {}",
+                    "expected Hello frame, got type {}",
                     other.type_id()
                 )));
             }
             Some(Err(e)) => return Err(CoreError::Io(std::io::Error::other(e.to_string()))),
-            None => return Err(CoreError::Proto("对端在发送 Hello 前关闭连接".into())),
+            None => {
+                return Err(CoreError::Proto(
+                    "peer closed connection before sending Hello".into(),
+                ))
+            }
         };
 
         // 校验（按顺序）。
         if let Some(cert) = &their_hello.cert {
             if peer_device != cert.device {
                 return Err(CoreError::Rejected(
-                    "Hello 设备证书与 TLS 对端不一致".into(),
+                    "Hello device certificate does not match TLS peer".into(),
                 ));
             }
             cert.verify()
                 .map_err(|e| CoreError::Rejected(e.to_string()))?;
         }
         if their_hello.proto != PROTO_VERSION {
-            return Err(CoreError::Rejected("协议版本不符".into()));
+            return Err(CoreError::Rejected("protocol version mismatch".into()));
         }
         let their_device = their_hello
             .cert
@@ -243,20 +247,24 @@ impl Connection {
             .map(|c| c.device)
             .unwrap_or(peer_device);
         if their_device == self_device {
-            return Err(CoreError::Rejected("对端即自己".into()));
+            return Err(CoreError::Rejected("peer is self".into()));
         }
         // 校验通过后，等待对端确认（对端若拒绝会发 Error 帧）。
         let confirm = tokio::time::timeout(Duration::from_secs(5), framed_read.next())
             .await
-            .map_err(|_| CoreError::Proto("等待对端确认超时".into()))?;
+            .map_err(|_| CoreError::Proto("timed out waiting for peer acknowledgement".into()))?;
         match confirm {
             Some(Ok(Frame::Error { code, message })) => {
                 return Err(CoreError::Rejected(format!(
-                    "对端拒绝连接: code={code} message={message}"
+                    "peer refused connection: code={code} message={message}"
                 )));
             }
             Some(Err(e)) => return Err(CoreError::Io(std::io::Error::other(e.to_string()))),
-            None => return Err(CoreError::Proto("对端在确认前关闭连接".into())),
+            None => {
+                return Err(CoreError::Proto(
+                    "peer closed connection before acknowledging".into(),
+                ))
+            }
             Some(Ok(_)) => {} // 对端接受，继续
         }
 
@@ -313,7 +321,7 @@ impl Connection {
         let mut tls_exporter = [0u8; 32];
         session
             .export_keying_material(&mut tls_exporter, PAIR_TLS_EXPORTER_LABEL, None)
-            .map_err(|e| CoreError::Tls(format!("导出密钥材料失败: {e}")))?;
+            .map_err(|e| CoreError::Tls(format!("failed to export keying material: {e}")))?;
         let mut tls_stream = tokio_rustls::TlsStream::from(tls_stream);
 
         // 读取拨号方的通道字节并分流。
@@ -352,10 +360,12 @@ impl Connection {
                         Ok(Accepted::Data(peer_info))
                     }
                     // 未设置处理器：直接关闭。
-                    None => Err(CoreError::Rejected("数据通道未开启".into())),
+                    None => Err(CoreError::Rejected("data channel not enabled".into())),
                 }
             }
-            other => Err(CoreError::Rejected(format!("未知通道字节 {other:#x}"))),
+            other => Err(CoreError::Rejected(format!(
+                "unknown channel byte {other:#x}"
+            ))),
         }
     }
 }
@@ -405,30 +415,34 @@ async fn accept_control(
         Some(Ok(Frame::Hello(h))) => h,
         Some(Ok(Frame::Error { code, message })) => {
             return Err(CoreError::Rejected(format!(
-                "对端拒绝连接: code={code} message={message}"
+                "peer refused connection: code={code} message={message}"
             )));
         }
         Some(Ok(other)) => {
             return Err(CoreError::Proto(format!(
-                "期望 Hello 帧，收到类型 {}",
+                "expected Hello frame, got type {}",
                 other.type_id()
             )));
         }
         Some(Err(e)) => return Err(CoreError::Io(std::io::Error::other(e.to_string()))),
-        None => return Err(CoreError::Proto("对端在发送 Hello 前关闭连接".into())),
+        None => {
+            return Err(CoreError::Proto(
+                "peer closed connection before sending Hello".into(),
+            ))
+        }
     };
 
     if let Some(cert) = &their_hello.cert {
         if peer_device != cert.device {
             return Err(CoreError::Rejected(
-                "Hello 设备证书与 TLS 对端不一致".into(),
+                "Hello device certificate does not match TLS peer".into(),
             ));
         }
         cert.verify()
             .map_err(|e| CoreError::Rejected(e.to_string()))?;
     }
     if their_hello.proto != PROTO_VERSION {
-        return Err(CoreError::Rejected("协议版本不符".into()));
+        return Err(CoreError::Rejected("protocol version mismatch".into()));
     }
     let their_device = their_hello
         .cert
@@ -436,7 +450,7 @@ async fn accept_control(
         .map(|c| c.device)
         .unwrap_or(peer_device);
     if their_device == self_device {
-        return Err(CoreError::Rejected("对端即自己".into()));
+        return Err(CoreError::Rejected("peer is self".into()));
     }
     let peer_info = PeerInfo {
         device: peer_device,
@@ -454,11 +468,11 @@ async fn accept_control(
         let _ = framed_write
             .send(Frame::Error {
                 code: 99,
-                message: "accept_filter 拒绝".into(),
+                message: "accept_filter rejected".into(),
             })
             .await;
         let _ = framed_write.flush().await;
-        return Err(CoreError::Rejected("accept_filter 拒绝".into()));
+        return Err(CoreError::Rejected("accept_filter rejected".into()));
     }
 
     // 向出站方发送确认帧（Ping），出站方收到非 Error 帧即视为接受。
@@ -551,7 +565,7 @@ where
                                 let _ = write_tx_for_pong
                                     .send(Frame::Error {
                                         code: 403,
-                                        message: "对端未初始化，仅允许配对帧".into(),
+                                        message: "peer not initialized, only pairing frames allowed".into(),
                                     })
                                     .await;
                                 continue;
@@ -702,11 +716,13 @@ async fn accept_data(
         .await
         .map_err(|e| CoreError::Tls(e.to_string()))?;
     let DataFrame::DataHello { cert } = frame else {
-        return Err(CoreError::Proto("数据连接首帧必须是 DataHello".into()));
+        return Err(CoreError::Proto(
+            "first frame of a data connection must be DataHello".into(),
+        ));
     };
     if peer_device != cert.device {
         return Err(CoreError::Rejected(
-            "DataHello 证书与 TLS 对端不一致".into(),
+            "DataHello certificate does not match TLS peer".into(),
         ));
     }
     cert.verify()
@@ -723,7 +739,9 @@ async fn accept_data(
         tls_exporter,
     };
     if !accept_filter(&peer_info) {
-        return Err(CoreError::Rejected("accept_filter 拒绝数据连接".into()));
+        return Err(CoreError::Rejected(
+            "accept_filter rejected data connection".into(),
+        ));
     }
     Ok(peer_info)
 }

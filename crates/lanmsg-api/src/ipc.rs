@@ -26,13 +26,13 @@ use lanmsg_proto::consts::MAX_FRAME_LEN;
 #[derive(Debug, thiserror::Error)]
 pub enum IpcError {
     /// 帧长度超过上限。
-    #[error("帧长度 {0} 超过上限 {MAX_FRAME_LEN}")]
+    #[error("frame length {0} exceeds limit {MAX_FRAME_LEN}")]
     TooLarge(usize),
     /// CBOR 编解码失败。
-    #[error("CBOR 错误: {0}")]
+    #[error("CBOR error: {0}")]
     Cbor(String),
     /// IO 错误。
-    #[error("IO 错误: {0}")]
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
 
@@ -133,7 +133,10 @@ impl IpcListener {
                 match interprocess::local_socket::Stream::connect(name) {
                     // 已有实例存活。
                     Ok(_) => {
-                        return Err(io::Error::new(io::ErrorKind::AddrInUse, "端点已被占用"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::AddrInUse,
+                            "endpoint already in use",
+                        ));
                     }
                     // 残留文件：删除后重新绑定。
                     Err(_) => {
@@ -226,7 +229,7 @@ impl IpcClient {
                 p.map.drain().collect()
             };
             for (_id, tx) in drained {
-                let _ = tx.send(io_error_response("IPC 连接已断开"));
+                let _ = tx.send(io_error_response("IPC connection closed"));
             }
         });
 
@@ -247,7 +250,7 @@ impl IpcClient {
             if p.closed {
                 return Err(ApiError {
                     code: ErrorCode::Io,
-                    message: "IPC 连接已断开".into(),
+                    message: "IPC connection closed".into(),
                 });
             }
             p.map.insert(id, tx);
@@ -267,7 +270,7 @@ impl IpcClient {
             Ok(resp) => resp.result,
             Err(_) => Err(ApiError {
                 code: ErrorCode::Io,
-                message: "IPC 连接已断开".into(),
+                message: "IPC connection closed".into(),
             }),
         }
     }

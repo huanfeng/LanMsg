@@ -103,7 +103,7 @@ impl BlobServer {
                             &mut stream,
                             &DataFrame::Error {
                                 code: 416,
-                                message: "请求范围越界".into(),
+                                message: "requested range out of bounds".into(),
                             },
                         )
                         .await?;

@@ -106,7 +106,7 @@ pub struct ParsedPairUri {
 pub fn parse_pair_uri(uri: &str) -> Result<ParsedPairUri, CoreError> {
     let query = uri
         .strip_prefix(URI_PREFIX)
-        .ok_or_else(|| CoreError::InvalidArgument("非法配对 URI".into()))?;
+        .ok_or_else(|| CoreError::InvalidArgument("invalid pairing URI".into()))?;
     let mut d = None;
     let mut a = None;
     let mut p = None;
@@ -114,7 +114,7 @@ pub fn parse_pair_uri(uri: &str) -> Result<ParsedPairUri, CoreError> {
     for item in query.split('&') {
         let (k, v) = item
             .split_once('=')
-            .ok_or_else(|| CoreError::InvalidArgument("非法配对 URI".into()))?;
+            .ok_or_else(|| CoreError::InvalidArgument("invalid pairing URI".into()))?;
         match k {
             "d" => d = Some(v),
             "a" => a = Some(v),
@@ -123,32 +123,40 @@ pub fn parse_pair_uri(uri: &str) -> Result<ParsedPairUri, CoreError> {
             _ => {}
         }
     }
-    let d = d.ok_or_else(|| CoreError::InvalidArgument("配对 URI 缺少 d 参数".into()))?;
-    let a = a.ok_or_else(|| CoreError::InvalidArgument("配对 URI 缺少 a 参数".into()))?;
-    let p = p.ok_or_else(|| CoreError::InvalidArgument("配对 URI 缺少 p 参数".into()))?;
-    let s = s.ok_or_else(|| CoreError::InvalidArgument("配对 URI 缺少 s 参数".into()))?;
+    let d =
+        d.ok_or_else(|| CoreError::InvalidArgument("pairing URI is missing parameter d".into()))?;
+    let a =
+        a.ok_or_else(|| CoreError::InvalidArgument("pairing URI is missing parameter a".into()))?;
+    let p =
+        p.ok_or_else(|| CoreError::InvalidArgument("pairing URI is missing parameter p".into()))?;
+    let s =
+        s.ok_or_else(|| CoreError::InvalidArgument("pairing URI is missing parameter s".into()))?;
 
     let device = DeviceId::from_hex(d)
-        .map_err(|_| CoreError::InvalidArgument("配对 URI 设备 ID 非法".into()))?;
+        .map_err(|_| CoreError::InvalidArgument("pairing URI has invalid device ID".into()))?;
     let mut addrs = Vec::new();
     for part in a.split(',') {
-        let addr: SocketAddr = part
-            .parse()
-            .map_err(|_| CoreError::InvalidArgument(format!("配对 URI 地址非法: {part}")))?;
+        let addr: SocketAddr = part.parse().map_err(|_| {
+            CoreError::InvalidArgument(format!("pairing URI has invalid address: {part}"))
+        })?;
         addrs.push(addr);
     }
     if addrs.is_empty() {
-        return Err(CoreError::InvalidArgument("配对 URI 无候选地址".into()));
+        return Err(CoreError::InvalidArgument(
+            "pairing URI has no candidate address".into(),
+        ));
     }
     if p.is_empty() || p.len() > 128 {
-        return Err(CoreError::InvalidArgument("配对 URI 会话 ID 非法".into()));
+        return Err(CoreError::InvalidArgument(
+            "pairing URI has invalid session ID".into(),
+        ));
     }
     let secret_bytes = BASE32_NOPAD
         .decode(s.as_bytes())
-        .map_err(|_| CoreError::InvalidArgument("配对 URI 口令非法".into()))?;
+        .map_err(|_| CoreError::InvalidArgument("pairing URI has invalid secret".into()))?;
     let secret: [u8; 16] = secret_bytes
         .try_into()
-        .map_err(|_| CoreError::InvalidArgument("配对 URI 口令长度非法".into()))?;
+        .map_err(|_| CoreError::InvalidArgument("pairing URI has invalid secret length".into()))?;
     Ok(ParsedPairUri {
         device,
         addrs,
@@ -182,7 +190,8 @@ fn mac_matches(
 
 /// 构造按 pair_mac 定义填充过的 HMAC 实例。
 fn mac_for(secret: &[u8; 16], role: &[u8], exporter: &[u8; 32], device: &DeviceId) -> HmacSha256 {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(secret).expect("HMAC 接受任意长度密钥");
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(secret).expect("HMAC accepts keys of any length");
     mac.update(role);
     mac.update(exporter);
     mac.update(&device.0);
@@ -430,7 +439,9 @@ impl Pairing {
             .as_deref()
             != Some("1")
         {
-            return Err(CoreError::InvalidArgument("请先以加入模式初始化".into()));
+            return Err(CoreError::InvalidArgument(
+                "initialize in join mode first".into(),
+            ));
         }
         let (addrs, session, secret, method, target_device) = match target {
             PairTarget::QrUri { uri } => {
@@ -439,8 +450,9 @@ impl Pairing {
                 (p.addrs, p.session, Some(p.secret), PairMethodWire::Qr, d)
             }
             PairTarget::Device { device } => {
-                let d = DeviceId::from_hex(&device)
-                    .map_err(|_| CoreError::InvalidArgument(format!("非法设备 ID: {device}")))?;
+                let d = DeviceId::from_hex(&device).map_err(|_| {
+                    CoreError::InvalidArgument(format!("invalid device ID: {device}"))
+                })?;
                 // 发现表优先；无组播（静态对端、VPN）时回退到已连接对端的拨号地址，
                 // connect 对已上线连接走快速路径直接复用。
                 let addr = match discovered.get(&d) {
@@ -453,7 +465,9 @@ impl Pairing {
                         .conns
                         .peer(&d)
                         .map(|p| p.dial_addr)
-                        .ok_or_else(|| CoreError::NotFound(format!("未发现该设备: {device}")))?,
+                        .ok_or_else(|| {
+                            CoreError::NotFound(format!("device not discovered: {device}"))
+                        })?,
                 };
                 (vec![addr], random_session(), None, PairMethodWire::Sas, d)
             }
@@ -557,10 +571,12 @@ impl Pairing {
                         s.a_device
                     }
                     _ => {
-                        return Err(CoreError::InvalidArgument("当前配对方式无数字确认".into()));
+                        return Err(CoreError::InvalidArgument(
+                            "current pairing method has no numeric confirmation".into(),
+                        ));
                     }
                 },
-                _ => return Err(CoreError::NotFound("配对会话不存在".into())),
+                _ => return Err(CoreError::NotFound("pairing session not found".into())),
             }
         };
         self.inner
@@ -610,7 +626,7 @@ impl Pairing {
             );
             return Ok(());
         }
-        Err(CoreError::NotFound("配对会话不存在".into()))
+        Err(CoreError::NotFound("pairing session not found".into()))
     }
 
     /// 配对帧入口（routing_task 分派）。

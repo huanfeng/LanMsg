@@ -36,7 +36,7 @@ impl ContactState {
             "rejected" => Ok(ContactState::Rejected),
             "blocked" => Ok(ContactState::Blocked),
             _ => Err(crate::store::StoreError::Codec(format!(
-                "未知联系人状态: {s}"
+                "unknown contact state: {s}"
             ))),
         }
     }
@@ -75,7 +75,7 @@ impl RequestKindRow {
             "message" => Ok(RequestKindRow::Message),
             "file" => Ok(RequestKindRow::File),
             _ => Err(crate::store::StoreError::Codec(format!(
-                "未知请求类型: {s}"
+                "unknown request kind: {s}"
             ))),
         }
     }
@@ -185,7 +185,10 @@ impl Store {
                 r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
             out.push(ContactRow {
                 user: UserId(user.try_into().map_err(|bytes: Vec<u8>| {
-                    crate::store::StoreError::Codec(format!("user_id 长度非法: {}", bytes.len()))
+                    crate::store::StoreError::Codec(format!(
+                        "user_id invalid length: {}",
+                        bytes.len()
+                    ))
                 })?),
                 state: ContactState::parse(&state)?,
                 auto_accept: auto_accept != 0,
@@ -259,7 +262,10 @@ impl Store {
             request_id: id.to_string(),
             kind: RequestKindRow::parse(&kind)?,
             from_user: UserId(from_user.try_into().map_err(|bytes: Vec<u8>| {
-                crate::store::StoreError::Codec(format!("from_user 长度非法: {}", bytes.len()))
+                crate::store::StoreError::Codec(format!(
+                    "from_user invalid length: {}",
+                    bytes.len()
+                ))
             })?),
             conv: conv
                 .map(|c| {
@@ -267,7 +273,7 @@ impl Store {
                         .map(lanmsg_proto::ids::ConvId)
                         .map_err(|bytes: Vec<u8>| {
                             crate::store::StoreError::Codec(format!(
-                                "conv_id 长度非法: {}",
+                                "conv_id invalid length: {}",
                                 bytes.len()
                             ))
                         })
@@ -317,7 +323,10 @@ impl Store {
                 request_id,
                 kind: RequestKindRow::parse(&kind)?,
                 from_user: UserId(from_user.try_into().map_err(|bytes: Vec<u8>| {
-                    crate::store::StoreError::Codec(format!("from_user 长度非法: {}", bytes.len()))
+                    crate::store::StoreError::Codec(format!(
+                        "from_user invalid length: {}",
+                        bytes.len()
+                    ))
                 })?),
                 conv: conv
                     .map(|c| {
@@ -325,7 +334,7 @@ impl Store {
                             .map(lanmsg_proto::ids::ConvId)
                             .map_err(|bytes: Vec<u8>| {
                                 crate::store::StoreError::Codec(format!(
-                                    "conv_id 长度非法: {}",
+                                    "conv_id invalid length: {}",
                                     bytes.len()
                                 ))
                             })

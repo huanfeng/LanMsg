@@ -25,7 +25,7 @@ fn main() -> ExitCode {
 fn run(input: &str, mime: &str, output: &str) -> Result<String, String> {
     let (jpeg, info) =
         lanmsg_media::make_thumbnail(Path::new(input), mime).map_err(|e| e.to_string())?;
-    std::fs::write(output, jpeg).map_err(|e| format!("写入输出失败: {e}"))?;
+    std::fs::write(output, jpeg).map_err(|e| format!("failed to write output: {e}"))?;
     Ok(serde_json::json!({
         "width": info.width,
         "height": info.height,

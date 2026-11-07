@@ -31,7 +31,7 @@ pub(crate) async fn query_files(
         .as_deref()
         .map(|s| {
             DeviceId::from_hex(s)
-                .map_err(|_| CoreError::InvalidArgument(format!("非法设备 ID: {s}")))
+                .map_err(|_| CoreError::InvalidArgument(format!("invalid device ID: {s}")))
         })
         .transpose()?;
     let limit = filter.limit.clamp(1, MAX_FILE_LIMIT);
@@ -49,7 +49,11 @@ pub(crate) async fn query_files(
     let self_user = svc.state.read().unwrap().self_user;
     tokio::task::spawn_blocking(move || scan_files(&store, &peers, self_user, base, state))
         .await
-        .map_err(|e| CoreError::Io(std::io::Error::other(format!("文件查询任务失败: {e}"))))?
+        .map_err(|e| {
+            CoreError::Io(std::io::Error::other(format!(
+                "file query task failed: {e}"
+            )))
+        })?
 }
 
 /// 阻塞扫描：无状态筛选时一轮；有状态筛选时持续翻页直到凑满 limit 或数据耗尽。
@@ -140,7 +144,7 @@ pub(crate) async fn search_messages(
         Ok(out)
     })
     .await
-    .map_err(|e| CoreError::Io(std::io::Error::other(format!("搜索任务失败: {e}"))))?
+    .map_err(|e| CoreError::Io(std::io::Error::other(format!("search task failed: {e}"))))?
 }
 
 /// 把已有文件转发到会话：复用库中已有的 BlobMeta（名字、大小、mime、媒体信息、
@@ -151,15 +155,18 @@ pub(crate) async fn forward_files(
     hashes: &[BlobHash],
 ) -> Result<lanmsg_proto::ids::MsgId, CoreError> {
     if hashes.is_empty() {
-        return Err(CoreError::InvalidArgument("没有要转发的文件".into()));
+        return Err(CoreError::InvalidArgument("no files to forward".into()));
     }
     if svc.store.get_conversation(conv)?.is_none() {
-        return Err(CoreError::NotFound(format!("会话 {}", conv.to_hex())));
+        return Err(CoreError::NotFound(format!(
+            "conversation {}",
+            conv.to_hex()
+        )));
     }
     let mut items: Vec<BlobMeta> = Vec::with_capacity(hashes.len());
     for h in hashes {
         let Some(row) = svc.store.visible_blobs_by_hash(h)?.into_iter().next() else {
-            return Err(CoreError::NotFound(format!("文件 {}", h.to_hex())));
+            return Err(CoreError::NotFound(format!("file {}", h.to_hex())));
         };
         items.push(row.meta);
     }
@@ -168,7 +175,8 @@ pub(crate) async fn forward_files(
 }
 
 fn parse_conv(s: &str) -> Result<ConvId, CoreError> {
-    ConvId::from_hex(s).map_err(|_| CoreError::InvalidArgument(format!("非法会话 ID: {s}")))
+    ConvId::from_hex(s)
+        .map_err(|_| CoreError::InvalidArgument(format!("invalid conversation ID: {s}")))
 }
 
 /// 作者显示名：users 表显示名优先，无则设备名（与 message_view 一致）。

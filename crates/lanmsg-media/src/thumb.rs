@@ -59,8 +59,9 @@ fn read_head(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
 
 /// 缩放（不放大）并编码，质量 80 起、超限每次降 10，最低 40。
 fn encode_thumb(img: Rgba) -> Result<Vec<u8>, MediaError> {
-    let src = RgbaImage::from_raw(img.width, img.height, img.pixels)
-        .ok_or_else(|| MediaError::Decode("像素缓冲长度与尺寸不符".into()))?;
+    let src = RgbaImage::from_raw(img.width, img.height, img.pixels).ok_or_else(|| {
+        MediaError::Decode("pixel buffer length does not match dimensions".into())
+    })?;
     let long = src.width().max(src.height());
     let small = if long > THUMB_EDGE_PX {
         let scale = f64::from(THUMB_EDGE_PX) / f64::from(long);

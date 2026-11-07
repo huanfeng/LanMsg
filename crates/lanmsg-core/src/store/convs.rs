@@ -34,7 +34,7 @@ impl ConvKindRow {
             "local_send" => Ok(ConvKindRow::LocalSend),
             "station" => Ok(ConvKindRow::Station),
             _ => Err(crate::store::StoreError::Codec(format!(
-                "未知会话类型: {s}"
+                "unknown conversation kind: {s}"
             ))),
         }
     }
@@ -103,7 +103,10 @@ impl Store {
         let kind = ConvKindRow::parse(&kind)?;
         let peer_user = match peer_user {
             Some(bytes) => Some(UserId(bytes.try_into().map_err(|bytes: Vec<u8>| {
-                crate::store::StoreError::Codec(format!("peer_user 长度非法: {}", bytes.len()))
+                crate::store::StoreError::Codec(format!(
+                    "peer_user invalid length: {}",
+                    bytes.len()
+                ))
             })?)),
             None => None,
         };
@@ -130,7 +133,7 @@ impl Store {
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
                     rusqlite::types::Type::Blob,
-                    format!("conv_id 长度非法: {}", bytes.len()).into(),
+                    format!("conv_id invalid length: {}", bytes.len()).into(),
                 )
             })?);
             let kind: String = row.get(1)?;
@@ -147,7 +150,7 @@ impl Store {
                     rusqlite::Error::FromSqlConversionFailure(
                         2,
                         rusqlite::types::Type::Blob,
-                        format!("peer_user 长度非法: {}", bytes.len()).into(),
+                        format!("peer_user invalid length: {}", bytes.len()).into(),
                     )
                 })?)),
                 None => None,
@@ -270,7 +273,7 @@ impl Gate {
             "pending" => Ok(Gate::Pending),
             "rejected" => Ok(Gate::Rejected),
             _ => Err(crate::store::StoreError::Codec(format!(
-                "未知准入状态: {s}"
+                "unknown admission state: {s}"
             ))),
         }
     }
