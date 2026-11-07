@@ -36,6 +36,14 @@ class FileSourceTextTest {
         assertEquals(R.string.file_source_me, fileSourceFormat(item(BlobState.SOURCE_OFFLINE, true, null)).res)
     }
 
+    @Test fun chat_card_status_has_no_from_part() {
+        assertEquals(R.string.files_state_downloaded, fileStatusFormat(item(BlobState.LOCAL, false, null))?.res)
+        val stored = fileStatusFormat(item(BlobState.REMOTE, false, "张三的笔记本"))
+        assertEquals(R.string.file_status_stored, stored?.res)
+        assertEquals(listOf<Any>("张三的笔记本"), stored?.args)
+        assertEquals(null, fileStatusFormat(item(BlobState.SOURCE_OFFLINE, false, null)))
+    }
+
     @Test fun own_remote_file_reads_from_me_stored() {
         val f = fileSourceFormat(item(BlobState.REMOTE, true, "手机"))
         assertEquals(R.string.file_source_me_stored, f.res)

@@ -20,6 +20,25 @@ fun fileSourceFormat(item: FileItemView): EventText {
     }
 }
 
+/**
+ * 聊天里文件卡片的状态行：只说“已下载 / 存于 X”。“来自谁”聊天上下文已经表明
+ * （多设备或自设备会话里气泡上方另有来源设备名），卡片内不重复。
+ */
+fun fileStatusFormat(item: FileItemView): EventText? {
+    val holder = item.holderName
+    return when {
+        item.state == BlobState.LOCAL -> EventText(R.string.files_state_downloaded, emptyList())
+        holder != null -> EventText(R.string.file_status_stored, listOf(holder))
+        else -> null
+    }
+}
+
+@Composable
+fun fileStatusText(item: FileItemView): String? {
+    val f = fileStatusFormat(item) ?: return null
+    return stringResource(f.res, *f.args.toTypedArray())
+}
+
 @Composable
 fun fileSourceText(item: FileItemView): String {
     val f = fileSourceFormat(item)

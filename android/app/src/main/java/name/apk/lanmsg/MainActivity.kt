@@ -129,7 +129,12 @@ class MainActivity : ComponentActivity() {
     private fun handleShare(intent: Intent) {
         val uris = ShareIntentParser.parse(intent)
         val text = ShareText.extract(intent)
-        if (uris.isNotEmpty() || text != null) incomingShare = ShareData(uris, text)
+        if (uris.isNotEmpty() || text != null) {
+            incomingShare = ShareData(uris, text)
+        } else if (ShareIntentParser.isShare(intent)) {
+            // 分享意图但内容全被过滤（如 file://）或为空：提示而不是静默无响应
+            Toast.makeText(this, R.string.share_unreadable, Toast.LENGTH_LONG).show()
+        }
     }
 
     companion object {

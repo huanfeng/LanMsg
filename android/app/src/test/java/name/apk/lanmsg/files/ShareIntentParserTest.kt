@@ -31,6 +31,16 @@ class ShareIntentParserTest {
         assertTrue(ShareIntentParser.parse(Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, evil)).isEmpty())
     }
 
+    @Test fun filtered_out_share_is_still_recognized_as_share() {
+        val evil = Uri.parse("file:///sdcard/Download/a.txt")
+        val i = Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, evil)
+        // 内容全被过滤，但它是分享意图：界面据此提示而不是静默无响应
+        assertTrue(ShareIntentParser.parse(i).isEmpty())
+        assertNull(ShareText.extract(i))
+        assertTrue(ShareIntentParser.isShare(i))
+        assertTrue(!ShareIntentParser.isShare(Intent(Intent.ACTION_VIEW)))
+    }
+
     @Test fun send_text_only() {
         val i = Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_TEXT, "hi")
         assertTrue(ShareIntentParser.parse(i).isEmpty())

@@ -7,7 +7,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use lanmsg_api::types::{BlobState, ConversationSummary, FileFilter, FileKindFilter, FileView};
+use lanmsg_api::types::{
+    BlobState, ConvKind, ConversationSummary, FileFilter, FileKindFilter, FileView,
+};
 use windui::event::MenuItem;
 use windui::prelude::*;
 
@@ -250,8 +252,9 @@ pub fn meta_parts(f: &FileView, time_text: String) -> Vec<String> {
     }
     parts.push(time_text);
     parts.push(source_from(item));
+    // 私聊里对方发来的文件：会话就是发送者本人，不重复会话名（按类型判断，不比较标题字符串）。
     let title = file_conv_title(f);
-    let is_sender_dm = !item.source_is_me && title == item.source_name;
+    let is_sender_dm = f.conv_kind == ConvKind::Dm && !item.source_is_me;
     if !title.is_empty() && !is_sender_dm {
         parts.push(strings::files_in_conv(&title));
     }
@@ -780,7 +783,7 @@ pub fn files_page(ui: &UiState) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lanmsg_api::types::{ConvKind, FileItemView};
+    use lanmsg_api::types::FileItemView;
 
     fn conv(id: &str, title: &str) -> ConversationSummary {
         ConversationSummary {
@@ -865,11 +868,13 @@ mod tests {
         let p = meta_parts(&f, "昨天".into());
         assert_eq!(p, vec!["1 B", "昨天", "来自 张三"]);
         assert_eq!(status_parts(&f), "存于 我的台式机");
-        // 会话不是发送者本人时补一段会话名
+        // 非私聊会话（如网页访客）补一段会话名
+        f.conv_kind = ConvKind::Guest;
         f.conv_title = "项目群".into();
         let p = meta_parts(&f, "昨天".into());
         assert_eq!(p.last().map(String::as_str), Some("会话 项目群"));
         // 自己发出的文件：来源显示“来自我”，私聊会话名仍补上
+        f.conv_kind = ConvKind::Dm;
         f.item.source_is_me = true;
         f.conv_title = "张三".into();
         let p = meta_parts(&f, "昨天".into());
@@ -880,6 +885,17 @@ mod tests {
         f.item.name = "a.mp4".into();
         f.item.duration_ms = Some(7_000);
         assert_eq!(meta_parts(&f, "昨天".into())[1], "0:07");
+    }
+
+    /// 对方改名后会话摘要还没刷新：私聊标题与作者名不同，也不重复会话名。
+    #[test]
+    fn dm_from_peer_skips_conv_label_even_if_title_differs() {
+        let mut f = fv("m", "h");
+        f.item.source_name = "新名字".into();
+        f.conv_title = "旧名字".into();
+        f.conv_kind = ConvKind::Dm;
+        let p = meta_parts(&f, "昨天".into());
+        assert_eq!(p, vec!["1 B", "昨天", "来自 新名字"]);
     }
 
     #[test]

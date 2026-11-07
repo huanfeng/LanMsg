@@ -194,6 +194,7 @@
 | files_archive | 压缩包 |
 | files_other | 其他 |
 | files_state_downloaded | 已下载 |
+| file_status_stored | 存于 %1$s |
 | file_source_me | 来自我 |
 | file_source_me_downloaded | 来自我 · 已下载 |
 | file_source_me_stored | 来自我 · 存于 %1$s |
@@ -304,6 +305,7 @@
 | share_pick_title | 发送到 |
 | share_empty | 没有可用的会话 |
 | share_need_setup | 请先完成初始化，再分享文件 |
+| share_unreadable | 无法读取分享的内容 |
 | share_import_failed | 无法读取要发送的文件 |
 | open_file_failed | 无法打开此文件 |
 | path_vpn | VPN |

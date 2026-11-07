@@ -185,6 +185,13 @@ pub fn preparing_view(
         .as_ref()
         .map(|r| r.user.to_hex())
         .unwrap_or_default();
+    // 文件项的来源名：作者显示名（users 表优先），缺失时退回设备名（至少是设备短 ID）。
+    let author_display = author_row
+        .as_ref()
+        .and_then(|r| store.get_user(&r.user).ok().flatten())
+        .map(|u| u.display_name)
+        .unwrap_or_else(|| author_device_name.clone());
+    let source_name = name_or(&author_display, row.author.short());
 
     let (folder_name, paths): (Option<String>, &[PathBuf]) = match row.kind {
         PreparingKind::Files => (None, &row.paths),
@@ -217,8 +224,8 @@ pub fn preparing_view(
                 thumb_path: None,
                 local_path: None,
                 state: BlobState::Preparing,
-                source_name: String::new(),
-                source_is_me: false,
+                source_name: source_name.clone(),
+                source_is_me: is_mine,
                 holder_name: None,
             }
         })
@@ -1039,6 +1046,44 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// preparing_view 产出的每个文件项都有非空的来源名；本人发出时 source_is_me 为真。
+    #[test]
+    fn preparing_items_always_have_source_name() {
+        use crate::store::PreparingRow;
+        let s = Store::open_in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("lanmsg-prep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f1 = dir.join("a.txt");
+        std::fs::write(&f1, b"x").unwrap();
+        let row = PreparingRow {
+            conv: CONV,
+            author: AUTHOR,
+            seq: 1,
+            conv_seq: 1,
+            hlc: Hlc {
+                millis: 1,
+                counter: 0,
+            },
+            kind: PreparingKind::Files,
+            paths: vec![f1, dir.join("missing.bin")],
+            created_at: 0,
+        };
+        // 作者设备不在 devices 表：来源名退回设备短 ID，非本人。
+        let v = preparing_view(&s, &row, None, MessageState::Sending);
+        match v.body {
+            MessageBodyView::Files { items } => {
+                assert_eq!(items.len(), 2);
+                for it in items {
+                    assert_eq!(it.source_name, AUTHOR.short());
+                    assert!(!it.source_is_me);
+                    assert_eq!(it.holder_name, None);
+                }
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -5,6 +5,10 @@ import android.net.Uri
 import androidx.core.content.IntentCompat
 
 object ShareIntentParser {
+    /** 是否是分享类意图（不论内容能否使用）。 */
+    fun isShare(intent: Intent): Boolean =
+        intent.action == Intent.ACTION_SEND || intent.action == Intent.ACTION_SEND_MULTIPLE
+
     /** ACTION_SEND 取单个 EXTRA_STREAM，SEND_MULTIPLE 取列表；其他返回空。 */
     fun parse(intent: Intent): List<Uri> = parseAll(intent).filter { it.scheme == "content" }
 

@@ -34,7 +34,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import name.apk.lanmsg.R
-import name.apk.lanmsg.ui.common.fileSourceText
+import name.apk.lanmsg.ui.common.fileStatusText
 import name.apk.lanmsg.ui.common.Format
 import uniffi.lanmsg_api.BlobState
 import uniffi.lanmsg_api.FileItemView
@@ -108,7 +108,7 @@ fun FileCard(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(Format.size(item.size.toLong()), color = muted, fontSize = 12.sp)
-            Text(fileSourceText(item), color = muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            fileStatusText(item)?.let { Text(it, color = muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
         }
         Spacer(Modifier.width(10.dp))
         FileStateMark(item, progress, muted, onCancel)
