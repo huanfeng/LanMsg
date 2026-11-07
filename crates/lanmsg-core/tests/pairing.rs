@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use lanmsg_api::types::{
     ConvKind, ErrorCode, Event, InitMode, MessageBodyView, PairFailReason, PairMethod,
-    PairStateDto, PairTarget, Request, Response, StatusDto,
+    PairStateDto, PairTarget, Request, Response, StatusDto, SystemEventView,
 };
 use lanmsg_core::discovery::MemoryBus;
 
@@ -195,7 +195,9 @@ async fn qr_pairing_shares_identity() {
     assert!(
         self_devices_messages(&a).await.iter().any(|m| matches!(
             &m.body,
-            MessageBodyView::System { text } if text.starts_with("已添加设备：")
+            MessageBodyView::System {
+                event: SystemEventView::DeviceAdded { name }
+            } if !name.is_empty()
         )),
         "DeviceAdded 应渲染为 System 文本"
     );

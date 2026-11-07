@@ -44,6 +44,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.systemEventText
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.ui.common.EmptyState
 import name.apk.lanmsg.ui.common.formatTime
@@ -127,7 +128,7 @@ private fun ResultRow(row: SearchViewModel.Row, onClick: () -> Unit) {
         is MessageBodyView.Text -> b.text
         is MessageBodyView.Files -> b.items.joinToString(", ") { it.name }
         is MessageBodyView.Folder -> b.name
-        is MessageBodyView.System -> b.text
+        is MessageBodyView.System -> systemEventText(b.event)
         else -> ""
     }
     val title = if (row.selfDevices) stringResource(R.string.conv_self_title) else row.convTitle

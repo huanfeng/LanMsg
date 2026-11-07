@@ -898,7 +898,8 @@ impl TransferEngine {
                         .unwrap_or_default()
                 })
             }
-            ConvKindRow::SelfDevices => "我的设备".into(),
+            // 仅用作落地目录名，保持语言中立。
+            ConvKindRow::SelfDevices => "My devices".into(),
             _ => row.title.clone().unwrap_or_default(),
         }
     }

@@ -116,8 +116,8 @@ uid() { c "$1" self | awk '/^user_id:/{print $2}'; }
 did() { c "$1" self | awk '/^device_id:/{print $2}'; }
 
 # 会话中的文本（每行一条，已去掉 [时间] 作者: 前缀），按 log 顺序；
-# 系统消息（CLI 加 [系统] 前缀，如“已添加联系人：X”）是各设备本地生成的，不属于用户文字，滤掉。
-texts() { c "$1" log "$2" --limit 500 | grep -v '<不支持的消息类型>' | sed -E 's/^\[[0-9:]+\] [^:]*: //' | awk '!/^\[系统\] /'; }
+# 系统消息（CLI 加 [system] 前缀，如 "contact added: X"）是各设备本地生成的，不属于用户文字，滤掉。
+texts() { c "$1" log "$2" --limit 500 | grep -v '<不支持的消息类型>' | sed -E 's/^\[[0-9:]+\] [^:]*: //' | awk '!/^\[system\] /'; }
 has_text() { texts "$1" "$2" | grep -qxF -- "$3"; }
 
 # 对端在线：peer_seen <节点> <显示名>
@@ -166,7 +166,7 @@ pair_qr_join() {
 }
 
 # 取「我的设备」会话 ID。
-selfconv() { c "$1" convs | awk '/我的设备/{print $1; exit}'; }
+selfconv() { c "$1" convs | awk '/My devices/{print $1; exit}'; }
 
 # 设备数（devices 输出去掉表头后的行数）。
 ndevices() { c "$1" devices | awk 'NR>1 && NF' | wc -l | tr -d ' '; }

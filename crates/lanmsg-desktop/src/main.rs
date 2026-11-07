@@ -11,6 +11,7 @@ mod bridge;
 mod debounce;
 mod decoders;
 mod error_text;
+mod event_text;
 mod fixtures;
 mod model;
 mod strings;

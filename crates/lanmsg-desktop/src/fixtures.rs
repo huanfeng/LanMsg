@@ -341,7 +341,7 @@ fn demo_messages() -> Vec<MessageView> {
 
 /// “我的设备”会话里来自不同设备的几条消息。
 fn self_messages() -> Vec<MessageView> {
-    [
+    let mut v: Vec<MessageView> = [
         ("手机", false, "备忘已同步"),
         ("我的电脑", true, "发一份 PDF 到手机上看"),
         ("平板", false, "收到了，字有点小"),
@@ -350,14 +350,31 @@ fn self_messages() -> Vec<MessageView> {
     .enumerate()
     .map(|(i, (dev, mine, t))| {
         let mut m = text(i, *mine, t);
-        m.conv = "c-self".into();
-        m.id = format!("s{i}");
         m.author_device_name = (*dev).into();
         m.author_device = format!("dev-{dev}");
-        m.hlc_millis = NOW - (10 - i as i64) * MIN;
         m
     })
-    .collect()
+    .collect();
+    // 系统消息：core 只给结构，界面按本地化文案渲染。
+    let events = [
+        SystemEventView::DeviceAdded {
+            name: "平板".into(),
+        },
+        SystemEventView::Recalled {
+            author_name: "小李".into(),
+            by_me: true,
+        },
+    ];
+    for event in events {
+        let i = v.len();
+        v.push(message(i, false, MessageBodyView::System { event }));
+    }
+    for (i, m) in v.iter_mut().enumerate() {
+        m.conv = "c-self".into();
+        m.id = format!("s{i}");
+        m.hlc_millis = NOW - (10 - i as i64) * MIN;
+    }
+    v
 }
 
 fn device(id: &str, name: &str, ty: &str, online: bool, is_self: bool) -> DeviceView {
@@ -548,7 +565,7 @@ pub fn demo_model(p: DemoPage) -> Model {
         conv(
             "c-self",
             ConvKind::SelfDevices,
-            "我的设备",
+            "",
             "手机：备忘已同步",
             45,
             0,

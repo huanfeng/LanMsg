@@ -12,6 +12,7 @@ use windui::event::MenuItem;
 use windui::prelude::*;
 
 use crate::debounce::Debouncer;
+use crate::event_text::conv_title;
 use crate::model::{effective_state, Model, Page};
 use crate::strings;
 use crate::style;
@@ -67,7 +68,7 @@ pub const STATES: [(Option<BlobState>, &str); 4] = [
 pub fn conv_options(convs: &[ConversationSummary]) -> Vec<(Option<String>, String)> {
     let mut rest: Vec<(Option<String>, String)> = convs
         .iter()
-        .map(|c| (Some(c.conv.clone()), c.title.clone()))
+        .map(|c| (Some(c.conv.clone()), conv_title(c)))
         .collect();
     rest.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     let mut out = vec![(None, strings::FILES_ALL_CONVS.to_string())];

@@ -7,6 +7,7 @@ import uniffi.lanmsg_api.ConversationSummary
 import uniffi.lanmsg_api.DeviceView
 import uniffi.lanmsg_api.FileItemView
 import uniffi.lanmsg_api.MessageBodyView
+import uniffi.lanmsg_api.SystemEventView
 import uniffi.lanmsg_api.MessageState
 import uniffi.lanmsg_api.MessageView
 import uniffi.lanmsg_api.PathClassDto
@@ -18,7 +19,7 @@ import uniffi.lanmsg_api.SelfInfo
 import uniffi.lanmsg_api.StatusDto
 
 object Fixtures {
-    fun conv(id: String = "c1", title: String = "我的设备", unread: UInt = 0u, last: Long? = 1000, kind: ConvKind = ConvKind.SELF_DEVICES, lastKind: LastMessageKind? = null, lastText: String? = null): ConversationSummary =
+    fun conv(id: String = "c1", title: String = "", unread: UInt = 0u, last: Long? = 1000, kind: ConvKind = ConvKind.SELF_DEVICES, lastKind: LastMessageKind? = null, lastText: String? = null): ConversationSummary =
         ConversationSummary(
             conv = id, kind = kind, title = title, lastText = lastText, lastKind = lastKind,
             lastHlcMillis = last, unread = unread, peerOnline = true,
@@ -32,8 +33,8 @@ object Fixtures {
     fun textMsg(id: String, conv: String = "c1", text: String = "你好", mine: Boolean = false, millis: Long = 1000): MessageView =
         message(id, conv, mine, millis, MessageBodyView.Text(text))
 
-    fun systemMsg(id: String, conv: String = "c1", text: String = "系统提示"): MessageView =
-        message(id, conv, false, 1000, MessageBodyView.System(text))
+    fun systemMsg(id: String, conv: String = "c1", event: SystemEventView = SystemEventView.MessagesDeleted(1u)): MessageView =
+        message(id, conv, false, 1000, MessageBodyView.System(event))
 
     fun fileMsg(id: String, hash: String, state: BlobState = BlobState.REMOTE): MessageView =
         message(

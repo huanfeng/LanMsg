@@ -4,6 +4,7 @@
 use lanmsg_api::types::{ConversationSummary, LastMessageKind, MessageBodyView, MessageView};
 use windui::prelude::*;
 
+use crate::event_text::conv_title;
 use crate::strings;
 use crate::style;
 use crate::tz;
@@ -193,7 +194,7 @@ fn conv_preview(c: &ConversationSummary) -> String {
 fn conv_row(c: &ConversationSummary, selected: bool, now: i64, tz_offset: i32) -> ConvRow {
     ConvRow {
         conv: c.conv.clone(),
-        title: c.title.clone(),
+        title: conv_title(c),
         // 预览压成单行，避免换行把行撑高
         preview: conv_preview(c).replace(['\n', '\r'], " "),
         time: c
@@ -399,7 +400,7 @@ pub fn chat_list(ui: &UiState) -> Element {
                     .convs
                     .iter()
                     .find(|c| c.conv == h.conv)
-                    .map(|c| c.title.clone())
+                    .map(conv_title)
                     .unwrap_or_else(|| strings::UNKNOWN_CONV.to_string()),
                 author: h.author_device_name.clone(),
                 snippet: snippet(&hit_text(h), &q, 20),

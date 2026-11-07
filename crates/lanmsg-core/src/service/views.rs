@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use lanmsg_api::types::{
     BlobState, ConvKind, ConversationSummary, FileItemView, LastMessageKind, MessageBodyView,
-    MessageState, MessageView,
+    MessageState, MessageView, SystemEventView,
 };
 use lanmsg_proto::ids::{DeviceId, MsgId, UserId};
 use lanmsg_proto::types::{BlobMeta, MsgBody, SystemEvent};
@@ -236,31 +236,46 @@ pub fn preparing_view(
     }
 }
 
-/// 系统事件的展示文本（当前由 core 生成，语言与撤回提示一致）。
-fn system_event_text(store: &Store, event: &SystemEvent) -> String {
-    let device_name = |d: &DeviceId| {
-        store
-            .get_device(d)
-            .ok()
-            .flatten()
-            .map(|r| r.name)
-            .unwrap_or_else(|| d.short())
-    };
+/// 名字为空时用兜底值（设备或用户短 ID），保证界面文案里的名字非空。
+fn name_or(name: &str, fallback: String) -> String {
+    if name.trim().is_empty() {
+        fallback
+    } else {
+        name.to_string()
+    }
+}
+
+/// 系统事件的结构化视图；界面按本地化资源拼文案。
+fn system_event_view(store: &Store, event: &SystemEvent) -> SystemEventView {
     match event {
-        SystemEvent::DeviceAdded { name, .. } => format!("已添加设备：{name}"),
-        SystemEvent::DeviceRemoved { device } => format!("已移除设备：{}", device_name(device)),
-        SystemEvent::ContactAdded { user } => {
-            let name = store
+        SystemEvent::DeviceAdded { device, name } => SystemEventView::DeviceAdded {
+            name: name_or(name, device.short()),
+        },
+        SystemEvent::DeviceRemoved { device } => SystemEventView::DeviceRemoved {
+            name: store
+                .get_device(device)
+                .ok()
+                .flatten()
+                .map(|r| name_or(&r.name, device.short()))
+                .unwrap_or_else(|| device.short()),
+        },
+        SystemEvent::ContactAdded { user } => SystemEventView::ContactAdded {
+            name: store
                 .get_user(user)
                 .ok()
                 .flatten()
-                .map(|u| u.display_name)
-                .unwrap_or_else(|| user.short());
-            format!("已添加联系人：{name}")
-        }
-        SystemEvent::ContactUpdated(rec) => format!("联系人已更新：{}", rec.display_name),
-        SystemEvent::ProfileUpdated { display_name } => format!("昵称已更新：{display_name}"),
-        SystemEvent::LocalDeleted { msgs } => format!("已删除 {} 条消息", msgs.len()),
+                .map(|u| name_or(&u.display_name, user.short()))
+                .unwrap_or_else(|| user.short()),
+        },
+        SystemEvent::ContactUpdated(rec) => SystemEventView::ContactUpdated {
+            name: name_or(&rec.display_name, rec.user.short()),
+        },
+        SystemEvent::ProfileUpdated { display_name } => SystemEventView::NicknameUpdated {
+            name: name_or(display_name, "?".into()),
+        },
+        SystemEvent::LocalDeleted { msgs } => SystemEventView::MessagesDeleted {
+            count: msgs.len() as u32,
+        },
     }
 }
 
@@ -269,7 +284,7 @@ fn system_event_text(store: &Store, event: &SystemEvent) -> String {
 /// - `author_device_name` 取 devices 表 name（无则 device short）。
 /// - `is_mine` = 作者用户为自己（通过 devices 表的 user 字段比较）。
 /// - `body`：Text → `Text`；Files/Folder 经 file_item_view（Task 13 完整
-///   公式）；System → `System{text}`；其余 → `Unsupported`。
+///   公式）；System → `System{event}`；其余 → `Unsupported`。
 /// - `state` 由 `MsgStateRow` 一一映射。
 pub fn message_view(
     store: &Store,
@@ -306,7 +321,10 @@ pub fn message_view(
     // Files/Folder 展开，System 生成文本，其他为 Unsupported。
     let body = match (&env.body, m.state) {
         (_, MsgStateRow::Recalled) => MessageBodyView::System {
-            text: format!("{} 撤回了一条消息", author_display_name),
+            event: SystemEventView::Recalled {
+                author_name: name_or(&author_display_name, author_device.short()),
+                by_me: is_mine,
+            },
         },
         (MsgBody::Text { text }, _) => MessageBodyView::Text { text: text.clone() },
         (MsgBody::Files { items }, _) => MessageBodyView::Files {
@@ -325,7 +343,7 @@ pub fn message_view(
                 .collect(),
         },
         (MsgBody::System { event }, _) => MessageBodyView::System {
-            text: system_event_text(store, event),
+            event: system_event_view(store, event),
         },
         _ => MessageBodyView::Unsupported,
     };
@@ -395,7 +413,7 @@ fn last_message_kind(m: &StoredMessage) -> LastMessageKind {
 /// 将会话行转换为会话摘要。
 ///
 /// - DM 标题 = 对端用户显示名（无则 user short）。
-/// - SelfDevices 标题 = `"我的设备"`。
+/// - SelfDevices 标题 = 空串（界面按 kind 本地化）。
 /// - `last_text`/`last_kind`/`last_hlc_millis` 取最新一条可见消息（隐藏的不计）。
 /// - `unread` = 他人发出、晚于已读水位、未隐藏未删除未召回的条数。
 pub fn conv_summary(
@@ -411,7 +429,8 @@ pub fn conv_summary(
             .and_then(|u| store.get_user(u).ok().flatten())
             .map(|u| u.display_name.clone())
             .unwrap_or_else(|| conv.peer_user.map(|u| u.short()).unwrap_or_default()),
-        crate::store::ConvKindRow::SelfDevices => "我的设备".into(),
+        // 自设备会话标题留空，各端按 kind 显示本地化的“我的设备”。
+        crate::store::ConvKindRow::SelfDevices => String::new(),
         _ => conv.title.clone().unwrap_or_default(),
     };
 
@@ -829,5 +848,130 @@ mod tests {
         let other = device_row(2);
         assert!(device_view(&me, &[], &me.device).online);
         assert!(!device_view(&other, &[], &me.device).online);
+    }
+
+    // ---- 系统事件 / 撤回 / 会话标题的结构化 ----
+
+    use lanmsg_proto::ids::UserId;
+    use lanmsg_proto::types::{ContactRecord, ContactStateWire};
+
+    fn device_event_view(s: &Store, ev: SystemEvent) -> SystemEventView {
+        system_event_view(s, &ev)
+    }
+
+    #[test]
+    fn system_event_view_per_variant() {
+        let s = Store::open_in_memory().unwrap();
+        let dev = DeviceId([9u8; 32]);
+        let user = UserId([8u8; 32]);
+        // 名字齐全：原样带出。
+        assert_eq!(
+            device_event_view(
+                &s,
+                SystemEvent::DeviceAdded {
+                    device: dev,
+                    name: "手机".into()
+                }
+            ),
+            SystemEventView::DeviceAdded {
+                name: "手机".into()
+            }
+        );
+        // 设备未知（已被删）：用设备短 ID 兜底，名字非空。
+        assert_eq!(
+            device_event_view(&s, SystemEvent::DeviceRemoved { device: dev }),
+            SystemEventView::DeviceRemoved { name: dev.short() }
+        );
+        // 用户未知：用户短 ID 兜底。
+        assert_eq!(
+            device_event_view(&s, SystemEvent::ContactAdded { user }),
+            SystemEventView::ContactAdded { name: user.short() }
+        );
+        let rec = ContactRecord {
+            user,
+            display_name: String::new(),
+            state: ContactStateWire::Accepted,
+            devices: Vec::new(),
+            auto_accept: false,
+            ask_above_bytes: None,
+            updated: Hlc {
+                millis: 0,
+                counter: 0,
+            },
+        };
+        assert_eq!(
+            device_event_view(&s, SystemEvent::ContactUpdated(rec)),
+            SystemEventView::ContactUpdated { name: user.short() }
+        );
+        assert_eq!(
+            device_event_view(
+                &s,
+                SystemEvent::ProfileUpdated {
+                    display_name: "小李".into()
+                }
+            ),
+            SystemEventView::NicknameUpdated {
+                name: "小李".into()
+            }
+        );
+        assert_eq!(
+            device_event_view(&s, SystemEvent::LocalDeleted { msgs: Vec::new() }),
+            SystemEventView::MessagesDeleted { count: 0 }
+        );
+    }
+
+    #[test]
+    fn names_are_never_empty() {
+        let s = Store::open_in_memory().unwrap();
+        let dev = DeviceId([9u8; 32]);
+        match device_event_view(
+            &s,
+            SystemEvent::DeviceAdded {
+                device: dev,
+                name: "  ".into(),
+            },
+        ) {
+            SystemEventView::DeviceAdded { name } => assert_eq!(name, dev.short()),
+            other => panic!("unexpected {other:?}"),
+        }
+        match device_event_view(
+            &s,
+            SystemEvent::ProfileUpdated {
+                display_name: String::new(),
+            },
+        ) {
+            SystemEventView::NicknameUpdated { name } => assert!(!name.is_empty()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recalled_by_me_sets_flag() {
+        let s = Store::open_in_memory().unwrap();
+        let id = put(&s, 1, MsgBody::Text { text: "x".into() });
+        s.set_message_state(&id, MsgStateRow::Recalled).unwrap();
+        let stored = s.get_message(&id).unwrap().unwrap();
+        // 作者设备不在 devices 表：既非“我”，名字用设备短 ID 兜底。
+        let v = message_view(&s, &DeviceId([7u8; 32]), &[], &stored);
+        match v.body {
+            MessageBodyView::System {
+                event: SystemEventView::Recalled { author_name, by_me },
+            } => {
+                assert!(!by_me);
+                assert_eq!(author_name, AUTHOR.short());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn self_devices_title_is_empty() {
+        let s = Store::open_in_memory().unwrap();
+        let mut row = conv_row();
+        row.kind = ConvKindRow::SelfDevices;
+        row.title = Some("whatever".into());
+        let sum = conv_summary(&s, None, &row, false);
+        assert_eq!(sum.kind, ConvKind::SelfDevices);
+        assert_eq!(sum.title, "");
     }
 }

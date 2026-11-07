@@ -4,6 +4,7 @@
 use lanmsg_api::types::*;
 use windui::prelude::*;
 
+use crate::event_text::conv_title;
 use crate::model::{Model, Page};
 use crate::strings;
 use crate::style;
@@ -158,7 +159,7 @@ pub fn header_info(m: &Model) -> Option<HeaderInfo> {
         None
     };
     Some(HeaderInfo {
-        title: conv.title.clone(),
+        title: conv_title(conv),
         online: conv.peer_online,
         devices: if conv.peer_online {
             peers.iter().map(|p| p.device_name.clone()).collect()

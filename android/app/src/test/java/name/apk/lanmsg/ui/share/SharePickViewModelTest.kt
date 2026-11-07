@@ -28,7 +28,7 @@ class SharePickViewModelTest {
     private fun fake() = FakeCoreApi().apply {
         handler = { r ->
             when (r) {
-                is Request.ListConversations -> Response.Conversations(listOf(Fixtures.conv("c1", "我的设备")))
+                is Request.ListConversations -> Response.Conversations(listOf(Fixtures.conv("c1", "")))
                 is Request.SendFiles -> Response.MsgId("m1")
                 is Request.SendText -> Response.MsgId("m2")
                 else -> Response.Ok

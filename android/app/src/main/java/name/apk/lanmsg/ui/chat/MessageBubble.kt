@@ -41,6 +41,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.systemEventText
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import uniffi.lanmsg_api.BlobState
 import uniffi.lanmsg_api.FileItemView
@@ -72,12 +73,16 @@ fun MessageBubble(
     val c = LanMsgColors.current
     // 撤回、系统消息、不支持的类型：居中灰字，无气泡
     if (msg.state == MessageState.RECALLED) {
-        CenterNote(stringResource(if (msg.isMine) R.string.msg_recalled_by_me else R.string.msg_recalled))
+        val b = msg.body
+        CenterNote(
+            if (b is MessageBodyView.System) systemEventText(b.event)
+            else stringResource(if (msg.isMine) R.string.msg_recalled_by_me else R.string.msg_recalled),
+        )
         return
     }
     val body = msg.body
     when (body) {
-        is MessageBodyView.System -> { CenterNote(body.text); return }
+        is MessageBodyView.System -> { CenterNote(systemEventText(body.event)); return }
         is MessageBodyView.Unsupported -> { CenterNote(stringResource(R.string.msg_unsupported)); return }
         else -> Unit
     }

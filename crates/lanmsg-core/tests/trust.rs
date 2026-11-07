@@ -332,7 +332,9 @@ async fn contact_request_accept_makes_both_contacts() {
         assert!(
             matches!(
                 &value[0].body,
-                lanmsg_api::types::MessageBodyView::System { text } if text.starts_with("已添加联系人：")
+                lanmsg_api::types::MessageBodyView::System {
+                    event: lanmsg_api::types::SystemEventView::ContactAdded { name }
+                } if !name.is_empty()
             ),
             "应为 System(ContactAdded) 文本: {:?}",
             value[0].body
@@ -431,6 +433,37 @@ async fn reject_then_requester_sees_rejected_and_can_retry() {
 }
 
 /// AcceptOnce 对联系人请求非法 → InvalidArgument。
+/// 联系人请求没有内容预览：preview 为空串，界面按 kind 显示本地化文案。
+#[tokio::test]
+async fn contact_request_preview_is_empty() {
+    let a = common::node_offline().await;
+    let mut b = common::node_offline().await;
+    a.init_first("甲").await;
+    b.init_first("乙").await;
+    common::link(&a, &b).await;
+
+    a.call(Request::RequestContact { user: b.user_id() }).await;
+    match b
+        .wait_event(
+            |e| matches!(e, Event::IncomingRequest { request } if matches!(request.kind, RequestKind::Contact)),
+            5,
+        )
+        .await
+    {
+        Event::IncomingRequest { request } => {
+            assert_eq!(request.preview, "", "事件里的 preview 应为空");
+        }
+        other => panic!("期望 IncomingRequest，实际 {other:?}"),
+    }
+    match b.call(Request::ListRequests).await {
+        Response::Requests { value } => {
+            assert_eq!(value.len(), 1);
+            assert_eq!(value[0].preview, "");
+        }
+        other => panic!("期望 Requests，实际 {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn accept_once_on_contact_request_is_invalid() {
     let a = common::node_offline().await;

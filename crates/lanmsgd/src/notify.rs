@@ -91,9 +91,12 @@ fn message_notice(msg: &MessageView, focus: Option<&str>, titles: &TitleCache) -
     }
     let preview = body_preview(&msg.body)?;
     let cached = titles.get(&msg.conv);
-    let title = cached
-        .map(|(t, _)| t.clone())
-        .unwrap_or_else(|| msg.author_device_name.clone());
+    // 自设备会话的标题由 core 留空，这里按 kind 给出名称（Task 6 统一挪进 strings.rs）。
+    let title = match cached {
+        Some((_, ConvKind::SelfDevices)) => "我的设备".to_string(),
+        Some((t, _)) => t.clone(),
+        None => msg.author_device_name.clone(),
+    };
     let body = match cached {
         Some((_, ConvKind::SelfDevices)) => format!("{}: {preview}", msg.author_device_name),
         _ => preview,
@@ -137,7 +140,7 @@ pub fn notice_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lanmsg_api::{BlobState, ConversationSummary, MessageState, RequestView};
+    use lanmsg_api::{BlobState, ConversationSummary, MessageState, RequestView, SystemEventView};
 
     fn msg(conv: &str, body: MessageBodyView) -> MessageView {
         MessageView {
@@ -220,7 +223,7 @@ mod tests {
     fn notice_for_own_user_other_device_in_self_devices() {
         let mut titles = TitleCache::default();
         titles.set_self_device("local".into());
-        titles.observe(&conv_event("c1", "我的设备", ConvKind::SelfDevices));
+        titles.observe(&conv_event("c1", "", ConvKind::SelfDevices));
         let mut m = msg("c1", text("hi"));
         m.is_mine = true; // 作者用户是自己，但来自另一台设备（"d"）
         let n = notice_for(&added(m), None, &StatusDto::Online, &titles).unwrap();
@@ -248,7 +251,7 @@ mod tests {
     #[test]
     fn self_devices_body_prefixed_with_device_name() {
         let mut titles = TitleCache::default();
-        titles.observe(&conv_event("c1", "我的设备", ConvKind::SelfDevices));
+        titles.observe(&conv_event("c1", "", ConvKind::SelfDevices));
         let ev = added(msg("c1", text("hi")));
         let n = notice_for(&ev, None, &StatusDto::Online, &titles).unwrap();
         assert_eq!(n.title, "我的设备");
@@ -307,7 +310,9 @@ mod tests {
     fn system_and_unsupported_messages_do_not_notify() {
         let titles = TitleCache::default();
         for b in [
-            MessageBodyView::System { text: "x".into() },
+            MessageBodyView::System {
+                event: SystemEventView::MessagesDeleted { count: 1 },
+            },
             MessageBodyView::Unsupported,
         ] {
             let ev = added(msg("c1", b));

@@ -87,6 +87,18 @@ pub const PATH_VPN: &str = "VPN";
 pub const PATH_INTERNET: &str = "公网";
 pub const PATH_RELAY: &str = "中继";
 pub const MSG_RECALLED: &str = "消息已撤回";
+/// 系统消息文案（后接名字的为前缀）。
+pub const SYS_DEVICE_ADDED: &str = "已添加设备：";
+pub const SYS_DEVICE_REMOVED: &str = "已移除设备：";
+pub const SYS_CONTACT_ADDED: &str = "已添加联系人：";
+pub const SYS_CONTACT_UPDATED: &str = "联系人已更新：";
+pub const SYS_NICKNAME_UPDATED: &str = "昵称已更新：";
+pub const SYS_DELETED_PREFIX: &str = "已删除 ";
+pub const SYS_DELETED_SUFFIX: &str = " 条消息";
+pub const SYS_RECALLED_BY_ME: &str = "你撤回了一条消息";
+pub const SYS_RECALLED_BY_PEER: &str = " 撤回了一条消息";
+/// 自设备会话的标题（core 给空串，界面按 kind 显示）。
+pub const SELF_DEVICES_TITLE: &str = "我的设备";
 pub const MSG_UNSUPPORTED: &str = "不支持的消息类型，请升级";
 pub const MSG_SENDING: &str = "发送中";
 pub const MSG_FAILED: &str = "发送失败";

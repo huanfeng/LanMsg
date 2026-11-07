@@ -306,8 +306,8 @@ async fn init_first_device_creates_self_conversation() {
     assert!(
         value
             .iter()
-            .any(|c| matches!(c.kind, ConvKind::SelfDevices) && c.title == "我的设备"),
-        "应包含「我的设备」自设备会话，实际: {value:?}"
+            .any(|c| matches!(c.kind, ConvKind::SelfDevices) && c.title.is_empty()),
+        "应包含标题为空的自设备会话，实际: {value:?}"
     );
 
     let resp = s.handle(Request::GetSelf).await.unwrap();

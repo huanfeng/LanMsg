@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 
-use lanmsg_api::types::{ErrorCode, Event, MessageBodyView, MessageState, Request, Response};
+use lanmsg_api::types::{
+    ErrorCode, Event, MessageBodyView, MessageState, Request, Response, SystemEventView,
+};
 use lanmsg_core::platform::PlatformHooks;
 use lanmsg_core::store::{ConvKindRow, ConvRow};
 use lanmsg_core::sync::conv_member_ok;
@@ -576,8 +578,10 @@ async fn recall_within_window_hides_on_all_sides() {
             .expect("撤回消息应存在");
         assert_eq!(v.state, MessageState::Recalled);
         match &v.body {
-            MessageBodyView::System { text } => {
-                assert!(text.contains("撤回"), "撤回提示: {text}");
+            MessageBodyView::System {
+                event: SystemEventView::Recalled { author_name, .. },
+            } => {
+                assert!(!author_name.is_empty(), "撤回提示应带作者名");
             }
             other => panic!("期望 System 撤回提示，实际 {other:?}"),
         }

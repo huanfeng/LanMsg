@@ -471,7 +471,8 @@ impl Trust {
             kind: RequestKindRow::Contact,
             from_user: user,
             conv: None,
-            preview: "请求添加你为联系人".into(),
+            // 联系人请求没有内容预览，界面按 kind 显示本地化文案。
+            preview: String::new(),
             created_at: now_millis(),
         };
         self.store.upsert_open_request(&row)?;

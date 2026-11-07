@@ -7,6 +7,7 @@ use lanmsg_api::types::*;
 use windui::event::MenuItem;
 use windui::prelude::*;
 
+use crate::event_text::system_event_text;
 use crate::model::{effective_state, Model, TransferInfo};
 use crate::strings;
 use crate::style;
@@ -692,11 +693,14 @@ fn files_body(ui: &UiState, items: &[FileItemView]) -> Element {
 /// `show_author`：在气泡上方标注来源设备名（“我的设备”会话里作者都是自己，靠它区分）。
 pub fn message_row(ui: &UiState, m: &MessageView, show_author: bool) -> Element {
     if m.state == MessageState::Recalled {
-        return notice(strings::MSG_RECALLED);
+        return match &m.body {
+            MessageBodyView::System { event } => notice(system_event_text(event)),
+            _ => notice(strings::MSG_RECALLED),
+        };
     }
     let mine = m.is_mine;
     let body = match &m.body {
-        MessageBodyView::System { text } => return notice(text.clone()),
+        MessageBodyView::System { event } => return notice(system_event_text(event)),
         MessageBodyView::Unsupported => return notice(strings::MSG_UNSUPPORTED),
         MessageBodyView::Text { text } => text_bubble(mine, text),
         MessageBodyView::Files { items } => files_body(ui, items),

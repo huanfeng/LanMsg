@@ -4,6 +4,7 @@
 use lanmsg_api::types::{ConvKind, ConversationSummary};
 use windui::prelude::*;
 
+use crate::event_text::conv_title;
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
@@ -55,9 +56,9 @@ pub fn forward_dialog(ui: &UiState, hashes: Vec<String>) -> Element {
             })
             .clickable()
             .on_click(move |_| selected.set(i))
-            .child(avatar(&c.conv, &c.title, c.peer_online))
+            .child(avatar(&c.conv, &conv_title(c), c.peer_online))
             .child(
-                Element::label(c.title.clone())
+                Element::label(conv_title(c))
                     .font_size(style::FONT_BODY)
                     .fg_role(Role::Text)
                     .max_lines(1)

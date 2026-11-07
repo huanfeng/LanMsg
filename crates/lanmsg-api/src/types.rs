@@ -448,9 +448,23 @@ pub enum MessageBodyView {
         items: Vec<FileItemView>,
     },
     System {
-        text: String,
+        event: SystemEventView,
     },
     Unsupported,
+}
+
+/// 系统消息的结构化事件（界面据此按本地化资源拼文案；name 一律非空，
+/// 缺失时由 core 用设备或用户的短 ID 兜底）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum SystemEventView {
+    DeviceAdded { name: String },
+    DeviceRemoved { name: String },
+    ContactAdded { name: String },
+    ContactUpdated { name: String },
+    NicknameUpdated { name: String },
+    MessagesDeleted { count: u32 },
+    Recalled { author_name: String, by_me: bool },
 }
 
 /// Blob 状态。

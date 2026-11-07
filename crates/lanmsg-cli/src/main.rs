@@ -10,8 +10,9 @@ use clap::{Parser, Subcommand};
 
 use lanmsg_api::ipc::{endpoint_name, IpcClient};
 use lanmsg_api::types::{
-    BlobState, Event, InitMode, MessageBodyView, PairMethod, PairStateDto, PairTarget, Request,
-    RequestAction, RequestKind, Response, SettingsDto, StatusDto,
+    BlobState, ConvKind, ConversationSummary, Event, InitMode, MessageBodyView, PairMethod,
+    PairStateDto, PairTarget, Request, RequestAction, RequestKind, Response, SettingsDto,
+    StatusDto, SystemEventView,
 };
 
 /// IpcClient::events() 返回的事件接收端。
@@ -228,7 +229,7 @@ async fn main() -> Result<()> {
                         println!(
                             "{:<66} {:<14} {:<6} {}",
                             c.conv,
-                            c.title,
+                            conv_title(&c),
                             c.unread,
                             c.last_text.as_deref().unwrap_or("-")
                         );
@@ -634,6 +635,30 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// 系统事件的英文单行描述（CLI 是开发测试工具，输出英文）。
+fn system_event_line(event: &SystemEventView) -> String {
+    match event {
+        SystemEventView::DeviceAdded { name } => format!("device added: {name}"),
+        SystemEventView::DeviceRemoved { name } => format!("device removed: {name}"),
+        SystemEventView::ContactAdded { name } => format!("contact added: {name}"),
+        SystemEventView::ContactUpdated { name } => format!("contact updated: {name}"),
+        SystemEventView::NicknameUpdated { name } => format!("nickname updated: {name}"),
+        SystemEventView::MessagesDeleted { count } => format!("{count} messages deleted"),
+        SystemEventView::Recalled { by_me: true, .. } => "you recalled a message".to_string(),
+        SystemEventView::Recalled { author_name, .. } => {
+            format!("{author_name} recalled a message")
+        }
+    }
+}
+
+/// 会话标题：自设备会话由 core 给空串，CLI 显示英文名。
+fn conv_title(c: &ConversationSummary) -> String {
+    match c.kind {
+        ConvKind::SelfDevices => "My devices".to_string(),
+        _ => c.title.clone(),
+    }
+}
+
 /// `log` 输出用的消息体单行描述：文字/系统原文，文件与文件夹列出文件名与大小。
 fn body_line(body: &MessageBodyView) -> String {
     let list = |items: &[lanmsg_api::types::FileItemView]| {
@@ -646,7 +671,7 @@ fn body_line(body: &MessageBodyView) -> String {
     match body {
         MessageBodyView::Text { text } => text.clone(),
         // 系统消息加可识别前缀，脚本据此与用户文字区分
-        MessageBodyView::System { text } => format!("[系统] {text}"),
+        MessageBodyView::System { event } => format!("[system] {}", system_event_line(event)),
         MessageBodyView::Files { items } => format!("[文件] {}", list(items)),
         MessageBodyView::Folder { name, items } => format!("[文件夹] {name}: {}", list(items)),
         MessageBodyView::Unsupported => "<不支持的消息类型>".to_string(),
@@ -888,8 +913,17 @@ mod tests {
         };
         assert_eq!(body_line(&folder), "[文件夹] docs: x/y.md (1 KB)");
         let sys = MessageBodyView::System {
-            text: "已添加设备：手机".into(),
+            event: SystemEventView::DeviceAdded {
+                name: "phone".into(),
+            },
         };
-        assert_eq!(body_line(&sys), "[系统] 已添加设备：手机");
+        assert_eq!(body_line(&sys), "[system] device added: phone");
+        let recalled = MessageBodyView::System {
+            event: SystemEventView::Recalled {
+                author_name: "bob".into(),
+                by_me: false,
+            },
+        };
+        assert_eq!(body_line(&recalled), "[system] bob recalled a message");
     }
 }

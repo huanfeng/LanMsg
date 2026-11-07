@@ -91,7 +91,7 @@ class NotifierTest {
         fake.handler = { req ->
             when (req) {
                 is Request.GetSelf -> Response.SelfInfo(Fixtures.selfInfo().apply { status = selfStatus })
-                is Request.ListConversations -> Response.Conversations(listOf(Fixtures.conv("c1", "对端", kind = ConvKind.DM), Fixtures.conv("c2", "另一个", kind = ConvKind.DM), Fixtures.conv("self", "我的设备")))
+                is Request.ListConversations -> Response.Conversations(listOf(Fixtures.conv("c1", "对端", kind = ConvKind.DM), Fixtures.conv("c2", "另一个", kind = ConvKind.DM), Fixtures.conv("self", "")))
                 else -> throw ApiException(ErrorCode.INTERNAL, "unexpected ${req.javaClass.simpleName}")
             }
         }
