@@ -87,7 +87,7 @@ pub(crate) async fn serve_connection(
             ev_task.abort();
             service.shutdown().await;
             crate::runtime::write_quit_marker(&data_dir);
-            tracing::info!("收到 Shutdown 请求，通知主线程退出");
+            tracing::info!("Shutdown requested, notifying main thread to exit");
             shutdown_tx.send_replace(true);
             return;
         }

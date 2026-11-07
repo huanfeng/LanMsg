@@ -12,6 +12,7 @@ use windui::prelude::*;
 use crate::launch::{conv_from_tag, open_gui};
 use crate::notify::{notice_for, Notice, TitleCache};
 use crate::runtime::DaemonRuntime;
+use crate::strings;
 
 /// 托盘图标（32x32 PNG，编译期内嵌）。
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray-32.png");
@@ -32,7 +33,7 @@ fn tray_icon_rgba() -> Option<(u32, u32, Vec<u8>)> {
             Some((rgba.width(), rgba.height(), rgba.into_raw()))
         }
         Err(e) => {
-            tracing::warn!("托盘图标解码失败: {e}");
+            tracing::warn!("failed to decode tray icon: {e}");
             None
         }
     }
@@ -41,7 +42,7 @@ fn tray_icon_rgba() -> Option<(u32, u32, Vec<u8>)> {
 /// 在界面线程分离启动界面进程，失败只记日志。
 fn open_gui_logged(data_dir: &std::path::Path, conv: Option<&str>) {
     if let Err(e) = open_gui(data_dir, conv) {
-        tracing::warn!("拉起界面失败: {e}");
+        tracing::warn!("failed to launch UI: {e}");
     }
 }
 
@@ -64,7 +65,7 @@ fn status_item(
         };
         match handle.block_on(service.handle(req)) {
             Ok(_) => status.set(target.clone()),
-            Err(e) => tracing::warn!("设置状态失败: {e:?}"),
+            Err(e) => tracing::warn!("failed to set status: {e:?}"),
         }
     })
 }
@@ -84,7 +85,7 @@ fn notice_with_fresh_status(
     ) {
         match fetch_status() {
             Some(fresh) => *status = fresh,
-            None => tracing::debug!("取当前状态失败，沿用托盘本地状态"),
+            None => tracing::debug!("failed to get current status, keeping local tray state"),
         }
     }
     notice_for(ev, focus, status, titles)
@@ -106,12 +107,12 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     if !supported {
         // 没有显示服务：拉起界面也会失败，直接走无头。
         if !resident_available() {
-            tracing::warn!("显示服务不可用，转为无头模式");
+            tracing::warn!("display server unavailable, switching to headless mode");
             rt.block_until_shutdown();
             return;
         }
         // 此刻没有托盘入口：开一次界面，让用户看得到界面。
-        tracing::info!("托盘宿主不可用，直接打开界面");
+        tracing::info!("tray host unavailable, opening the UI directly");
         open_gui_logged(&data_dir, None);
     }
 
@@ -132,20 +133,20 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
             open_gui_logged(&dir_click, conv_from_tag(tag).as_deref());
         })
         .on_availability_changed(|_ctx, up| {
-            tracing::debug!("托盘可用性变化: {up}");
+            tracing::debug!("tray availability changed: {up}");
         })
         .menu(vec![
-            TrayMenuItem::item("打开 LanMsg", move |_ctx| {
+            TrayMenuItem::item(strings::TRAY_OPEN, move |_ctx| {
                 open_gui_logged(&dir_menu, None)
             }),
             TrayMenuItem::separator(),
-            status_item("在线", StatusDto::Online, status, &rt),
-            status_item("隐身", StatusDto::Invisible, status, &rt),
-            status_item("忙碌", StatusDto::Busy, status, &rt),
+            status_item(strings::TRAY_ONLINE, StatusDto::Online, status, &rt),
+            status_item(strings::TRAY_INVISIBLE, StatusDto::Invisible, status, &rt),
+            status_item(strings::TRAY_BUSY, StatusDto::Busy, status, &rt),
             TrayMenuItem::separator(),
-            TrayMenuItem::item("退出", move |ctx| {
+            TrayMenuItem::item(strings::TRAY_QUIT, move |ctx| {
                 if let Err(e) = handle_quit.block_on(service_quit.handle(Request::Shutdown)) {
-                    tracing::warn!("退出请求失败: {e:?}");
+                    tracing::warn!("quit request failed: {e:?}");
                 }
                 crate::runtime::write_quit_marker(&dir_quit);
                 ctx.quit();
@@ -191,7 +192,7 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
         // 用户点退出或服务被外部关闭：正常收尾（Drop 清理 IPC socket）。
         rt.shutdown();
     } else {
-        tracing::warn!("显示服务不可用，转为无头模式");
+        tracing::warn!("display server unavailable, switching to headless mode");
         rt.block_until_shutdown();
     }
 }

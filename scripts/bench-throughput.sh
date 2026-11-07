@@ -23,7 +23,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN_DIR="${LANMSG_BIN_DIR:-$ROOT/target/debug}"  # 可用 LANMSG_BIN_DIR 覆盖二进制目录
+BIN_DIR="${LANMSG_BIN_DIR:-${CARGO_TARGET_DIR:-$ROOT/target}/debug}"  # 可用 LANMSG_BIN_DIR 覆盖二进制目录
 BIN_D="$BIN_DIR/lanmsgd"
 BIN_CLI="$BIN_DIR/lanmsg-cli"
 
@@ -109,8 +109,8 @@ local)
     done
     [ -n "$HASH" ] || die "B 未等到文件消息"
 
-    # B 下载并等待完成；download --wait 打印「耗时 X.XXs 平均 X.X MB/s」。
-    SPEED="$(cli_b download "$HASH" --wait | grep '平均' | sed 's/.*平均 \([0-9.]*\) MB\/s.*/\1/')"
+    # B 下载并等待完成；download --wait 打印 "elapsed X.XXs avg X.X MB/s"。
+    SPEED="$(cli_b download "$HASH" --wait | grep 'avg' | sed 's/.*avg \([0-9.]*\) MB\/s.*/\1/')"
     [ -n "$SPEED" ] || die "未取得平均速度（下载失败或无速度行）"
 
     echo "BENCH 文件 $SIZE_MB MB 平均 $SPEED MB/s"
@@ -158,7 +158,7 @@ remote)
     done
     [ -n "$HASH" ] || die "未等到对端文件"
 
-    SPEED="$(cli_a download "$HASH" --wait | grep '平均' | sed 's/.*平均 \([0-9.]*\) MB\/s.*/\1/')"
+    SPEED="$(cli_a download "$HASH" --wait | grep 'avg' | sed 's/.*avg \([0-9.]*\) MB\/s.*/\1/')"
     [ -n "$SPEED" ] || die "未取得平均速度（下载失败或无速度行）"
 
     echo "BENCH 平均 $SPEED MB/s"

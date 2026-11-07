@@ -52,3 +52,11 @@ Windows 下文件名带 `.exe`。
 - 同一局域网内自动发现，无需配置。
 - 跨网段（或组播被拦截）时，在“联系人”页的“附近的人”里手动添加对方地址。
 - 两台机器各自完成向导后，互相添加为联系人即可聊天；另一台电脑加入自己的身份（手机端见后续版本），在“设置”或“联系人 → 我的设备”里配对。
+
+## 开发约定
+
+日志（`tracing`）与错误消息一律英文，界面文案只放本地化资源（桌面 `crates/lanmsg-desktop/src/strings.rs`、lanmsgd `crates/lanmsgd/src/strings.rs`、Android `strings.xml`）。提交前运行下面的检查，非测试、非注释的 Rust 字符串字面量里出现汉字会让它以退出码 1 失败并逐行列出 `文件:行号`：
+
+```sh
+python3 scripts/check-no-cjk.py
+```

@@ -84,7 +84,7 @@ impl SubprocessThumbnailer {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                tracing::debug!("启动 {} 失败: {e}", self.exe.display());
+                tracing::debug!("failed to start {}: {e}", self.exe.display());
                 return None;
             }
         };
@@ -100,14 +100,17 @@ impl SubprocessThumbnailer {
                 Ok(None) if Instant::now() >= deadline => break None,
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                 Err(e) => {
-                    tracing::debug!("等待缩略图子进程失败: {e}");
+                    tracing::debug!("failed to wait for thumbnail subprocess: {e}");
                     kill_tree(&mut child);
                     return None;
                 }
             }
         };
         let Some(status) = status else {
-            tracing::debug!("缩略图子进程超时，强制结束: {}", input.display());
+            tracing::debug!(
+                "thumbnail subprocess timed out, killed: {}",
+                input.display()
+            );
             kill_tree(&mut child);
             return None;
         };
@@ -115,7 +118,7 @@ impl SubprocessThumbnailer {
         if !status.success() {
             let stderr = err_rx.recv_timeout(DRAIN_WAIT).unwrap_or_default();
             tracing::debug!(
-                "缩略图子进程失败（{status}）: {}",
+                "thumbnail subprocess failed ({status}): {}",
                 String::from_utf8_lossy(&stderr).trim()
             );
             return None;
@@ -128,7 +131,7 @@ impl ThumbnailProvider for SubprocessThumbnailer {
     fn thumbnail(&self, path: &Path, mime: &str) -> Option<Thumbnail> {
         let thumbs_dir = self.cache_dir.join("thumbs");
         if let Err(e) = std::fs::create_dir_all(&thumbs_dir) {
-            tracing::debug!("创建缩略图目录失败: {e}");
+            tracing::debug!("failed to create thumbnail directory: {e}");
             return None;
         }
         let nanos = std::time::SystemTime::now()
@@ -184,7 +187,7 @@ fn parse_media_info(stdout: &[u8]) -> Option<MediaInfo> {
     match serde_json::from_str::<MediaInfo>(line.trim()) {
         Ok(m) => Some(m),
         Err(e) => {
-            tracing::debug!("解析缩略图子进程输出失败: {e}");
+            tracing::debug!("failed to parse thumbnail subprocess output: {e}");
             None
         }
     }
@@ -220,7 +223,7 @@ fn kill_tree(child: &mut Child) {
             .stderr(Stdio::null())
             .status();
         if !matches!(status, Ok(s) if s.success()) {
-            tracing::debug!("kill 进程组失败，退回只杀子进程");
+            tracing::debug!("failed to kill process group, falling back to killing the child only");
         }
     }
     let _ = child.kill();

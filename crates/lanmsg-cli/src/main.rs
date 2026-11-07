@@ -19,7 +19,10 @@ use lanmsg_api::types::{
 type EventRx = tokio::sync::broadcast::Receiver<Event>;
 
 #[derive(Parser)]
-#[command(name = "lanmsg-cli", about = "LanMsg 命令行客户端（需先启动 lanmsgd）")]
+#[command(
+    name = "lanmsg-cli",
+    about = "LanMsg command-line client (lanmsgd must be running)"
+)]
 struct Cli {
     /// 数据目录（用于计算 IPC 端点，需与 lanmsgd 一致）
     #[arg(long)]
@@ -133,7 +136,7 @@ async fn connect_or_die(data_dir: &Option<PathBuf>) -> IpcClient {
     match IpcClient::connect(&endpoint).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("无法连接 lanmsgd（端点 {endpoint}）：{e}，请先启动 lanmsgd");
+            eprintln!("cannot connect to lanmsgd (endpoint {endpoint}): {e}; start lanmsgd first");
             exit(1);
         }
     }
@@ -163,8 +166,8 @@ async fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Init { name, device_name } => {
-            let device_name =
-                device_name.unwrap_or_else(|| hostname().unwrap_or_else(|| "未命名设备".into()));
+            let device_name = device_name
+                .unwrap_or_else(|| hostname().unwrap_or_else(|| "unnamed device".into()));
             let resp = client
                 .call(Request::Init {
                     display_name: name,
@@ -174,7 +177,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::Ok => println!("已初始化"),
+                Response::Ok => println!("initialized"),
                 other => println!("{other:?}"),
             }
         }
@@ -204,8 +207,8 @@ async fn main() -> Result<()> {
             match resp {
                 Response::Peers { value } => {
                     println!(
-                        "{:<10} {:<16} {:<20} {:<22} 路径",
-                        "设备短号", "显示名", "设备名", "地址"
+                        "{:<10} {:<16} {:<20} {:<22} path",
+                        "device", "name", "device name", "address"
                     );
                     for p in value {
                         println!(
@@ -224,7 +227,10 @@ async fn main() -> Result<()> {
                 .map_err(api_err)?;
             match resp {
                 Response::Conversations { value } => {
-                    println!("{:<66} {:<14} {:<6} 最后消息", "会话", "标题", "未读");
+                    println!(
+                        "{:<66} {:<14} {:<6} last message",
+                        "conv", "title", "unread"
+                    );
                     for c in value {
                         println!(
                             "{:<66} {:<14} {:<6} {}",
@@ -275,9 +281,9 @@ async fn main() -> Result<()> {
                 Response::Messages { value } => {
                     for m in value {
                         let name = if m.is_mine && m.author_device == self_device {
-                            "我".to_string()
+                            "me".to_string()
                         } else if m.is_mine {
-                            format!("我（{}）", m.author_device_name)
+                            format!("me ({})", m.author_device_name)
                         } else {
                             m.author_device_name.clone()
                         };
@@ -300,7 +306,7 @@ async fn main() -> Result<()> {
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
                     // 事件流关闭 = 后台服务已断开：以非零码退出，脚本才能区分于超时正常结束
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-                        eprintln!("后台服务已断开");
+                        eprintln!("daemon disconnected");
                         exit(WATCH_DISCONNECTED_EXIT);
                     }
                     // 一小时无事件：正常结束
@@ -314,7 +320,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::Ok => println!("已连接"),
+                Response::Ok => println!("connected"),
                 other => println!("{other:?}"),
             }
         }
@@ -326,7 +332,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::Ok => println!("状态已切换为 {state}"),
+                Response::Ok => println!("status set to {state}"),
                 other => println!("{other:?}"),
             }
         }
@@ -390,13 +396,15 @@ async fn main() -> Result<()> {
                 "yes" => true,
                 "no" => false,
                 other => {
-                    eprintln!("答案应为 yes|no，实际 {other}");
+                    eprintln!("answer must be yes|no, got {other}");
                     exit(1);
                 }
             };
             let code = code.unwrap_or_default();
             if matches && code.is_empty() {
-                eprintln!("确认一致时需要 --code <本端显示的数字>");
+                eprintln!(
+                    "--code <digits shown on this device> is required when confirming a match"
+                );
                 exit(1);
             }
             let resp = client
@@ -408,7 +416,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::Ok => println!("已提交确认"),
+                Response::Ok => println!("confirmation submitted"),
                 other => println!("{other:?}"),
             }
         }
@@ -417,16 +425,16 @@ async fn main() -> Result<()> {
             match resp {
                 Response::Devices { value } => {
                     println!(
-                        "{:<10} {:<20} {:<6} {:<6} 设备ID",
-                        "短号", "设备名", "在线", "本机"
+                        "{:<10} {:<20} {:<6} {:<6} device id",
+                        "short", "device name", "online", "self"
                     );
                     for d in value {
                         println!(
                             "{:<10} {:<20} {:<6} {:<6} {}",
                             d.device_short,
                             d.name,
-                            if d.online { "在线" } else { "离线" },
-                            if d.is_self { "是" } else { "否" },
+                            if d.online { "online" } else { "offline" },
+                            if d.is_self { "yes" } else { "no" },
                             d.device_id,
                         );
                     }
@@ -440,7 +448,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::Ok => println!("已移除"),
+                Response::Ok => println!("removed"),
                 other => println!("{other:?}"),
             }
         }
@@ -449,18 +457,18 @@ async fn main() -> Result<()> {
             match resp {
                 Response::Contacts { value } => {
                     println!(
-                        "{:<12} {:<16} {:<6} {:<14} 用户ID",
-                        "显示名", "短号", "在线", "下载上限"
+                        "{:<12} {:<16} {:<6} {:<14} user id",
+                        "name", "short", "online", "download limit"
                     );
                     for c in value {
                         println!(
                             "{:<12} {:<16} {:<6} {:<14} {}",
                             c.display_name,
                             c.user_short,
-                            if c.online { "在线" } else { "离线" },
+                            if c.online { "online" } else { "offline" },
                             match c.ask_above_bytes {
                                 Some(n) => human_size(n),
-                                None => "不限".into(),
+                                None => "unlimited".into(),
                             },
                             c.user_id,
                         );
@@ -475,7 +483,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::Ok => println!("请求已发送"),
+                Response::Ok => println!("request sent"),
                 other => println!("{other:?}"),
             }
         }
@@ -484,7 +492,7 @@ async fn main() -> Result<()> {
             match resp {
                 Response::Requests { value } => {
                     if value.is_empty() {
-                        println!("（无待处理请求）");
+                        println!("(no pending requests)");
                     }
                     for r in value {
                         println!(
@@ -506,7 +514,7 @@ async fn main() -> Result<()> {
                 "reject" => RequestAction::Reject,
                 "block" => RequestAction::Block,
                 other => {
-                    eprintln!("动作应为 once|add|reject|block，实际 {other}");
+                    eprintln!("action must be once|add|reject|block, got {other}");
                     exit(1);
                 }
             };
@@ -515,7 +523,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::Ok => println!("已处理"),
+                Response::Ok => println!("handled"),
                 other => println!("{other:?}"),
             }
         }
@@ -525,7 +533,9 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::MsgId { value } => println!("已开始发送 {value}（后台准备与传输）"),
+                Response::MsgId { value } => {
+                    println!("send started: {value} (preparing and transferring in the background)")
+                }
                 other => println!("{other:?}"),
             }
         }
@@ -535,7 +545,9 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::MsgId { value } => println!("已开始发送 {value}（后台准备与传输）"),
+                Response::MsgId { value } => {
+                    println!("send started: {value} (preparing and transferring in the background)")
+                }
                 other => println!("{other:?}"),
             }
         }
@@ -559,7 +571,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::Ok => println!("已撤回"),
+                Response::Ok => println!("recalled"),
                 other => println!("{other:?}"),
             }
         }
@@ -569,7 +581,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::Ok => println!("已标记已读"),
+                Response::Ok => println!("marked as read"),
                 other => println!("{other:?}"),
             }
         }
@@ -589,7 +601,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::Ok => println!("资料已更新"),
+                Response::Ok => println!("profile updated"),
                 other => println!("{other:?}"),
             }
         }
@@ -627,7 +639,7 @@ async fn main() -> Result<()> {
         Cmd::Shutdown => {
             let resp = client.call(Request::Shutdown).await.map_err(api_err)?;
             match resp {
-                Response::Ok => println!("lanmsgd 已退出"),
+                Response::Ok => println!("lanmsgd exited"),
                 other => println!("{other:?}"),
             }
         }
@@ -686,15 +698,15 @@ fn body_line(body: &MessageBodyView) -> String {
         MessageBodyView::Text { text } => text.clone(),
         // 系统消息加可识别前缀，脚本据此与用户文字区分
         MessageBodyView::System { event } => format!("[system] {}", system_event_line(event)),
-        MessageBodyView::Files { items } => format!("[文件] {}", list(items)),
-        MessageBodyView::Folder { name, items } => format!("[文件夹] {name}: {}", list(items)),
-        MessageBodyView::Unsupported => "<不支持的消息类型>".to_string(),
+        MessageBodyView::Files { items } => format!("[file] {}", list(items)),
+        MessageBodyView::Folder { name, items } => format!("[folder] {name}: {}", list(items)),
+        MessageBodyView::Unsupported => "<unsupported message type>".to_string(),
     }
 }
 
 /// API 错误转 anyhow。
 fn api_err(e: lanmsg_api::types::ApiError) -> anyhow::Error {
-    anyhow::anyhow!("API 错误 {:?}: {}", e.code, e.message)
+    anyhow::anyhow!("API error {:?}: {}", e.code, e.message)
 }
 
 /// 主机名（Init 的 device_name 默认值）。
@@ -723,20 +735,20 @@ fn human_size(n: u64) -> String {
 /// 请求类型中文。
 fn kind_str(k: &RequestKind) -> &'static str {
     match k {
-        RequestKind::Contact => "联系人",
-        RequestKind::Message => "消息",
-        RequestKind::File => "文件",
+        RequestKind::Contact => "contact",
+        RequestKind::Message => "message",
+        RequestKind::File => "file",
     }
 }
 
 /// Blob 状态中文。
 fn blob_state_str(s: &BlobState) -> &'static str {
     match s {
-        BlobState::Remote => "远端",
-        BlobState::Downloading => "下载中",
-        BlobState::Local => "本地",
-        BlobState::SourceOffline => "源离线",
-        BlobState::Preparing => "准备中",
+        BlobState::Remote => "remote",
+        BlobState::Downloading => "downloading",
+        BlobState::Local => "local",
+        BlobState::SourceOffline => "source offline",
+        BlobState::Preparing => "preparing",
     }
 }
 
@@ -761,13 +773,13 @@ async fn settings_set(client: &IpcClient, mut kv: Vec<String>) -> anyhow::Result
         kv.remove(0);
     }
     if kv.len() != 2 {
-        eprintln!("用法：settings set <key> <value>（key 支持 auto_image_max、auto_file_max、auto_file_wifi_only、download_dir、device_name）");
+        eprintln!("usage: settings set <key> <value> (key is one of auto_image_max, auto_file_max, auto_file_wifi_only, download_dir, device_name)");
         exit(1);
     }
     let (key, value) = (kv[0].clone(), kv[1].clone());
     let resp = client.call(Request::GetSettings).await.map_err(api_err)?;
     let Response::Settings { value: mut s } = resp else {
-        anyhow::bail!("期望 Settings 响应");
+        anyhow::bail!("expected Settings response");
     };
     match key.as_str() {
         "auto_image_max" => s.auto_image_max = value.parse()?,
@@ -776,7 +788,7 @@ async fn settings_set(client: &IpcClient, mut kv: Vec<String>) -> anyhow::Result
         "download_dir" => s.download_dir = value,
         "device_name" => s.device_name = value,
         other => {
-            eprintln!("不支持的设置项: {other}");
+            eprintln!("unsupported setting: {other}");
             exit(1);
         }
     }
@@ -784,7 +796,7 @@ async fn settings_set(client: &IpcClient, mut kv: Vec<String>) -> anyhow::Result
         .call(Request::SetSettings { settings: s })
         .await
         .map_err(api_err)?;
-    println!("已更新 {key}");
+    println!("updated {key}");
     Ok(())
 }
 
@@ -854,7 +866,7 @@ async fn download_and_wait(client: &IpcClient, hash: String) {
     let resp = match client.call(Request::DownloadBlob { hash }).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("API 错误 {:?}: {}", e.code, e.message);
+            eprintln!("API error {:?}: {}", e.code, e.message);
             exit(1);
         }
     };
@@ -872,7 +884,10 @@ async fn download_and_wait(client: &IpcClient, hash: String) {
                 ..
             }) if t == transfer => {
                 if !ok {
-                    eprintln!("下载失败：{}", error.as_deref().unwrap_or("未知错误"));
+                    eprintln!(
+                        "download failed: {}",
+                        error.as_deref().unwrap_or("unknown error")
+                    );
                     exit(1);
                 }
                 break;
@@ -888,9 +903,9 @@ async fn download_and_wait(client: &IpcClient, hash: String) {
     let secs = t0.elapsed().as_secs_f64();
     if total > 0 {
         let mbps = total as f64 / 1024.0 / 1024.0 / secs;
-        println!("耗时 {secs:.2}s 平均 {mbps:.1} MB/s");
+        println!("elapsed {secs:.2}s avg {mbps:.1} MB/s");
     } else {
-        println!("耗时 {secs:.2}s");
+        println!("elapsed {secs:.2}s");
     }
 }
 
@@ -922,12 +937,12 @@ mod tests {
         let files = MessageBodyView::Files {
             items: vec![item("a.txt", 2048), item("b.bin", 3 * 1024 * 1024)],
         };
-        assert_eq!(body_line(&files), "[文件] a.txt (2 KB), b.bin (3.0 MB)");
+        assert_eq!(body_line(&files), "[file] a.txt (2 KB), b.bin (3.0 MB)");
         let folder = MessageBodyView::Folder {
             name: "docs".into(),
             items: vec![item("x/y.md", 1024)],
         };
-        assert_eq!(body_line(&folder), "[文件夹] docs: x/y.md (1 KB)");
+        assert_eq!(body_line(&folder), "[folder] docs: x/y.md (1 KB)");
         let sys = MessageBodyView::System {
             event: SystemEventView::DeviceAdded {
                 name: "phone".into(),

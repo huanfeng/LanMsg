@@ -3,6 +3,8 @@
 
 use std::collections::HashMap;
 
+use crate::strings;
+
 use lanmsg_api::{
     ConvKind, Event, FileItemView, MessageBodyView, MessageView, RequestKind, StatusDto,
 };
@@ -61,11 +63,11 @@ fn text_preview(text: &str) -> String {
 /// 单个文件的预览：图片 / 视频 / 其它。
 fn file_preview(item: &FileItemView) -> String {
     if item.mime.starts_with("image/") {
-        "[图片]".to_string()
+        strings::NOTIFY_IMAGE.to_string()
     } else if item.mime.starts_with("video/") {
-        "[视频]".to_string()
+        strings::NOTIFY_VIDEO.to_string()
     } else {
-        format!("[文件] {}", item.name)
+        format!("{}{}", strings::NOTIFY_FILE_PREFIX, item.name)
     }
 }
 
@@ -76,9 +78,11 @@ fn body_preview(body: &MessageBodyView) -> Option<String> {
         MessageBodyView::Files { items } => match items.as_slice() {
             [] => None,
             [one] => Some(file_preview(one)),
-            many => Some(format!("[{} 个文件]", many.len())),
+            many => Some(strings::notify_files(many.len())),
         },
-        MessageBodyView::Folder { name, .. } => Some(format!("[文件夹] {name}")),
+        MessageBodyView::Folder { name, .. } => {
+            Some(format!("{}{name}", strings::NOTIFY_FOLDER_PREFIX))
+        }
         MessageBodyView::System { .. } | MessageBodyView::Unsupported => None,
     }
 }
@@ -91,9 +95,9 @@ fn message_notice(msg: &MessageView, focus: Option<&str>, titles: &TitleCache) -
     }
     let preview = body_preview(&msg.body)?;
     let cached = titles.get(&msg.conv);
-    // 自设备会话的标题由 core 留空，这里按 kind 给出名称（Task 6 统一挪进 strings.rs）。
+    // 自设备会话的标题由 core 留空，这里按 kind 给出名称。
     let title = match cached {
-        Some((_, ConvKind::SelfDevices)) => "我的设备".to_string(),
+        Some((_, ConvKind::SelfDevices)) => strings::NOTIFY_SELF_DEVICES_TITLE.to_string(),
         Some((t, _)) => t.clone(),
         None => msg.author_device_name.clone(),
     };
@@ -123,13 +127,13 @@ pub fn notice_for(
         Event::MessageAdded { msg } => message_notice(msg, focus, titles),
         Event::IncomingRequest { request } => {
             let what = match request.kind {
-                RequestKind::Contact => "加你为联系人",
-                RequestKind::Message => "给你发消息",
-                RequestKind::File => "给你发文件",
+                RequestKind::Contact => strings::NOTIFY_REQUEST_CONTACT,
+                RequestKind::Message => strings::NOTIFY_REQUEST_MESSAGE,
+                RequestKind::File => strings::NOTIFY_REQUEST_FILE,
             };
             Some(Notice {
-                title: "新的请求".to_string(),
-                body: format!("{} 想要{what}", request.from_name),
+                title: strings::NOTIFY_REQUEST_TITLE.to_string(),
+                body: strings::notify_request_body(&request.from_name, what),
                 conv: None,
             })
         }

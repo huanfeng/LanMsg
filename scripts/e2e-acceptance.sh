@@ -117,7 +117,7 @@ did() { c "$1" self | awk '/^device_id:/{print $2}'; }
 
 # 会话中的文本（每行一条，已去掉 [时间] 作者: 前缀），按 log 顺序；
 # 系统消息（CLI 加 [system] 前缀，如 "contact added: X"）是各设备本地生成的，不属于用户文字，滤掉。
-texts() { c "$1" log "$2" --limit 500 | grep -v '<不支持的消息类型>' | sed -E 's/^\[[0-9:]+\] [^:]*: //' | awk '!/^\[system\] /'; }
+texts() { c "$1" log "$2" --limit 500 | grep -v '<unsupported message type>' | sed -E 's/^\[[0-9:]+\] [^:]*: //' | awk '!/^\[system\] /'; }
 has_text() { texts "$1" "$2" | grep -qxF -- "$3"; }
 
 # 对端在线：peer_seen <节点> <显示名>
@@ -594,7 +594,7 @@ sc_recall_read() {
 # ---------------------------------------------------------------- 场景 9
 sc_bench_local() {
     local out
-    out="$(bash "$REPO/scripts/bench-throughput.sh" local 256 2>&1)" || fail "bench 失败：$out"
+    out="$(LANMSG_BIN_DIR="$BIN_DIR" bash "$REPO/scripts/bench-throughput.sh" local 256 2>&1)" || fail "bench 失败：$out"
     echo "$out" | tail -n 3
     echo "$out" | grep -q '^BENCH ' || fail "bench 输出里没有 BENCH 行"
 }

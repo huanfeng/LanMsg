@@ -21,6 +21,7 @@ mod ipc_server;
 mod launch;
 mod notify;
 mod runtime;
+mod strings;
 mod thumbnailer;
 mod tray;
 
@@ -70,7 +71,7 @@ fn init_tracing(data_dir: &std::path::Path, level: &str) -> Result<()> {
 }
 
 #[derive(Parser)]
-#[command(name = "lanmsgd", about = "LanMsg 守护进程")]
+#[command(name = "lanmsgd", about = "LanMsg daemon")]
 pub(crate) struct Args {
     /// 数据目录（默认平台数据目录 C8）
     #[arg(long)]
@@ -104,10 +105,10 @@ impl Args {
 fn main() {
     if let Err(e) = run() {
         if e.downcast_ref::<runtime::AlreadyRunning>().is_some() {
-            println!("lanmsgd 已在运行");
+            println!("lanmsgd is already running");
             std::process::exit(2);
         }
-        eprintln!("lanmsgd 启动失败: {e:#}");
+        eprintln!("lanmsgd failed to start: {e:#}");
         std::process::exit(1);
     }
 }
@@ -121,7 +122,7 @@ fn run() -> Result<()> {
     let rt = runtime::start_runtime(&args)?;
     let env = |k: &str| std::env::var(k).ok();
     if runtime::is_headless(&env, args.headless) {
-        tracing::info!("无头模式运行");
+        tracing::info!("running in headless mode");
         rt.block_until_shutdown();
     } else {
         tray::run_tray(rt, data_dir);

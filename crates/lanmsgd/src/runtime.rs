@@ -49,7 +49,7 @@ pub struct DaemonRuntime {
 /// SIGTERM/kill 路径刻意不写：那是系统关机等场景，下次开机自启不应被标记拦住。
 pub(crate) fn write_quit_marker(data_dir: &Path) {
     if let Err(e) = std::fs::write(data_dir.join(DAEMON_QUIT_MARKER), b"") {
-        tracing::warn!("写主动退出标记失败: {e}");
+        tracing::warn!("failed to write quit marker: {e}");
     }
 }
 
@@ -97,7 +97,7 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
         })
         .await
         .context("failed to start service (if the data directory marker selects the system keystore but it is unavailable, check the keystore service)")?;
-        tracing::info!("lanmsgd 已启动，IPC 端点: {endpoint}");
+        tracing::info!("lanmsgd started, IPC endpoint: {endpoint}");
 
         // IPC 接入循环。
         let svc = service.clone();
@@ -119,7 +119,7 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
                             ));
                         }
                         Err(e) => {
-                            tracing::warn!("IPC accept 失败: {e}");
+                            tracing::warn!("IPC accept failed: {e}");
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     },
@@ -138,10 +138,10 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
                 })
                 .await
                 {
-                    Ok(Ok(freed)) if freed > 0 => tracing::info!("缩略图缓存已清理 {freed} 字节"),
+                    Ok(Ok(freed)) if freed > 0 => tracing::info!("thumbnail cache cleaned, {freed} bytes freed"),
                     Ok(Ok(_)) => {}
-                    Ok(Err(e)) => tracing::warn!("缩略图缓存清理失败: {e}"),
-                    Err(e) => tracing::warn!("缩略图缓存清理任务异常: {e}"),
+                    Ok(Err(e)) => tracing::warn!("thumbnail cache cleanup failed: {e}"),
+                    Err(e) => tracing::warn!("thumbnail cache cleanup task failed: {e}"),
                 }
                 tokio::time::sleep(THUMB_CACHE_SWEEP_INTERVAL).await;
             }
@@ -229,7 +229,7 @@ async fn wait_signal() {
                 tokio::select! {
                     r = tokio::signal::ctrl_c() => {
                         if let Err(e) = r {
-                            tracing::warn!("监听 Ctrl-C 失败: {e}");
+                            tracing::warn!("failed to listen for Ctrl-C: {e}");
                             term.recv().await;
                         }
                     }
@@ -237,11 +237,11 @@ async fn wait_signal() {
                 }
                 return;
             }
-            Err(e) => tracing::warn!("监听 SIGTERM 失败: {e}"),
+            Err(e) => tracing::warn!("failed to listen for SIGTERM: {e}"),
         }
     }
     if let Err(e) = tokio::signal::ctrl_c().await {
-        tracing::warn!("监听 Ctrl-C 失败: {e}");
+        tracing::warn!("failed to listen for Ctrl-C: {e}");
         std::future::pending::<()>().await;
     }
 }
