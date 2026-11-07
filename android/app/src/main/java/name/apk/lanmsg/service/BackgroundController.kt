@@ -16,12 +16,14 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import name.apk.lanmsg.core.CoreHolder
+import uniffi.lanmsg_api.BackgroundMode
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** 控制器对系统做的两件事，抽成接口便于测试。 */
 interface ServiceActions {
-    fun setServiceRunning(run: Boolean)
+    /** 返回 false 表示系统拒绝了启动（如后台限制），调用方应在合适时机重试。 */
+    fun setServiceRunning(run: Boolean): Boolean
 
     fun setWorkerScheduled(scheduled: Boolean)
 }
@@ -29,19 +31,22 @@ interface ServiceActions {
 class SystemServiceActions(ctx: Context) : ServiceActions {
     private val app = ctx.applicationContext
 
-    override fun setServiceRunning(run: Boolean) {
+    override fun setServiceRunning(run: Boolean): Boolean {
         val intent = Intent(app, LanMsgService::class.java)
-        if (run) {
-            try {
-                ContextCompat.startForegroundService(app, intent)
-            } catch (e: IllegalStateException) {
-                // Android 12+ 后台中不允许启动前台服务；回到前台或下一次条件变化时再试
-                Log.w(TAG, "Cannot start foreground service now", e)
-            } catch (e: SecurityException) {
-                Log.w(TAG, "Foreground service start denied", e)
-            }
-        } else {
+        if (!run) {
             app.stopService(intent)
+            return true
+        }
+        return try {
+            ContextCompat.startForegroundService(app, intent)
+            true
+        } catch (e: IllegalStateException) {
+            // Android 12+ 后台中不允许启动前台服务；回到前台时由控制器重试
+            Log.w(TAG, "Cannot start foreground service now", e)
+            false
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Foreground service start denied", e)
+            false
         }
     }
 
@@ -74,19 +79,31 @@ class BackgroundController(
     private val actions: ServiceActions,
     /** 启动时读完档位后，最多等多久让服务接手 core，避免 core 先关再开。 */
     private val serviceWaitMillis: Long = 10_000,
+    /** 读到或收到新档位时记下来，供开机时先于 core 就绪拉起服务。 */
+    private val onModeSeen: suspend (BackgroundMode) -> Unit = {},
 ) {
     private val started = AtomicBoolean(false)
     private var lastRun: Boolean? = null
     private var lastWorker: Boolean? = null
 
+    /** 上次启动服务被系统拒绝；回到前台前不再重试。 */
+    private var startFailed = false
+
     fun start() {
         if (!started.compareAndSet(false, true)) return
         scope.launch {
             combine(holder.backgroundMode.filterNotNull(), conditions) { m, c -> m to c }.collect { (m, c) ->
+                onModeSeen(m)
                 val run = BackgroundPolicy.shouldRunService(m, c)
-                if (run != lastRun) {
-                    lastRun = run
-                    actions.setServiceRunning(run)
+                val blocked = startFailed && run && !c.appVisible
+                if (!blocked && run != lastRun) {
+                    startFailed = false
+                    if (actions.setServiceRunning(run)) {
+                        lastRun = run
+                    } else {
+                        lastRun = null
+                        startFailed = true
+                    }
                 }
                 val worker = BackgroundPolicy.shouldScheduleWorker(m)
                 if (worker != lastWorker) {

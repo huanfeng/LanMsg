@@ -53,4 +53,13 @@ class OnboardingViewModelTest {
         assertNull(vm.state.value.done)
         assertEquals(false, vm.state.value.busy)
     }
+
+    @Test fun unexpected_exception_in_on_initialized_resets_busy() = runTest {
+        val fake = FakeCoreApi().apply { handler = { Response.Ok } }
+        val vm = OnboardingViewModel(fake, "Pixel 8", onInitialized = { throw IllegalStateException("boom") })
+        vm.next(); vm.setDisplayName("小明"); vm.next(); vm.chooseFirstDevice(); advanceUntilIdle()
+        assertEquals(false, vm.state.value.busy)
+        assertNotNull(vm.state.value.error)
+        assertNull(vm.state.value.done)
+    }
 }

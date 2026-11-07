@@ -3,7 +3,15 @@
 package name.apk.lanmsg.core
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
@@ -12,6 +20,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import name.apk.lanmsg.testutil.FakeCoreApi
 import name.apk.lanmsg.testutil.Fixtures
+import java.util.concurrent.CountDownLatch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
@@ -102,13 +111,78 @@ class CoreHolderTest {
         assertTrue(holder.running.value)
     }
 
-    @Test fun proxy_forwards_requests_to_current_core_and_acquires_ui_if_idle() = runTest {
+    @Test fun proxy_forwards_requests_to_core_started_by_ui_owner() = runTest {
         val fake = FakeCoreApi().apply { handler = { Response.Ok } }
         val holder = CoreHolder({ fake }, backgroundScope, StandardTestDispatcher(testScheduler))
+        holder.acquire("ui")
         assertEquals(Response.Ok, holder.api.request(Request.GetSelf))
-        assertTrue(holder.running.value)
-        assertTrue("ui" in holder.owners.value)
         assertEquals(listOf<Request>(Request.GetSelf), fake.requests)
+    }
+
+    @Test fun proxy_after_ui_release_neither_creates_core_nor_leaves_owner() = runTest {
+        var created = 0
+        val holder = CoreHolder({ created++; FakeCoreApi() }, backgroundScope, StandardTestDispatcher(testScheduler))
+        holder.acquire("ui")
+        holder.release("ui")
+        runCurrent()
+        val e = runCatching { holder.api.request(Request.GetSelf) }.exceptionOrNull()
+        assertTrue(e is ApiException)
+        assertEquals("core not running", e?.message)
+        assertEquals(emptySet<String>(), holder.owners.value)
+        assertFalse(holder.running.value)
+        assertEquals(1, created)
+    }
+
+    @Test fun proxy_wraps_non_api_exceptions_from_a_shut_down_core() = runTest {
+        val fake = FakeCoreApi().apply { handler = { throw IllegalStateException("closed") } }
+        val holder = CoreHolder({ fake }, backgroundScope, StandardTestDispatcher(testScheduler))
+        holder.acquire("ui")
+        val e = runCatching { holder.api.request(Request.GetSelf) }.exceptionOrNull()
+        assertTrue(e is ApiException)
+    }
+
+    /** shutdown 阻塞直到 [gate] 放行的实例；用真实线程，因为阻塞调用在单线程测试调度器上会卡死。 */
+    private class BlockingShutdownCore(private val gate: CountDownLatch) : CoreApi by FakeCoreApi() {
+        override fun shutdown() {
+            gate.await()
+        }
+    }
+
+    @Test fun acquire_cancelled_while_waiting_reclaims_owner_and_allows_shutdown() = runBlocking {
+        val gate = CountDownLatch(1)
+        val scope = CoroutineScope(SupervisorJob())
+        var n = 0
+        val holder = CoreHolder(
+            { if (++n == 1) BlockingShutdownCore(gate) else FakeCoreApi() },
+            scope, Dispatchers.IO, shutdownTimeoutMillis = 5_000,
+        )
+        holder.acquire("ui")
+        holder.release("ui") // 旧实例的 shutdown 阻塞着，占住 lifecycle 锁
+        val waiting = launch(Dispatchers.Default) { holder.acquire("worker") }
+        withTimeout(2_000) { holder.owners.first { "worker" in it } }
+        waiting.cancelAndJoin()
+        assertEquals(emptySet<String>(), holder.owners.value)
+        gate.countDown()
+        holder.acquire("ui") // 锁放开后可以正常创建，随后能 shutdown
+        holder.release("ui")
+        withTimeout(2_000) { while (holder.running.value) delay(10) }
+        scope.cancel()
+    }
+
+    @Test fun shutdown_that_hangs_times_out_and_lets_next_acquire_proceed() = runBlocking {
+        val gate = CountDownLatch(1)
+        val scope = CoroutineScope(SupervisorJob())
+        var n = 0
+        val holder = CoreHolder(
+            { if (++n == 1) BlockingShutdownCore(gate) else FakeCoreApi() },
+            scope, Dispatchers.IO, shutdownTimeoutMillis = 200,
+        )
+        holder.acquire("ui")
+        holder.release("ui")
+        withTimeout(3_000) { holder.acquire("ui") }
+        assertEquals(2, n)
+        gate.countDown()
+        scope.cancel()
     }
 
     @Test fun proxy_does_not_add_ui_owner_when_core_already_running() = runTest {

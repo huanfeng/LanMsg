@@ -57,7 +57,10 @@ object ServiceLocator {
     val deviceConditions: DeviceConditions by lazy { DeviceConditions(app, localPrefs, appScope) }
 
     val backgroundController: BackgroundController by lazy {
-        BackgroundController(coreHolder, deviceConditions.conditions, appScope, SystemServiceActions(app))
+        BackgroundController(
+            coreHolder, deviceConditions.conditions, appScope, SystemServiceActions(app),
+            onModeSeen = localPrefs::setLastBackgroundMode,
+        )
     }
 
     /** 应用专属外部下载目录下的 LanMsg 子目录（无需存储权限）；外部存储不可用时返回 null。在 IO 线程调用。 */

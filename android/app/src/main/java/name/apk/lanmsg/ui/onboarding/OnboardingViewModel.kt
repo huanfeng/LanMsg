@@ -2,6 +2,7 @@ package name.apk.lanmsg.ui.onboarding
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -67,9 +68,15 @@ class OnboardingViewModel(
                 val device = s.deviceName.trim().ifEmpty { defaultDeviceName }
                 core.call<Response.Ok>(Request.Init(s.displayName.trim(), device, mode))
                 onInitialized()
-                _state.update { it.copy(busy = false, done = destination) }
+                _state.update { it.copy(done = destination) }
             } catch (e: ApiException) {
-                _state.update { it.copy(busy = false, error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = e.message ?: e.code.name) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(error = e.message ?: e.javaClass.simpleName) }
+            } finally {
+                _state.update { it.copy(busy = false) }
             }
         }
     }

@@ -25,8 +25,16 @@ class BackgroundControllerTest {
         val service = mutableListOf<Boolean>()
         val worker = mutableListOf<Boolean>()
 
-        override fun setServiceRunning(run: Boolean) {
+        /** 前 N 次启动请求被系统拒绝（返回 false）。 */
+        var rejectStarts = 0
+
+        override fun setServiceRunning(run: Boolean): Boolean {
             service += run
+            if (run && rejectStarts > 0) {
+                rejectStarts--
+                return false
+            }
+            return true
         }
 
         override fun setWorkerScheduled(scheduled: Boolean) {
@@ -83,5 +91,40 @@ class BackgroundControllerTest {
         runCurrent()
         // 服务没有真正起来（测试里没有 LanMsgService）：等待超时后控制器放手，core 随之关闭
         assertEquals(1, fake.shutdownCount)
+    }
+
+    @Test fun rejected_start_is_retried_only_when_app_becomes_visible() = runTest {
+        val actions = RecordingActions().apply { rejectStarts = 1 }
+        val holder = CoreHolder({ FakeCoreApi() }, backgroundScope, StandardTestDispatcher(testScheduler))
+        val cond = MutableStateFlow(Conditions(false, false, false, false))
+        BackgroundController(holder, cond, backgroundScope, actions).start()
+        runCurrent()
+        holder.onBackgroundModeChanged(BackgroundMode.REALTIME)
+        runCurrent()
+        assertEquals(listOf(true), actions.service) // 后台启动被拒
+        cond.value = cond.value.copy(charging = true)
+        runCurrent()
+        assertEquals(listOf(true), actions.service) // 仍在后台：不重试
+        cond.value = cond.value.copy(appVisible = true)
+        runCurrent()
+        assertEquals(listOf(true, true), actions.service) // 回到前台：重试成功
+        cond.value = cond.value.copy(screenOn = true)
+        runCurrent()
+        assertEquals(listOf(true, true), actions.service)
+    }
+
+    @Test fun mode_seen_callback_receives_each_mode() = runTest {
+        val seen = mutableListOf<BackgroundMode>()
+        val holder = CoreHolder({ FakeCoreApi() }, backgroundScope, StandardTestDispatcher(testScheduler))
+        BackgroundController(
+            holder, MutableStateFlow(Conditions(false, false, false, false)), backgroundScope, RecordingActions(),
+            onModeSeen = { seen += it },
+        ).start()
+        runCurrent()
+        holder.onBackgroundModeChanged(BackgroundMode.OFF)
+        runCurrent()
+        holder.onBackgroundModeChanged(BackgroundMode.REALTIME)
+        runCurrent()
+        assertEquals(listOf(BackgroundMode.OFF, BackgroundMode.REALTIME), seen)
     }
 }

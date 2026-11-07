@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -14,7 +15,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.shareIn
@@ -23,7 +26,9 @@ import kotlinx.coroutines.plus
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import uniffi.lanmsg_api.BackgroundMode
+import uniffi.lanmsg_api.ErrorCode
 import uniffi.lanmsg_api.Event
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
@@ -42,6 +47,8 @@ class CoreHolder(
     private val scope: CoroutineScope,
     private val io: CoroutineDispatcher,
     private val downloadDir: () -> String? = { null },
+    /** 关闭旧实例最多等多久，超时只记日志放行。 */
+    private val shutdownTimeoutMillis: Long = 10_000,
 ) {
     /** 保护 [ownerSet] 与 [instance] 的写入；只做内存操作，持锁期间不挂起、不阻塞。 */
     private val lock = Any()
@@ -64,14 +71,27 @@ class CoreHolder(
     val backgroundMode: StateFlow<BackgroundMode?> = _mode.asStateFlow()
 
     /**
-     * 给 ViewModel 用的代理：请求发往当前实例；没有实例时才以 "ui" 身份创建。
+     * 给 ViewModel 用的代理：请求发往当前实例。代理自己绝不创建 core、也不登记 owner：
+     * 没有实例时，只有 "ui" 已登记（MainActivity 可见、实例正在创建）才等待实例出现；否则抛 [ApiException]。
+     * 旧实例被关闭时底层抛出的非 [ApiException] 异常统一转成 [ApiException]。
      * events/lagged 随实例切换（flatMapLatest）；订阅用 Unconfined，实例一发布就接上，尽量不丢事件。
      * 新实例（非首个）出现时额外发一次 lagged，让界面全量重拉。shutdown 对代理是空操作。
      */
     val api: CoreApi = object : CoreApi {
         private val sharing = scope + Dispatchers.Unconfined
 
-        override suspend fun request(req: Request): Response = (instance.value ?: acquire(UI)).request(req)
+        override suspend fun request(req: Request): Response {
+            val core = instance.value ?: awaitInstanceForUi()
+            try {
+                return core.request(req)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ApiException) {
+                throw e
+            } catch (e: Exception) {
+                throw ApiException(ErrorCode.INTERNAL, "Core request failed: ${e.message ?: e.javaClass.simpleName}")
+            }
+        }
 
         override val events: SharedFlow<Event> = instance
             .flatMapLatest { it?.events ?: emptyFlow() }
@@ -90,7 +110,8 @@ class CoreHolder(
 
     /**
      * 登记 [owner] 并返回实例，首次在 [io] 上创建；并发调用只创建一次，同一 owner 重复调用不重复计数。
-     * owner 在创建完成前就被 [release] 掉时，丢弃刚创建的实例并抛 [CancellationException]。
+     * owner 在创建完成前就被 [release] 掉时，丢弃刚创建的实例并抛 [CancellationException]；
+     * 等待中被取消或创建失败时 owner 会被回收。
      */
     suspend fun acquire(owner: String): CoreApi {
         synchronized(lock) {
@@ -98,18 +119,26 @@ class CoreHolder(
             _owners.value = ownerSet.toSet()
             instance.value?.let { return it }
         }
+        try {
+            return createAsOwner(owner)
+        } catch (e: ReleasedBeforeStart) {
+            throw e
+        } catch (e: Throwable) {
+            // 等锁时被取消、或创建失败：回收 owner，否则它会永久占住 core
+            synchronized(lock) {
+                if (ownerSet.remove(owner)) _owners.value = ownerSet.toSet()
+            }
+            throw e
+        }
+    }
+
+    /** owner 在实例创建完成前就被 [release] 掉；此时 owner 已不在集合里，无需回收。 */
+    private class ReleasedBeforeStart : CancellationException("Released before the core finished starting")
+
+    private suspend fun createAsOwner(owner: String): CoreApi {
         return lifecycle.withLock {
             instance.value?.let { return it }
-            val created = try {
-                // 创建不可中断：半途取消会留下无人关闭的实例
-                withContext(io + NonCancellable) { factory().also { applyDownloadDir(it) } }
-            } catch (e: Throwable) {
-                synchronized(lock) {
-                    ownerSet -= owner
-                    _owners.value = ownerSet.toSet()
-                }
-                throw e
-            }
+            val created = withContext(io + NonCancellable) { factory().also { applyDownloadDir(it) } } // 创建不可中断：半途取消会留下无人关闭的实例
             val publish = synchronized(lock) {
                 (ownerSet.isNotEmpty()).also {
                     if (it) {
@@ -120,10 +149,17 @@ class CoreHolder(
             }
             if (!publish) {
                 withContext(io + NonCancellable) { shutdownQuietly(created) }
-                throw CancellationException("Released before the core finished starting")
+                throw ReleasedBeforeStart()
             }
             created
         }
+    }
+
+    /** 代理用：无实例时，仅当 "ui" 已登记才等待实例出现；"ui" 被放手或从未登记则报错。 */
+    private suspend fun awaitInstanceForUi(): CoreApi {
+        val (core, _) = combine(instance, _owners) { i, o -> i to o }
+            .first { (i, o) -> i != null || UI !in o }
+        return core ?: throw ApiException(ErrorCode.INTERNAL, "core not running")
     }
 
     /** 放手 [owner]；集合归零时丢弃实例并在 [io] 上关闭。关闭完成前，新的 [acquire] 会等待。 */
@@ -186,11 +222,14 @@ class CoreHolder(
         }
     }
 
-    private fun shutdownQuietly(core: CoreApi) {
+    /** 关闭 [core]；最多等 [shutdownTimeoutMillis]，超时只记日志放行，避免后续 acquire 永远等待。 */
+    private suspend fun shutdownQuietly(core: CoreApi) {
+        // shutdown 是阻塞调用，withTimeout 打断不了它；放到独立任务里，超时后丢下不管
+        val job = scope.async(io) { core.shutdown() }
         try {
-            core.shutdown()
+            withTimeout(shutdownTimeoutMillis) { job.await() }
         } catch (e: Exception) {
-            Log.w(TAG, "Core shutdown failed", e)
+            Log.w(TAG, "Core shutdown failed or timed out", e)
         }
     }
 

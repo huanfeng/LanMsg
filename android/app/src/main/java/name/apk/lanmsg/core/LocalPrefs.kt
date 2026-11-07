@@ -3,10 +3,12 @@ package name.apk.lanmsg.core
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import uniffi.lanmsg_api.BackgroundMode
 
 private val Context.dataStore by preferencesDataStore(name = "lanmsg_local")
 
@@ -30,8 +32,15 @@ interface SettingsPrefs {
     suspend fun setTrustedWifi(ssids: Set<String>)
 }
 
+/** 上次已知的后台档位，开机时服务启动前来不及读 core，先靠它决定是否立即拉起服务。 */
+interface BackgroundModePrefs {
+    val lastBackgroundMode: Flow<BackgroundMode?>
+
+    suspend fun setLastBackgroundMode(mode: BackgroundMode)
+}
+
 /** 只属于本机、不进 core 的偏好（免打扰、相册保存、可信 Wi-Fi、通知开关）。 */
-class LocalPrefs(ctx: Context) : MutedStore, SettingsPrefs {
+class LocalPrefs(ctx: Context) : MutedStore, SettingsPrefs, BackgroundModePrefs {
     private val store = ctx.applicationContext.dataStore
 
     override val mutedConversations: Flow<Set<String>> = store.data.map { it[MUTED] ?: emptySet() }
@@ -61,7 +70,16 @@ class LocalPrefs(ctx: Context) : MutedStore, SettingsPrefs {
         store.edit { it[NOTIFY] = v }
     }
 
+    override val lastBackgroundMode: Flow<BackgroundMode?> = store.data.map { p ->
+        p[LAST_MODE]?.let { name -> BackgroundMode.entries.firstOrNull { it.name == name } }
+    }
+
+    override suspend fun setLastBackgroundMode(mode: BackgroundMode) {
+        store.edit { it[LAST_MODE] = mode.name }
+    }
+
     private companion object {
+        val LAST_MODE = stringPreferencesKey("last_background_mode")
         val MUTED = stringSetPreferencesKey("muted_conversations")
         val SAVE_GALLERY = booleanPreferencesKey("save_media_to_gallery")
         val TRUSTED_WIFI = stringSetPreferencesKey("trusted_wifi")

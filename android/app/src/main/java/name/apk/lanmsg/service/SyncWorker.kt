@@ -11,8 +11,8 @@ import name.apk.lanmsg.core.CoreHolder
 class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
         val holder = ServiceLocator.coreHolder
-        holder.acquire(CoreHolder.WORKER)
         try {
+            holder.acquire(CoreHolder.WORKER)
             delay(HOLD_MILLIS)
         } finally {
             holder.release(CoreHolder.WORKER)
