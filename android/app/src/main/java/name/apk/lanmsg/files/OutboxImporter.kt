@@ -18,6 +18,13 @@ interface Importer {
     suspend fun import(uris: List<Uri>): List<String>
 }
 
+/** 设置页清理发件箱副本用的窄接口，便于 ViewModel 测试注入内存实现。 */
+interface OutboxStore {
+    fun outboxSizeBytes(): Long
+
+    fun clear()
+}
+
 /**
  * 发件箱：把 content:// URI 复制到 `outbox/<yyyyMMdd>/` 下的普通文件。
  * 文件名来自外部应用，不可信：先 [sanitize]，写入前再断言目标路径位于 outboxRoot 之内。
@@ -25,7 +32,7 @@ interface Importer {
 class OutboxImporter(
     private val ctx: Context,
     private val outboxRoot: File = File(ctx.filesDir, "outbox"),
-) : Importer {
+) : Importer, OutboxStore {
     /** 返回落地后的绝对路径，顺序与输入一致；失败的 URI 跳过并记日志。 */
     override suspend fun import(uris: List<Uri>): List<String> = withContext(Dispatchers.IO) {
         val root = outboxRoot.canonicalFile
@@ -84,10 +91,10 @@ class OutboxImporter(
         }
     }
 
-    fun outboxSizeBytes(): Long = outboxRoot.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+    override fun outboxSizeBytes(): Long = outboxRoot.walkTopDown().filter { it.isFile }.sumOf { it.length() }
 
     /** 设置页「清理已分享文件的副本」。 */
-    fun clear() {
+    override fun clear() {
         outboxRoot.deleteRecursively()
     }
 

@@ -2,11 +2,13 @@ package name.apk.lanmsg
 
 import android.app.Application
 import android.content.Context
+import android.util.Log
 import name.apk.lanmsg.core.CoreApi
 import name.apk.lanmsg.core.FfiCoreApi
 import name.apk.lanmsg.core.LocalPrefs
 import name.apk.lanmsg.files.MediaStoreSaver
 import name.apk.lanmsg.files.OutboxImporter
+import uniffi.lanmsg_api.BackgroundMode
 
 object ServiceLocator {
     lateinit var app: Application
@@ -34,4 +36,10 @@ object ServiceLocator {
     val importer: OutboxImporter by lazy { OutboxImporter(app) }
 
     val mediaSaver: MediaStoreSaver by lazy { MediaStoreSaver(app) }
+
+    /**
+     * 后台模式变化后通知服务重新评估。Task 11 由 CoreHolder.onBackgroundModeChanged 替换，
+     * 在此之前只记日志。
+     */
+    var backgroundModeListener: (BackgroundMode) -> Unit = { Log.i("ServiceLocator", "Background mode changed: $it") }
 }

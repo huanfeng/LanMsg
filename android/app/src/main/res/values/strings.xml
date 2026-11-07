@@ -58,6 +58,7 @@
     <string name="files_search_hint">搜索文件名</string>
     <string name="files_empty">还没有收发过文件</string>
     <string name="contacts_requests">新的请求 (%1$d)</string>
+    <string name="requests_title">新的请求</string>
     <string name="contacts_nearby">附近的人</string>
     <string name="contacts_add">添加</string>
     <string name="contacts_empty">还没有联系人</string>
@@ -115,10 +116,16 @@
     <string name="settings_trusted_wifi">信任的 Wi-Fi</string>
     <string name="settings_trusted_wifi_add">添加当前 Wi-Fi</string>
     <string name="settings_trusted_wifi_need_location">读取 Wi-Fi 名称需要位置权限</string>
+    <string name="settings_trusted_wifi_not_connected">当前没有连接 Wi-Fi</string>
+    <string name="settings_trusted_wifi_remove">移除 %1$s</string>
     <string name="settings_notifications">消息通知</string>
     <string name="settings_save_gallery">收到的图片和视频保存到相册</string>
     <string name="settings_battery">允许后台运行</string>
     <string name="settings_battery_desc">在系统电池优化中将 LanMsg 设为“不优化”，避免后台连接被中断</string>
+    <string name="settings_clear_outbox">清理已分享文件的副本</string>
+    <string name="settings_clear_outbox_desc">副本占用 %1$s</string>
+    <string name="settings_clear_outbox_confirm">将删除 LanMsg 为分享而保存的文件副本，原文件不受影响。</string>
+    <string name="settings_clear_outbox_action">清理副本</string>
     <string name="share_pick_title">发送到</string>
     <string name="share_empty">没有可用的会话</string>
     <string name="share_need_setup">请先完成初始化，再分享文件</string>

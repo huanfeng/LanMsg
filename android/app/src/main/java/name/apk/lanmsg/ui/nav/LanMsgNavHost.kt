@@ -37,12 +37,17 @@ import androidx.navigation.navArgument
 import name.apk.lanmsg.R
 import name.apk.lanmsg.ui.chat.ChatScreen
 import name.apk.lanmsg.ui.chat.ImageViewerScreen
+import name.apk.lanmsg.ui.contacts.ContactDetailScreen
+import name.apk.lanmsg.ui.contacts.ContactsScreen
+import name.apk.lanmsg.ui.contacts.RequestsScreen
 import name.apk.lanmsg.ui.convs.ConversationListScreen
 import name.apk.lanmsg.ui.files.FilesScreen
 import name.apk.lanmsg.ui.forward.ForwardPickScreen
+import name.apk.lanmsg.ui.me.MeScreen
 import name.apk.lanmsg.ui.onboarding.OnboardingScreen
 import name.apk.lanmsg.ui.onboarding.OnboardingViewModel
 import name.apk.lanmsg.ui.search.SearchScreen
+import name.apk.lanmsg.ui.settings.SettingsScreen
 import name.apk.lanmsg.ui.share.SharePickScreen
 import name.apk.lanmsg.ui.share.SharePickViewModel
 import name.apk.lanmsg.ui.theme.LanMsgColors
@@ -132,13 +137,21 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                     onForward = { nav.navigate(Routes.forward(it)) },
                 )
             }
-            composable(Routes.CONTACTS) { Placeholder(Routes.CONTACTS) }
-            composable(Routes.REQUESTS) { Placeholder(Routes.REQUESTS) }
-            composable(Routes.ME) { Placeholder(Routes.ME) }
+            composable(Routes.CONTACTS) {
+                ContactsScreen(
+                    onOpenRequests = { nav.navigate(Routes.REQUESTS) },
+                    onOpenContact = { nav.navigate(Routes.contact(it)) },
+                    onAddDevice = { nav.navigate(Routes.DEVICES) },
+                )
+            }
+            composable(Routes.REQUESTS) { RequestsScreen(onBack = { nav.popBackStack() }) }
+            composable(Routes.ME) {
+                MeScreen(onOpenDevices = { nav.navigate(Routes.DEVICES) }, onOpenSettings = { nav.navigate(Routes.SETTINGS) })
+            }
             composable(Routes.DEVICES) { Placeholder(Routes.DEVICES) }
             composable(Routes.PAIR_HOST) { Placeholder(Routes.PAIR_HOST) }
             composable(Routes.PAIR_JOIN) { Placeholder(Routes.PAIR_JOIN) }
-            composable(Routes.SETTINGS) { Placeholder(Routes.SETTINGS) }
+            composable(Routes.SETTINGS) { SettingsScreen(onBack = { nav.popBackStack() }) }
             composable(Routes.SHARE) {
                 val vm = shareVm()
                 SharePickScreen(
@@ -189,7 +202,14 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                 val hash = entry.arguments?.getString("hash") ?: return@composable
                 ImageViewerScreen(conv, hash, onBack = { nav.popBackStack() })
             }
-            composable(Routes.CONTACT) { Placeholder(Routes.CONTACT) }
+            composable(Routes.CONTACT, arguments = listOf(navArgument("user") { type = NavType.StringType })) { entry ->
+                val user = entry.arguments?.getString("user") ?: return@composable
+                ContactDetailScreen(
+                    user = user,
+                    onBack = { nav.popBackStack() },
+                    onOpenChat = { nav.navigate(Routes.chat(it)) },
+                )
+            }
         }
     }
 }

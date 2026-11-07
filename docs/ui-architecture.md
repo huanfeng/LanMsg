@@ -73,7 +73,7 @@
 | 我的设备 | `devices: [DeviceView]` | `ListMyDevices` | `DevicesChanged` → 重拉 | 「添加我的设备」→ `pair/host`；「加入其他设备」→ `pair/join`；非本机设备长按 → 「移除此设备」→ 确认对话框 → `RemoveDevice` |
 | 配对主持 | `method`(Qr/Sas)、`session`、`qrUri`、`state: PairStateDto` | `PairStart{Qr}` | `PairStatus`(session 相同) → 更新 state | 显示二维码；「改用数字比对」→ `PairCancel` + `PairStart{Sas}`；`ShowSas` 时显示 6 位数字和「一致」「不一致」→ `PairConfirm{matches}`；离开页面 → `PairCancel`；`Done` → 提示 `toast_pair_done` 并返回 |
 | 配对加入 | `mode`(扫码/选设备)、`candidates: [PeerView]`、`session`、`state`、`cameraGranted` | `ListPeers`（选设备模式） | `PairStatus`；`PeerOnline/Offline` → 重拉候选 | 扫到 `lanmsg://pair?…` → `PairJoin{QrUri{uri}}`；选设备 → `PairJoin{Device{device}}`；`ShowSas` → 「一致/不一致」→ `PairConfirm`；无相机权限 → 显示 `pair_need_camera` 与按钮「改用数字比对」（切到选设备模式） |
-| 设置 | `settings: SettingsDto`、本机项（通知开关、保存到相册、信任的 Wi-Fi） | `GetSettings` | — | 设备名、图片/文件自动下载上限（下拉：关闭/5MB/10MB/50MB/100MB/不限）、仅 Wi-Fi 下自动下载文件、LocalSend 兼容、后台模式（实时/省电/关闭）→ `SetSettings`（整体回写）；本机项直接存本地；「允许后台运行」→ 打开系统电池优化设置 |
+| 设置 | `settings: SettingsDto`、本机项（通知开关、保存到相册、信任的 Wi-Fi） | `GetSettings` | — | 设备名、图片/文件自动下载上限（下拉：关闭/5MB/10MB/50MB/100MB/不限）、仅 Wi-Fi 下自动下载文件、LocalSend 兼容、后台模式（实时/省电/关闭）→ `SetSettings`（整体回写）；本机项直接存本地；「允许后台运行」→ 打开系统电池优化设置；「清理已分享文件的副本」→ 确认对话框 → 删除发件箱副本；「添加当前 Wi-Fi」运行时申请位置权限，拒绝显示 `settings_trusted_wifi_need_location` |
 | 选择会话 | `items: [ConversationSummary]`、`pending: [本地文件路径]` | `ListConversations` | — | 点会话 → `SendFiles{conv, pending}` → `chat/{conv}` |
 | 搜索 | `query`、`results: [MessageView]`、`loading`、`error` | —（输入后 300ms 防抖发 `SearchMessages{query, conv=null, limit=50}`；空白查询清空结果、不发请求） | — | 点结果 → `chat/{conv}`；结果行显示会话标题（来自 `ListConversations` 缓存）、作者设备名、时间、文字片段；无结果 → `search_empty`；core 未实现 → `err_core_outdated` |
 | 转发选择会话 | `items: [ConversationSummary]`、`hashes` | `ListConversations` | — | 点会话 → `ForwardFiles{conv, hashes}` → 提示 `toast_forwarded` → `chat/{conv}`；core 未实现 → `err_core_outdated` |
@@ -185,6 +185,7 @@
 | files_search_hint | 搜索文件名 |
 | files_empty | 还没有收发过文件 |
 | contacts_requests | 新的请求 (%1$d) |
+| requests_title | 新的请求 |
 | contacts_nearby | 附近的人 |
 | contacts_add | 添加 |
 | contacts_empty | 还没有联系人 |
@@ -242,10 +243,16 @@
 | settings_trusted_wifi | 信任的 Wi-Fi |
 | settings_trusted_wifi_add | 添加当前 Wi-Fi |
 | settings_trusted_wifi_need_location | 读取 Wi-Fi 名称需要位置权限 |
+| settings_trusted_wifi_not_connected | 当前没有连接 Wi-Fi |
+| settings_trusted_wifi_remove | 移除 %1$s |
 | settings_notifications | 消息通知 |
 | settings_save_gallery | 收到的图片和视频保存到相册 |
 | settings_battery | 允许后台运行 |
 | settings_battery_desc | 在系统电池优化中将 LanMsg 设为“不优化”，避免后台连接被中断 |
+| settings_clear_outbox | 清理已分享文件的副本 |
+| settings_clear_outbox_desc | 副本占用 %1$s |
+| settings_clear_outbox_confirm | 将删除 LanMsg 为分享而保存的文件副本，原文件不受影响。 |
+| settings_clear_outbox_action | 清理副本 |
 | share_pick_title | 发送到 |
 | share_empty | 没有可用的会话 |
 | share_need_setup | 请先完成初始化，再分享文件 |
