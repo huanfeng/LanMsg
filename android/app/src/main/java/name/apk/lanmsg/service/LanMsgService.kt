@@ -1,8 +1,6 @@
 package name.apk.lanmsg.service
 
 import android.annotation.SuppressLint
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -21,6 +19,7 @@ import name.apk.lanmsg.MainActivity
 import name.apk.lanmsg.R
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.core.CoreHolder
+import name.apk.lanmsg.notify.NotificationChannels
 
 /** 常驻前台服务（specialUse）：持有 core 与 MulticastLock，保证后台也能收到局域网消息。 */
 class LanMsgService : LifecycleService() {
@@ -71,16 +70,13 @@ class LanMsgService : LifecycleService() {
     }
 
     private fun buildNotification(): android.app.Notification {
-        val nm = getSystemService(NotificationManager::class.java)
-        // 渠道统一由 Task 12 的 NotificationChannels 收编；这里先保证服务单独可用
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_SERVICE, getString(R.string.notif_channel_service), NotificationManager.IMPORTANCE_LOW),
-        )
+        // 服务可能先于 Application 之外的入口启动，自己保证渠道存在
+        NotificationChannels.ensure(this)
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        return NotificationCompat.Builder(this, CHANNEL_SERVICE)
+        return NotificationCompat.Builder(this, NotificationChannels.SERVICE)
             .setSmallIcon(R.drawable.ic_stat_lanmsg)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(getString(R.string.notif_service_text))
@@ -94,6 +90,5 @@ class LanMsgService : LifecycleService() {
     companion object {
         private const val TAG = "LanMsgService"
         const val NOTIF_ID_SERVICE = 1
-        const val CHANNEL_SERVICE = "service"
     }
 }

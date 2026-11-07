@@ -14,9 +14,9 @@ import java.io.File
 import java.io.IOException
 
 /** 把已下载的图片/视频保存到系统相册（图片 Pictures/LanMsg，视频 Movies/LanMsg）。 */
-class MediaStoreSaver(private val ctx: Context) {
+open class MediaStoreSaver(private val ctx: Context) {
     /** 成功返回新条目的 Uri；mime 不是图片/视频或写入失败返回 null。 */
-    suspend fun saveToGallery(localPath: String, mime: String, displayName: String): Uri? = withContext(Dispatchers.IO) {
+    open suspend fun saveToGallery(localPath: String, mime: String, displayName: String): Uri? = withContext(Dispatchers.IO) {
         val isImage = mime.startsWith("image/")
         if (!isImage && !mime.startsWith("video/")) return@withContext null
         val src = File(localPath)

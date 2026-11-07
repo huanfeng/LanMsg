@@ -1,8 +1,13 @@
 package name.apk.lanmsg
 
+import android.Manifest
 import android.app.Application
+import android.app.NotificationManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Environment
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -12,6 +17,7 @@ import name.apk.lanmsg.core.FfiCoreApi
 import name.apk.lanmsg.core.LocalPrefs
 import name.apk.lanmsg.files.MediaStoreSaver
 import name.apk.lanmsg.files.OutboxImporter
+import name.apk.lanmsg.notify.Notifier
 import name.apk.lanmsg.service.BackgroundController
 import name.apk.lanmsg.service.DeviceConditions
 import name.apk.lanmsg.service.SystemServiceActions
@@ -60,6 +66,18 @@ object ServiceLocator {
         BackgroundController(
             coreHolder, deviceConditions.conditions, appScope, SystemServiceActions(app),
             onModeSeen = localPrefs::setLastBackgroundMode,
+        )
+    }
+
+    val notifier: Notifier by lazy {
+        Notifier(
+            app, coreHolder, localPrefs, mediaSaver,
+            permissionGranted = {
+                (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                    ContextCompat.checkSelfPermission(app, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) &&
+                    app.getSystemService(NotificationManager::class.java).areNotificationsEnabled()
+            },
+            scope = appScope,
         )
     }
 

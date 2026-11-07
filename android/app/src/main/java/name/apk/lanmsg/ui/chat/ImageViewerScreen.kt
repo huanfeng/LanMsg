@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,6 +52,7 @@ import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.core.ApiException
 import name.apk.lanmsg.core.CoreApi
 import name.apk.lanmsg.core.call
+import name.apk.lanmsg.notify.VisibleConversation
 import name.apk.lanmsg.ui.common.EmptyState
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import name.apk.lanmsg.ui.theme.LanMsgControls
@@ -134,6 +136,11 @@ fun ImageViewerScreen(conv: String, hash: String, onBack: () -> Unit) {
         factory = viewModelFactory { initializer { ImageViewerViewModel(ServiceLocator.coreHolder.api, conv, hash) } },
     )
     val state by vm.state.collectAsStateWithLifecycle()
+    // 看图期间聊天页已被移出组合并清掉“正在看的会话”，这里补登记，避免本会话来消息时弹通知
+    DisposableEffect(conv) {
+        VisibleConversation.pin(conv)
+        onDispose { VisibleConversation.unpin(conv) }
+    }
     val scope = rememberCoroutineScope()
     var saveResult by remember { mutableStateOf<Int?>(null) }
     ImageViewerContent(

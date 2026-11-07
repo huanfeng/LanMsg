@@ -32,6 +32,9 @@ interface SettingsPrefs {
     suspend fun setTrustedWifi(ssids: Set<String>)
 }
 
+/** Notifier 需要的本机偏好（免打扰、通知总开关、相册保存），便于测试注入内存实现。 */
+interface NotifierPrefs : MutedStore, SettingsPrefs
+
 /** 上次已知的后台档位，开机时服务启动前来不及读 core，先靠它决定是否立即拉起服务。 */
 interface BackgroundModePrefs {
     val lastBackgroundMode: Flow<BackgroundMode?>
@@ -40,7 +43,7 @@ interface BackgroundModePrefs {
 }
 
 /** 只属于本机、不进 core 的偏好（免打扰、相册保存、可信 Wi-Fi、通知开关）。 */
-class LocalPrefs(ctx: Context) : MutedStore, SettingsPrefs, BackgroundModePrefs {
+class LocalPrefs(ctx: Context) : NotifierPrefs, BackgroundModePrefs {
     private val store = ctx.applicationContext.dataStore
 
     override val mutedConversations: Flow<Set<String>> = store.data.map { it[MUTED] ?: emptySet() }
@@ -70,6 +73,13 @@ class LocalPrefs(ctx: Context) : MutedStore, SettingsPrefs, BackgroundModePrefs 
         store.edit { it[NOTIFY] = v }
     }
 
+    /** 是否已经弹过 POST_NOTIFICATIONS 权限框：只弹一次，拒绝后不再反复弹。 */
+    val notificationPermissionAsked: Flow<Boolean> = store.data.map { it[NOTIF_ASKED] ?: false }
+
+    suspend fun setNotificationPermissionAsked() {
+        store.edit { it[NOTIF_ASKED] = true }
+    }
+
     override val lastBackgroundMode: Flow<BackgroundMode?> = store.data.map { p ->
         p[LAST_MODE]?.let { name -> BackgroundMode.entries.firstOrNull { it.name == name } }
     }
@@ -84,5 +94,6 @@ class LocalPrefs(ctx: Context) : MutedStore, SettingsPrefs, BackgroundModePrefs 
         val SAVE_GALLERY = booleanPreferencesKey("save_media_to_gallery")
         val TRUSTED_WIFI = stringSetPreferencesKey("trusted_wifi")
         val NOTIFY = booleanPreferencesKey("notifications_enabled")
+        val NOTIF_ASKED = booleanPreferencesKey("notification_permission_asked")
     }
 }

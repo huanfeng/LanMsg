@@ -1,12 +1,17 @@
 package name.apk.lanmsg
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
@@ -28,17 +33,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import androidx.navigation.NavController
 import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -66,14 +74,23 @@ class MainActivity : ComponentActivity() {
     }
     private var incomingShare by mutableStateOf<ShareData?>(null)
 
+    /** 通知点击带来的待导航路由；Launcher 初始化完成后消费。 */
+    private var pendingRoute by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         // 旋转等重建时不重复处理同一个分享 intent
-        if (savedInstanceState == null) handleShare(intent)
+        if (savedInstanceState == null) {
+            handleShare(intent)
+            pendingRoute = intent.getStringExtra(EXTRA_ROUTE)
+        }
         setContent {
             LanMsgTheme {
-                Launcher(incomingShare, onShareConsumed = { incomingShare = null }, shareVm = { shareVm })
+                Launcher(
+                    incomingShare, onShareConsumed = { incomingShare = null }, shareVm = { shareVm },
+                    pendingRoute, onRouteConsumed = { pendingRoute = null },
+                )
             }
         }
     }
@@ -103,12 +120,18 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleShare(intent)
+        intent.getStringExtra(EXTRA_ROUTE)?.let { pendingRoute = it }
     }
 
     private fun handleShare(intent: Intent) {
         val uris = ShareIntentParser.parse(intent)
         val text = ShareText.extract(intent)
         if (uris.isNotEmpty() || text != null) incomingShare = ShareData(uris, text)
+    }
+
+    companion object {
+        /** 通知点击携带的目标路由（Routes 中的值）。 */
+        const val EXTRA_ROUTE = "route"
     }
 }
 
@@ -148,9 +171,31 @@ internal suspend fun fetchSelfWhileStarted(
     }
 }
 
+/** Android 13+：第一次进入主界面（会话列表）时申请通知权限，只问一次，拒绝后不再弹。 */
+@Composable
+private fun NotificationPermissionOnFirstMain(nav: NavController) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+    val ctx = LocalContext.current
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    LaunchedEffect(nav) {
+        nav.currentBackStackEntryFlow.first { it.destination.route == Routes.CONVS }
+        val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        if (!granted && !ServiceLocator.localPrefs.notificationPermissionAsked.first()) {
+            ServiceLocator.localPrefs.setNotificationPermissionAsked()
+            launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+}
+
 /** 据 [fetchSelf] 的结果选起始路由；等待期间只显示主题背景，失败显示错误并可重试。 */
 @Composable
-private fun Launcher(incoming: ShareData?, onShareConsumed: () -> Unit, shareVm: () -> SharePickViewModel) {
+private fun Launcher(
+    incoming: ShareData?,
+    onShareConsumed: () -> Unit,
+    shareVm: () -> SharePickViewModel,
+    deepLink: String?,
+    onRouteConsumed: () -> Unit,
+) {
     var start by remember { mutableStateOf<String?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
     var attempt by remember { mutableIntStateOf(0) }
@@ -181,6 +226,19 @@ private fun Launcher(incoming: ShareData?, onShareConsumed: () -> Unit, shareVm:
                     nav.navigate(Routes.SHARE) { launchSingleTop = true }
                 }
             }
+            LaunchedEffect(deepLink) {
+                val target = deepLink ?: return@LaunchedEffect
+                onRouteConsumed()
+                // 未初始化时没有可去的页面；路由来自外部 intent，无效时不能崩溃
+                if (route != Routes.ONBOARDING) {
+                    try {
+                        nav.navigate(target) { launchSingleTop = true }
+                    } catch (e: IllegalArgumentException) {
+                        Log.w("MainActivity", "Ignoring unknown route: $target", e)
+                    }
+                }
+            }
+            NotificationPermissionOnFirstMain(nav)
             LanMsgNavHost(nav, route, shareVm)
         }
         failure != null -> Box(Modifier.fillMaxSize().background(c.canvas).safeDrawingPadding().padding(24.dp)) {
