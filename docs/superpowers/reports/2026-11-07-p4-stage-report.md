@@ -102,3 +102,15 @@
 | 手机后台离线 | 重连只靠组播且仅小 ID 方拨号；熄屏组播被过滤 | 3a75fea（logcat 诊断）、b839522、9f31abe（WifiLock、电池优化/小米引导）、f99ce9b、5667a80、402f278（按已知地址主动重连，TLS 握手内校验身份） |
 
 **待用户决定**：对端系统消息是否计入未读；“已添加联系人”等系统消息是否同步到自己其他设备；配对残余项（并发 Begin 检查非原子、确认不带数字）是否做第 4 轮；无效撤回后状态回退为“已发送”。
+
+## 8. P4 后清理（英文日志与错误、界面本地化、结构化文本）
+
+计划 `docs/superpowers/plans/2026-11-07-p4-cleanup-i18n.md`，8 个任务逐个独立审阅（Task 1/2/5/6/7 各两轮），总审结论"可以发布测试包"。提交 `fcc06b7..b32f813`。
+
+- 错误：`ErrorCode::Unimplemented`；两端按 ErrorCode / `TransferFailReason` / `PairFailReason` 取本地化文案（穷尽、无通配），界面不再显示 core 文本。
+- 结构化：`SystemEventView`、SelfDevices 标题、`RequestPreviewView`、文件来源字段（`source_name`/`source_is_me`/`holder_name`）、`FileView.conv_kind`。
+- 新接口：`Request::DeliveredLocalPaths`；连接建立后补发 BlobHave；Android"清理已送达或 7 天前的副本"。
+- 配对二维码去掉链路本地地址。
+- 守卫：`scripts/check-no-cjk.py`（含 `--self-test`）；CLI/lanmsgd 命令行输出英文，托盘与通知文案集中在 `crates/lanmsgd/src/strings.rs`。
+- 总审亲自运行：fmt、clippy、`cargo test --workspace`、check-no-cjk、e2e-acceptance（新二进制）ACCEPTANCE OK、e2e-two-daemons E2E OK、Android 326 测试 0 失败、lint 无 error、文案 225 键零差异、Windows 交叉编译与 clippy。
+- 行为变化：自设备会话的下载目录名由"我的设备"改为 `My devices`（旧文件不移动）。
