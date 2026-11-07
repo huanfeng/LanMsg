@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <!-- 只暴露需要给外部 App 打开的子目录：core 默认下载目录（data_dir/downloads，见 settings.rs default_settings）
-         与发件箱副本；lanmsg/ 其余部分（数据库等）与 keys/ 不对外 -->
+         、Android 下载目录与发件箱副本；lanmsg/ 其余部分（数据库等）与 keys/ 不对外 -->
     <files-path name="downloads_core" path="lanmsg/downloads/" />
     <files-path name="outbox" path="outbox/" />
+    <!-- Android 实际下载目录：计划「契约对齐」第 7 条，CoreHolder.ensureDownloadDir（Task 11）把 download_dir
+         设为 getExternalFilesDir(DIRECTORY_DOWNLOADS)/LanMsg -->
+    <external-files-path name="downloads" path="Download/LanMsg/" />
 </paths>
