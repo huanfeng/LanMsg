@@ -9,6 +9,7 @@ use crate::model::{pair_link_ok, PairUi};
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
+use crate::views::devices::device_type_label;
 
 /// 二维码边长（逻辑像素）。
 const QR_SIZE: u32 = 220;
@@ -57,6 +58,16 @@ pub fn format_sas(code: &str) -> String {
     } else {
         code.to_string()
     }
+}
+
+/// 数字确认页的对端说明：`对方：名称（类型 · 指纹 xxx）`，让用户知道去哪台设备核对。
+pub fn sas_peer_line(name: &str, device_type: &str, short: &str) -> String {
+    format!(
+        "{}：{name}（{} · {} {short}）",
+        strings::PAIR_SAS_PEER,
+        device_type_label(device_type),
+        strings::CONTACT_FINGERPRINT,
+    )
 }
 
 /// 对话框宿主，放在页面最上层（向导与主界面共用）；随配对界面开关重建。
@@ -160,9 +171,22 @@ fn showing(qr_uri: Option<&str>, state: &PairStateDto) -> Element {
                         .max_lines(4),
                 ),
         },
-        PairStateDto::ShowSas { code } => col
-            .child(muted(strings::PAIR_SAS_HINT))
-            .child(sas_digits(&format_sas(code))),
+        PairStateDto::ShowSas {
+            code,
+            peer_name,
+            peer_type,
+            peer_short,
+        } => col
+            .child(
+                Element::label(sas_peer_line(peer_name, peer_type, peer_short))
+                    .font_size(style::FONT_HEADING)
+                    .font_weight(style::WEIGHT_STRONG)
+                    .fg_role(Role::Text)
+                    .max_lines(2),
+            )
+            .child(muted(strings::PAIR_SAS_GO))
+            .child(sas_digits(&format_sas(code)))
+            .child(muted(strings::PAIR_SAS_HINT)),
         PairStateDto::Verifying => col.child(muted(strings::PAIR_VERIFYING)),
         PairStateDto::Done => col.child(
             Element::label(strings::PAIR_DONE)
@@ -436,6 +460,14 @@ mod tests {
         let (w, h, px) = qr_rgba(&"x".repeat(5000), 200);
         assert_eq!((w, h), (200, 200));
         assert!(px.iter().all(|b| *b == 255));
+    }
+
+    #[test]
+    fn sas_peer_line_names_the_device_and_fingerprint() {
+        assert_eq!(
+            sas_peer_line("我的手机", "phone", "a1b2c3d4"),
+            "对方：我的手机（手机 · 指纹 a1b2c3d4）"
+        );
     }
 
     #[test]

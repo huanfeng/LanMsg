@@ -557,10 +557,19 @@ pub struct PairSessionInfo {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum PairStateDto {
     WaitingPeer,
-    ShowSas { code: String },
+    /// 数字比对：`peer_*` 是对端设备的名称、类型（小写，如 phone）与指纹（device_short），
+    /// 供界面提示“请到该设备上核对”。
+    ShowSas {
+        code: String,
+        peer_name: String,
+        peer_type: String,
+        peer_short: String,
+    },
     Verifying,
     Done,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 /// 文件种类过滤。

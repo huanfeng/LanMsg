@@ -378,6 +378,12 @@ impl Service {
             .unwrap_or_else(|e| e.into_inner())
     }
 
+    /// 配对模块与连接管理（仅供 crate 内单测注入帧）。
+    #[cfg(test)]
+    pub(crate) fn pairing_parts(&self) -> (Pairing, ConnManager) {
+        (self.inner.pairing.clone(), self.inner.conns.clone())
+    }
+
     /// 实际监听地址（测试用）。
     pub fn local_addr(&self) -> SocketAddr {
         self.inner.local_addr

@@ -55,10 +55,18 @@ async fn wait_show_sas(node: &mut TestNode, session: &str) -> String {
         .await;
     match ev {
         Event::PairStatus {
-            state: PairStateDto::ShowSas { code },
+            state: PairStateDto::ShowSas { code, .. },
             ..
         } => code,
         other => panic!("期望 ShowSas，实际 {other:?}"),
+    }
+}
+
+/// 断言节点尚未初始化（未完成配对）。
+async fn assert_uninitialized(n: &TestNode) {
+    match n.try_call(Request::GetSelf).await.expect("GetSelf 失败") {
+        Response::SelfInfo { value } => assert!(!value.initialized, "此时不应已初始化"),
+        other => panic!("期望 SelfInfo，实际 {other:?}"),
     }
 }
 
@@ -323,6 +331,7 @@ async fn sas_pairing_requires_both_confirmations() {
     .expect("PairConfirm 失败");
     a.no_event(is_done(&session_a), 2000).await;
     b.no_event(is_done(&session), 2000).await;
+    assert_uninitialized(&b).await;
 
     // B 也确认：双方 Done，B 已初始化且用户与 A 一致。
     b.try_call(Request::PairConfirm {
@@ -382,6 +391,7 @@ async fn qr_window_accepts_sas_join_and_needs_both_confirmations() {
     .expect("PairConfirm 失败");
     a.no_event(is_done(&session_a), 2000).await;
     b.no_event(is_done(&session), 2000).await;
+    assert_uninitialized(&b).await;
 
     b.try_call(Request::PairConfirm {
         session: session.clone(),
@@ -431,6 +441,110 @@ async fn qr_window_sas_join_mismatch_fails_both() {
         Response::SelfInfo { value } => assert!(!value.initialized),
         other => panic!("期望 SelfInfo，实际 {other:?}"),
     }
+}
+
+/// 已有会话进行中时，第三台设备的数字比对加入被拒绝，原会话不受影响并能完成。
+#[tokio::test]
+async fn second_peer_is_rejected_while_session_active_and_first_completes() {
+    init_log();
+    let bus = MemoryBus::new();
+    let mut a = node(&bus).await;
+    let mut b = node(&bus).await;
+    let mut c = node(&bus).await;
+    a.init_first("甲机").await;
+    init_join(&b).await;
+    init_join(&c).await;
+    reannounce(&a).await;
+
+    let session_a = match a
+        .try_call(Request::PairStart {
+            method: PairMethod::Qr,
+        })
+        .await
+        .expect("PairStart 失败")
+    {
+        Response::PairSession { value } => value.session,
+        other => panic!("期望 PairSession，实际 {other:?}"),
+    };
+    let a_dev = a.device_id().await;
+    let session_b = join_device(&b, &a_dev).await;
+    let _ = wait_show_sas(&mut a, &session_a).await;
+    let _ = wait_show_sas(&mut b, &session_b).await;
+
+    // C 在 B 的会话进行中加入：被拒绝
+    let session_c = join_device(&c, &a_dev).await;
+    let failed = c.wait_event(is_failed(&session_c), 5).await;
+    assert!(format!("{failed:?}").contains("正在与其他设备配对"));
+    assert_uninitialized(&c).await;
+
+    // 原会话照常完成
+    for (n, s) in [(&a, &session_a), (&b, &session_b)] {
+        n.try_call(Request::PairConfirm {
+            session: s.clone(),
+            matches: true,
+        })
+        .await
+        .expect("PairConfirm 失败");
+    }
+    a.wait_event(is_done(&session_a), 5).await;
+    b.wait_event(is_done(&session_b), 5).await;
+    assert_uninitialized(&c).await;
+}
+
+/// ShowSas 带对端设备信息：A 看到 B 的名称/类型/指纹，B 看到 A 的。
+#[tokio::test]
+async fn show_sas_carries_peer_device_info() {
+    init_log();
+    let bus = MemoryBus::new();
+    let mut a = node(&bus).await;
+    let mut b = node(&bus).await;
+    a.init_first("甲机").await;
+    init_join(&b).await;
+    reannounce(&a).await;
+    let session_a = match a
+        .try_call(Request::PairStart {
+            method: PairMethod::Sas,
+        })
+        .await
+        .expect("PairStart 失败")
+    {
+        Response::PairSession { value } => value.session,
+        other => panic!("期望 PairSession，实际 {other:?}"),
+    };
+    let a_dev = a.device_id().await;
+    let session_b = join_device(&b, &a_dev).await;
+    let on_a = a
+        .wait_event(
+            |e| matches!(e, Event::PairStatus { session, state: PairStateDto::ShowSas { .. } } if *session == session_a),
+            5,
+        )
+        .await;
+    let on_b = b
+        .wait_event(
+            |e| matches!(e, Event::PairStatus { session, state: PairStateDto::ShowSas { .. } } if *session == session_b),
+            5,
+        )
+        .await;
+    let info = |e: Event| match e {
+        Event::PairStatus {
+            state:
+                PairStateDto::ShowSas {
+                    peer_name,
+                    peer_type,
+                    peer_short,
+                    ..
+                },
+            ..
+        } => (peer_name, peer_type, peer_short),
+        other => panic!("期望 ShowSas，实际 {other:?}"),
+    };
+    let (name_a, type_a, short_a) = info(on_a);
+    assert_eq!(name_a, "乙机");
+    assert_eq!(type_a, "desktop");
+    assert!(!short_a.is_empty());
+    assert_ne!(short_a, info(on_b.clone()).2);
+    let (name_b, _, _) = info(on_b);
+    assert_eq!(name_b, "甲机");
 }
 
 /// Sas 数字不一致：双方 Failed{"数字不一致"}，B 保持未初始化。

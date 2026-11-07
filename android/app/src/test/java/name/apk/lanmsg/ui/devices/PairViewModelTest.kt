@@ -84,7 +84,7 @@ class PairViewModelTest {
         advanceUntilIdle()
         vm.start()
         advanceUntilIdle()
-        f.emit(Event.PairStatus("other", PairStateDto.ShowSas("111111")))
+        f.emit(Event.PairStatus("other", PairStateDto.ShowSas("111111", "乙机", "phone", "a1b2c3d4")))
         advanceUntilIdle()
         assertNull(vm.state.value.pairState)
         f.emit(Event.PairStatus("s1", PairStateDto.Verifying))
@@ -99,12 +99,12 @@ class PairViewModelTest {
         val ok = f.handler
         f.handler = { req ->
             val r = ok(req)
-            if (req is Request.PairStart) f.emit(Event.PairStatus("s1", PairStateDto.ShowSas("123456")))
+            if (req is Request.PairStart) f.emit(Event.PairStatus("s1", PairStateDto.ShowSas("123456", "乙机", "phone", "a1b2c3d4")))
             r
         }
         vm.start()
         advanceUntilIdle()
-        assertEquals(PairStateDto.ShowSas("123456"), vm.state.value.pairState)
+        assertEquals(PairStateDto.ShowSas("123456", "乙机", "phone", "a1b2c3d4"), vm.state.value.pairState)
     }
 
     @Test fun show_sas_then_confirm_sent_once() = runTest {
@@ -113,7 +113,7 @@ class PairViewModelTest {
         advanceUntilIdle()
         vm.start()
         advanceUntilIdle()
-        f.emit(Event.PairStatus("s1", PairStateDto.ShowSas("123456")))
+        f.emit(Event.PairStatus("s1", PairStateDto.ShowSas("123456", "乙机", "phone", "a1b2c3d4")))
         advanceUntilIdle()
         vm.confirm(true)
         vm.confirm(true)
@@ -228,13 +228,13 @@ class PairViewModelTest {
         val vm = ViewModelProvider(store, factory)[PairViewModel::class.java]
         vm.start()
         advanceUntilIdle()
-        f.emit(Event.PairStatus("s1", PairStateDto.ShowSas("123456")))
+        f.emit(Event.PairStatus("s1", PairStateDto.ShowSas("123456", "乙机", "phone", "a1b2c3d4")))
         advanceUntilIdle()
         val again = ViewModelProvider(store, factory)[PairViewModel::class.java]
         advanceUntilIdle()
         assertTrue(vm === again)
         assertEquals("s1", again.state.value.session)
-        assertEquals(PairStateDto.ShowSas("123456"), again.state.value.pairState)
+        assertEquals(PairStateDto.ShowSas("123456", "乙机", "phone", "a1b2c3d4"), again.state.value.pairState)
         assertTrue(f.requests.none { it is Request.PairCancel })
         // 页面真正离开：导航出栈清理 ViewModel
         store.clear()
@@ -250,14 +250,14 @@ class PairViewModelTest {
         f.handler = { req ->
             val r = ok(req)
             if (req is Request.PairStart) {
-                f.emit(Event.PairStatus("s1", PairStateDto.ShowSas("123456")))
+                f.emit(Event.PairStatus("s1", PairStateDto.ShowSas("123456", "乙机", "phone", "a1b2c3d4")))
                 f.emit(Event.PairStatus("old", PairStateDto.Failed("stale")))
             }
             r
         }
         vm.start()
         advanceUntilIdle()
-        assertEquals(PairStateDto.ShowSas("123456"), vm.state.value.pairState)
+        assertEquals(PairStateDto.ShowSas("123456", "乙机", "phone", "a1b2c3d4"), vm.state.value.pairState)
     }
 
     @Test fun leave_clears_pair_state() = runTest {
@@ -266,7 +266,7 @@ class PairViewModelTest {
         advanceUntilIdle()
         vm.start()
         advanceUntilIdle()
-        f.emit(Event.PairStatus("s1", PairStateDto.ShowSas("123456")))
+        f.emit(Event.PairStatus("s1", PairStateDto.ShowSas("123456", "乙机", "phone", "a1b2c3d4")))
         advanceUntilIdle()
         vm.leave()
         assertNull(vm.state.value.session)

@@ -40,7 +40,7 @@ class PairJoinScreenTest {
         compose.setContent {
             LanMsgTheme {
                 PairJoinContent(
-                    state = PairViewModel.UiState(session = "j1", pairState = PairStateDto.ShowSas("123456")),
+                    state = PairViewModel.UiState(session = "j1", pairState = PairStateDto.ShowSas("123456", "乙机", "phone", "a1b2c3d4")),
                     onSwitchToSas = {},
                     onGrantCamera = {},
                     onScanned = {},

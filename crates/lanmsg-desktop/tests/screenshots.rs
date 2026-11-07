@@ -29,6 +29,7 @@ fn every_demo_page_renders() {
         "devices",
         "pair",
         "pair-sas",
+        "pair-confirm",
         "pair-join",
         "files",
         "files-grid",

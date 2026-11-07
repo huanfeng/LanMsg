@@ -1886,18 +1886,11 @@ mod tests {
         ));
         m.apply(UiMsg::Event(Event::PairStatus {
             session: "s1".into(),
-            state: PairStateDto::ShowSas {
-                code: "123456".into(),
-            },
+            state: sas_dto("123456"),
         }));
         match &m.pair {
             Some(PairUi::Showing { state, qr_uri, .. }) => {
-                assert_eq!(
-                    state,
-                    &PairStateDto::ShowSas {
-                        code: "123456".into()
-                    }
-                );
+                assert_eq!(state, &sas_dto("123456"));
                 assert_eq!(qr_uri.as_deref(), Some("lanmsg://x"));
             }
             _ => panic!("pair 应已建立"),
@@ -2657,6 +2650,15 @@ mod tests {
         }
     }
 
+    fn sas_dto(code: impl Into<String>) -> PairStateDto {
+        PairStateDto::ShowSas {
+            code: code.into(),
+            peer_name: "我的手机".into(),
+            peer_type: "phone".into(),
+            peer_short: "a1b2c3d4".into(),
+        }
+    }
+
     fn pair_info(session: &str, qr: Option<&str>) -> Response {
         Response::PairSession {
             value: PairSessionInfo {
@@ -2829,15 +2831,10 @@ mod tests {
             ReplyTag::Pair { nonce: n },
             pair_info("s1", Some("lanmsg://pair?s=x")),
         ));
-        m.apply(pair_event(
-            "s1",
-            PairStateDto::ShowSas {
-                code: "123456".into(),
-            },
-        ));
+        m.apply(pair_event("s1", sas_dto("123456")));
         assert!(matches!(
             &m.pair,
-            Some(PairUi::Showing { qr_uri: Some(_), state: PairStateDto::ShowSas { code }, .. })
+            Some(PairUi::Showing { qr_uri: Some(_), state: PairStateDto::ShowSas { code, .. }, .. })
                 if code == "123456"
         ));
         let fx = m.pair_confirm(true);
@@ -2885,12 +2882,7 @@ mod tests {
     fn pair_status_before_reply_is_applied_after_reply() {
         let mut m = Model::new();
         m.pair_start(PairMethod::Sas);
-        m.apply(pair_event(
-            "s1",
-            PairStateDto::ShowSas {
-                code: "123456".into(),
-            },
-        ));
+        m.apply(pair_event("s1", sas_dto("123456")));
         assert_eq!(m.pair, Some(PairUi::Starting));
         m.apply(reply(
             ReplyTag::Pair {
@@ -2924,12 +2916,7 @@ mod tests {
             },
             pair_info("s1", None),
         ));
-        m.apply(pair_event(
-            "s1",
-            PairStateDto::ShowSas {
-                code: "123456".into(),
-            },
-        ));
+        m.apply(pair_event("s1", sas_dto("123456")));
         assert!(!m.pair_confirm(true).is_empty());
         assert!(matches!(&m.pair, Some(PairUi::Showing { state, .. })
             if *state == PairStateDto::Verifying));
@@ -3101,12 +3088,7 @@ mod tests {
             },
             pair_info("s1", None),
         ));
-        m.apply(pair_event(
-            "s1",
-            PairStateDto::ShowSas {
-                code: "123456".into(),
-            },
-        ));
+        m.apply(pair_event("s1", sas_dto("123456")));
         let fx = m.pair_confirm(true);
         assert!(has(&fx, |r| matches!(r,
             Request::PairConfirm { session, matches: true } if session == "s1")));
@@ -3119,12 +3101,7 @@ mod tests {
             },
             pair_info("s1", None),
         ));
-        m.apply(pair_event(
-            "s1",
-            PairStateDto::ShowSas {
-                code: "123456".into(),
-            },
-        ));
+        m.apply(pair_event("s1", sas_dto("123456")));
         let fx = m.pair_confirm(false);
         assert!(has(&fx, |r| matches!(
             r,

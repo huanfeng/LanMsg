@@ -16,6 +16,8 @@ pub enum DemoPage {
     Pair,
     /// 配对：数字比对，等待对方加入。
     PairSas,
+    /// 配对：数字确认页（带对端设备信息）。
+    PairConfirm,
     /// 配对：加入方选择设备（候选为空）。
     PairJoin,
     Files,
@@ -35,6 +37,7 @@ impl DemoPage {
             "devices" => DemoPage::Devices,
             "pair" => DemoPage::Pair,
             "pair-sas" => DemoPage::PairSas,
+            "pair-confirm" => DemoPage::PairConfirm,
             "pair-join" => DemoPage::PairJoin,
             "files" => DemoPage::Files,
             "files-grid" => DemoPage::FilesGrid,
@@ -639,6 +642,20 @@ pub fn demo_model(p: DemoPage) -> Model {
                 state: PairStateDto::WaitingPeer,
             });
         }
+        DemoPage::PairConfirm => {
+            m.page = Page::Contacts;
+            m.contacts_tab = 3;
+            m.pair = Some(PairUi::Showing {
+                session: "s1".into(),
+                qr_uri: Some("lanmsg://pair?s=demo".into()),
+                state: PairStateDto::ShowSas {
+                    code: "348705".into(),
+                    peer_name: "我的手机".into(),
+                    peer_type: "phone".into(),
+                    peer_short: "mkflrfqwdqn2d3k6pt3exei4hu".into(),
+                },
+            });
+        }
         DemoPage::PairJoin => {
             m.page = Page::Contacts;
             m.contacts_tab = 3;
@@ -715,6 +732,7 @@ mod tests {
             "devices",
             "pair",
             "pair-sas",
+            "pair-confirm",
             "pair-join",
             "files",
             "files-grid",

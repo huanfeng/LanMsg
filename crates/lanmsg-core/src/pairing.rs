@@ -204,6 +204,21 @@ pub fn sas_code(exporter: &[u8; 32]) -> String {
     format!("{:06}", be % 1_000_000)
 }
 
+/// 数字比对状态：带对端设备的名称、类型与指纹，供界面提示去哪台设备核对。
+fn sas_state(
+    exporter: &[u8; 32],
+    name: &str,
+    device_type: DeviceType,
+    device: &DeviceId,
+) -> PairStateDto {
+    PairStateDto::ShowSas {
+        code: sas_code(exporter),
+        peer_name: name.to_string(),
+        peer_type: format!("{device_type:?}").to_lowercase(),
+        peer_short: device.short(),
+    }
+}
+
 /// 随机 N 字节。
 fn random_bytes<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
@@ -263,6 +278,9 @@ struct ASession {
     new_cert: Option<DeviceCert>,
     local_confirmed: bool,
     peer_confirmed: bool,
+    /// 已被授权接收配对包的对端：Qr 在 Proof 校验通过时、Sas 在双方确认时持锁设置。
+    /// a_send_bundle 只向它发送，避免会话被覆盖后把密钥包发给未经验证的设备。
+    authorized_peer: Option<DeviceId>,
 }
 
 /// B 侧（加入方）进行中的配对会话。
@@ -275,6 +293,8 @@ struct BSession {
     peer_confirmed: bool,
 }
 
+// 同一时刻至多一个会话，变体大小差异无关紧要
+#[allow(clippy::large_enum_variant)]
 enum Role {
     A(ASession),
     B(BSession),
@@ -501,12 +521,11 @@ impl Pairing {
             }
             None => {
                 // Sas：显示本端 SAS。
-                self.emit_status(
-                    &session,
-                    PairStateDto::ShowSas {
-                        code: sas_code(&a.tls_exporter),
-                    },
-                );
+                let (name, ty) = match &a.cert {
+                    Some(c) => (c.device_name.clone(), c.device_type),
+                    None => (a.display_name.clone(), DeviceType::Desktop),
+                };
+                self.emit_status(&session, sas_state(&a.tls_exporter, &name, ty, &a.device));
             }
         }
         Ok(PairSessionInfo {
@@ -517,25 +536,25 @@ impl Pairing {
 
     /// 第 3 步（Sas）：本端用户确认数字是否一致。
     pub async fn confirm(&self, session: &str, matches: bool) -> Result<(), CoreError> {
-        let (peer, is_sas) = {
+        let peer = {
             let mut g = self.inner.active.lock().unwrap();
             match g.as_mut() {
                 Some(a) if a.session == session => match &mut a.role {
-                    Role::A(s) => {
+                    Role::A(s) if matches!(s.method, PairMethodWire::Sas) => {
                         s.local_confirmed = matches;
-                        (s.peer, matches!(s.method, PairMethodWire::Sas))
+                        s.peer
                     }
-                    Role::B(s) => {
+                    Role::B(s) if matches!(s.method, PairMethodWire::Sas) => {
                         s.local_confirmed = matches;
-                        (s.a_device, matches!(s.method, PairMethodWire::Sas))
+                        s.a_device
+                    }
+                    _ => {
+                        return Err(CoreError::InvalidArgument("当前配对方式无数字确认".into()));
                     }
                 },
                 _ => return Err(CoreError::NotFound("配对会话不存在".into())),
             }
         };
-        if !is_sas {
-            return Err(CoreError::InvalidArgument("当前配对方式无数字确认".into()));
-        }
         self.inner
             .conns
             .send(&peer, Frame::Pair(PairMsg::SasConfirm { ok: matches }))
@@ -644,6 +663,29 @@ impl Pairing {
                 .await;
             return Ok(());
         };
+        // 已有进行中的会话且对端仍在线、不是同一设备：拒绝新的 Begin，不覆盖旧会话。
+        // 同一对端重发 Begin（重连重试）仍允许覆盖。
+        let busy = {
+            let g = self.inner.active.lock().unwrap();
+            g.as_ref().is_some_and(|a| match &a.role {
+                Role::A(s) => s.peer != from.device && self.inner.conns.peer(&s.peer).is_some(),
+                Role::B(_) => true,
+            })
+        };
+        if busy {
+            tracing::debug!(peer = %from.device, "Begin rejected: another pairing session is active");
+            let _ = self
+                .inner
+                .conns
+                .send(
+                    &from.device,
+                    Frame::Pair(PairMsg::Abort {
+                        reason: "正在与其他设备配对".into(),
+                    }),
+                )
+                .await;
+            return Ok(());
+        }
         // Sas：加入方的会话 ID 由其本地生成，A 侧一律使用窗口会话 ID，
         // 使事件与 PairStart 返回值一致（两端会话 ID 各自独立）。
         let session = if matches!(method, PairMethodWire::Sas) {
@@ -651,6 +693,7 @@ impl Pairing {
         } else {
             begin_session.unwrap_or_else(random_session)
         };
+        let (peer_name, peer_type) = (device_name, device_type);
         {
             let mut g = self.inner.active.lock().unwrap();
             // 并发配对会话：新 Begin 覆盖旧会话。
@@ -664,20 +707,19 @@ impl Pairing {
                         .flatten(),
                     exporter: from.tls_exporter,
                     peer: from.device,
-                    peer_name: device_name,
-                    peer_type: device_type,
+                    peer_name: peer_name.clone(),
+                    peer_type,
                     new_cert: None,
                     local_confirmed: false,
                     peer_confirmed: false,
+                    authorized_peer: None,
                 }),
             });
         }
         if matches!(method, PairMethodWire::Sas) {
             self.emit_status(
                 &session,
-                PairStateDto::ShowSas {
-                    code: sas_code(&from.tls_exporter),
-                },
+                sas_state(&from.tls_exporter, &peer_name, peer_type, &from.device),
             );
         }
         Ok(())
@@ -723,6 +765,21 @@ impl Pairing {
                     .await;
                 self.fail_session(&session, &from.device, "口令错误").await;
                 return Ok(());
+            }
+            // MAC 通过：持锁确认会话仍是同一对端、同一连接（口令与导出值未变）后授权发包。
+            {
+                let mut g = self.inner.active.lock().unwrap();
+                match g.as_mut().map(|a| (&a.session, &mut a.role)) {
+                    Some((cur, Role::A(s)))
+                        if *cur == session
+                            && s.peer == from.device
+                            && s.secret == Some(secret)
+                            && s.exporter == exporter =>
+                    {
+                        s.authorized_peer = Some(from.device);
+                    }
+                    _ => return Ok(()),
+                }
             }
             // 回自己的证明并进入第 4 步。
             let self_device = self.self_device().await;
@@ -1002,11 +1059,18 @@ impl Pairing {
 
     /// Sas 双端确认后的推进：双方发 Verifying；A 继续第 4 步送 Bundle。
     async fn advance_sas(&self, session: &str) -> Result<(), CoreError> {
+        // 双方都确认时，持锁授权对端接收配对包（A 侧），之后不再依赖会话 ID 判断身份。
         let both = {
-            let g = self.inner.active.lock().unwrap();
-            match g.as_ref() {
-                Some(a) if a.session == session => match &a.role {
-                    Role::A(s) => s.local_confirmed && s.peer_confirmed,
+            let mut g = self.inner.active.lock().unwrap();
+            match g.as_mut() {
+                Some(a) if a.session == session => match &mut a.role {
+                    Role::A(s) => {
+                        let both = s.local_confirmed && s.peer_confirmed;
+                        if both {
+                            s.authorized_peer = Some(s.peer);
+                        }
+                        both
+                    }
                     Role::B(s) => s.local_confirmed && s.peer_confirmed,
                 },
                 _ => false,
@@ -1032,7 +1096,8 @@ impl Pairing {
             let g = self.inner.active.lock().unwrap();
             match g.as_ref() {
                 Some(a) => match &a.role {
-                    Role::A(s) if a.session == session => {
+                    // 只向已授权的对端发送；peer 在此一次读出，之后不再重读
+                    Role::A(s) if a.session == session && s.authorized_peer == Some(s.peer) => {
                         (s.peer, s.peer_name.clone(), s.peer_type)
                     }
                     _ => return Ok(()),
@@ -1238,5 +1303,181 @@ mod tests {
         assert!(w.is_open(Instant::now()));
         std::thread::sleep(Duration::from_millis(5));
         assert!(!w.is_open(Instant::now()));
+    }
+
+    // ---- 会话安全：注入帧的单测 ----
+
+    use crate::discovery::DiscoveryMode;
+    use crate::keystore::FileKeyStore;
+    use crate::platform::PlatformHooks;
+    use crate::service::{Service, ServiceConfig};
+    use lanmsg_api::types::{InitMode, Request};
+
+    async fn start_node() -> (Service, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = Service::start(ServiceConfig {
+            data_dir: dir.path().to_path_buf(),
+            listen_port: 0,
+            discovery: DiscoveryMode::Disabled,
+            keystore: Arc::new(FileKeyStore::new(dir.path().join("keys"))),
+            static_peers: Vec::new(),
+            platform: PlatformHooks::default(),
+            localsend_port: 0,
+        })
+        .await
+        .unwrap();
+        (svc, dir)
+    }
+
+    async fn init(svc: &Service, mode: InitMode) {
+        svc.handle(Request::Init {
+            display_name: "测试".into(),
+            device_name: "测试机".into(),
+            mode,
+        })
+        .await
+        .unwrap();
+    }
+
+    fn is_initialized(svc: &Service) -> bool {
+        let (p, _) = svc.pairing_parts();
+        let ok = p.inner.identity.read().unwrap().is_initialized();
+        ok
+    }
+
+    /// A（已初始化，Sas 窗口开放）与两台未初始化设备 B、C 互连；
+    /// 返回 A、B、C 及 A 侧看到的 B、C 的 PeerInfo。
+    async fn three_nodes(
+        method: PairMethodWire,
+    ) -> (
+        (Service, tempfile::TempDir),
+        (Service, tempfile::TempDir),
+        (Service, tempfile::TempDir),
+        PeerInfo,
+        PeerInfo,
+        String,
+    ) {
+        let a = start_node().await;
+        let b = start_node().await;
+        let c = start_node().await;
+        init(&a.0, InitMode::FirstDevice).await;
+        init(&b.0, InitMode::JoinExisting).await;
+        init(&c.0, InitMode::JoinExisting).await;
+        // A 的接入过滤只放行窗口开放期间的未初始化设备：先开窗口再连接
+        let (ap, _) = a.0.pairing_parts();
+        let session = open_window(&ap, method).await;
+        let addr = a.0.local_addr();
+        let (_, bc) = b.0.pairing_parts();
+        let (_, cc) = c.0.pairing_parts();
+        bc.connect(addr, false).await.unwrap();
+        cc.connect(addr, false).await.unwrap();
+        let dev_of = |svc: &Service| {
+            let (p, _) = svc.pairing_parts();
+            let d = p.inner.identity.read().unwrap().device_id();
+            d
+        };
+        let (b_dev, c_dev) = (dev_of(&b.0), dev_of(&c.0));
+        let (_, ac) = a.0.pairing_parts();
+        let mut peers = (None, None);
+        for _ in 0..50 {
+            peers = (ac.peer(&b_dev), ac.peer(&c_dev));
+            if peers.0.is_some() && peers.1.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(peers.0.is_some(), "A 未看到 B");
+        assert!(peers.1.is_some(), "A 未看到 C");
+        let (pb, pc) = (peers.0.unwrap(), peers.1.unwrap());
+        (a, b, c, pb, pc, session)
+    }
+
+    fn begin_sas() -> PairMsg {
+        PairMsg::Begin {
+            session: None,
+            method: PairMethodWire::Sas,
+            device_name: "乙机".into(),
+            device_type: DeviceType::Phone,
+        }
+    }
+
+    async fn open_window(p: &Pairing, method: PairMethodWire) -> String {
+        p.start(method, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .session
+    }
+
+    /// 授权对端与会话对端不符（会话被覆盖的状态）时，a_send_bundle 不发包。
+    #[tokio::test]
+    async fn a_send_bundle_refuses_unauthorized_or_mismatched_peer() {
+        let (a, b, c, pb, pc, session) = three_nodes(PairMethodWire::Sas).await;
+        let (ap, _) = a.0.pairing_parts();
+        ap.on_pair_frame(&pb, begin_sas()).await.unwrap();
+
+        // 发包成功才会记录 new_cert：以它判断“是否发过包”（B 无会话时会丢弃 Bundle，
+        // 仅看 B 是否初始化无法区分）
+        let sent = |ap: &Pairing| {
+            let g = ap.inner.active.lock().unwrap();
+            matches!(g.as_ref().map(|a| &a.role), Some(Role::A(s)) if s.new_cert.is_some())
+        };
+        // 未授权：直接调用也不发包
+        ap.a_send_bundle(&session).await.unwrap();
+        assert!(!sent(&ap), "未授权不应发包");
+        // 模拟会话被覆盖：授权的是 B，但会话对端已是 C
+        {
+            let mut g = ap.inner.active.lock().unwrap();
+            if let Some(Active {
+                role: Role::A(s), ..
+            }) = g.as_mut()
+            {
+                s.authorized_peer = Some(pb.device);
+                s.peer = pc.device;
+            }
+        }
+        ap.a_send_bundle(&session).await.unwrap();
+        assert!(!sent(&ap), "会话对端与授权对端不符时不应发包");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!is_initialized(&b.0), "B 不应收到配对包");
+        assert!(!is_initialized(&c.0), "C 不应收到配对包");
+    }
+
+    /// 已有会话的对端在线时，其他设备的 Begin 被拒绝，原会话不受影响。
+    #[tokio::test]
+    async fn begin_from_other_peer_is_rejected_while_session_active() {
+        let (a, _b, _c, pb, pc, session) = three_nodes(PairMethodWire::Qr).await;
+        let (ap, _) = a.0.pairing_parts();
+        ap.on_pair_frame(&pb, begin_sas()).await.unwrap();
+        ap.on_pair_frame(&pc, begin_sas()).await.unwrap();
+        let g = ap.inner.active.lock().unwrap();
+        let a_sess = g.as_ref().unwrap();
+        assert_eq!(a_sess.session, session);
+        assert!(matches!(&a_sess.role, Role::A(s) if s.peer == pb.device));
+    }
+
+    /// Sas 会话里收到 Proof 一律忽略：不授权、不失败、不发包。
+    #[tokio::test]
+    async fn proof_in_sas_session_is_ignored() {
+        let (a, b, _c, pb, _pc, session) = three_nodes(PairMethodWire::Qr).await;
+        let (ap, _) = a.0.pairing_parts();
+        ap.on_pair_frame(&pb, begin_sas()).await.unwrap();
+        ap.on_pair_frame(&pb, PairMsg::Proof { mac: [0u8; 32] })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        {
+            let g = ap.inner.active.lock().unwrap();
+            let Some(Active {
+                session: cur,
+                role: Role::A(s),
+            }) = g.as_ref()
+            else {
+                panic!("会话应仍然存在");
+            };
+            assert_eq!(*cur, session);
+            assert!(s.authorized_peer.is_none());
+            assert!(s.secret.is_none(), "Sas 会话不持有二维码口令");
+        }
+        assert!(!is_initialized(&b.0));
     }
 }

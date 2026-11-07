@@ -151,6 +151,20 @@ internal fun PairProgress(state: PairViewModel.UiState, onConfirm: (Boolean) -> 
     when (val s = state.pairState) {
         is PairStateDto.ShowSas -> {
             Text(
+                stringResource(R.string.pair_sas_peer, s.peerName, deviceTypeLabel(s.peerType), s.peerShort),
+                color = c.ink,
+                style = MaterialTheme.typography.titleMedium,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                stringResource(R.string.pair_sas_go),
+                color = c.inkMuted,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(
                 stringResource(R.string.pair_sas_hint),
                 color = c.inkMuted,
                 style = MaterialTheme.typography.bodyMedium,
@@ -205,6 +219,16 @@ private fun Waiting(text: Int) {
     CircularProgressIndicator(color = LanMsgControls.progress)
     Spacer(Modifier.height(16.dp))
     Text(stringResource(text), color = c.inkMuted, style = MaterialTheme.typography.bodyMedium)
+}
+
+/** 设备类型的显示名；未知类型原样显示。 */
+@Composable
+internal fun deviceTypeLabel(type: String): String = when (type) {
+    "desktop" -> stringResource(R.string.pair_type_desktop)
+    "laptop" -> stringResource(R.string.pair_type_laptop)
+    "phone" -> stringResource(R.string.pair_type_phone)
+    "tablet" -> stringResource(R.string.pair_type_tablet)
+    else -> type
 }
 
 /** 6 位数字 3+3 分组；非 6 位原样显示。 */

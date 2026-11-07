@@ -766,7 +766,12 @@ async fn watch_pair_any(mut rx: EventRx) {
 fn print_pair_state(state: &PairStateDto) -> bool {
     match state {
         PairStateDto::WaitingPeer => println!("等待对端加入…"),
-        PairStateDto::ShowSas { code } => println!("比对数字：{code}"),
+        PairStateDto::ShowSas {
+            code,
+            peer_name,
+            peer_type,
+            peer_short,
+        } => println!("比对数字：{code}（对方：{peer_name}，{peer_type}，指纹 {peer_short}）"),
         PairStateDto::Verifying => println!("校验中…"),
         PairStateDto::Done => {
             println!("配对完成");
