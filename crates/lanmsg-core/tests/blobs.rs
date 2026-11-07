@@ -473,7 +473,7 @@ async fn source_offline_fails_with_message() {
     .await;
     let (ok, error) = wait_finished(&mut a, &hash_hex, 15).await;
     assert!(!ok, "唯一持有者下线后下载应失败");
-    assert_eq!(error.as_deref(), Some("源离线"));
+    assert_eq!(error.as_deref(), Some("source offline"));
     // transfer 行 Failed。
     let store = a.svc.store_for_test();
     let rows = store.active_transfers().unwrap();
@@ -583,10 +583,10 @@ async fn final_hash_mismatch_fails_and_cleans_part() {
         f.write_all(&byte).unwrap();
     }
 
-    // 整文件复核失败 → Failed("校验失败") 且 .part 被删除。
+    // 整文件复核失败 → Failed("verification failed") 且 .part 被删除。
     let (ok, error) = wait_finished(&mut x, &hash_hex, 30).await;
     assert!(!ok, "整文件复核应失败");
-    assert_eq!(error.as_deref(), Some("校验失败"));
+    assert_eq!(error.as_deref(), Some("verification failed"));
     assert!(!part.exists(), "校验失败后 .part 应被删除");
 }
 
@@ -645,7 +645,7 @@ async fn cancel_removes_part_file() {
     .await;
     let (ok, error) = wait_finished(&mut x, &hash_hex, 15).await;
     assert!(!ok, "取消后传输应失败");
-    assert_eq!(error.as_deref(), Some("已取消"));
+    assert_eq!(error.as_deref(), Some("cancelled"));
     let row = x.svc.store_for_test().get_transfer(&id).unwrap().unwrap();
     assert_eq!(row.state, lanmsg_core::store::TransferState::Cancelled);
     assert!(!row.part_path.exists(), "取消后 .part 应被删除");

@@ -138,13 +138,15 @@ impl TransferEngine {
         // download 全程无 await，持锁安全；并发同 hash 请求在此串行。
         let _guard = self.download_lock.lock().unwrap();
         if self.store.get_local(&hash)?.is_some() {
-            return Err(CoreError::InvalidArgument("已下载".into()));
+            return Err(CoreError::InvalidArgument("already downloaded".into()));
         }
         if let Some(row) = self.store.transfer_for_hash(&hash)? {
             return Ok(row.transfer_id);
         }
         let Some(mb) = self.store.message_blobs_by_hash(&hash)?.into_iter().next() else {
-            return Err(CoreError::NotFound("没有消息引用该文件".into()));
+            return Err(CoreError::NotFound(
+                "no message references this file".into(),
+            ));
         };
         let settings = load_settings(&self.store)?;
         let title = self.conv_title(&mb.conv);
@@ -202,13 +204,15 @@ impl TransferEngine {
             }
         }
         let Some(mut row) = self.store.get_transfer(transfer_id)? else {
-            return Err(CoreError::NotFound(format!("传输不存在: {transfer_id}")));
+            return Err(CoreError::NotFound(format!(
+                "transfer not found: {transfer_id}"
+            )));
         };
         if !matches!(row.state, TransferState::Queued | TransferState::Running) {
             return Ok(());
         }
         row.state = TransferState::Cancelled;
-        row.error = Some("已取消".into());
+        row.error = Some("cancelled".into());
         self.store.upsert_transfer(&row)?;
         match std::fs::remove_file(&row.part_path) {
             Ok(()) => {}
@@ -219,7 +223,7 @@ impl TransferEngine {
             transfer: row.transfer_id.clone(),
             hash: row.hash.to_hex(),
             ok: false,
-            error: Some("已取消".into()),
+            error: Some("cancelled".into()),
         });
         Ok(())
     }
@@ -336,7 +340,7 @@ impl TransferEngine {
             }
             candidates = self.candidates(&row.hash);
             if candidates.is_empty() {
-                return Some("源离线".into());
+                return Some("source offline".into());
             }
         }
 
@@ -351,7 +355,7 @@ impl TransferEngine {
                     }
                     s
                 }
-                None => return Some("源离线".into()),
+                None => return Some("source offline".into()),
             },
         };
 
@@ -362,7 +366,7 @@ impl TransferEngine {
             .unwrap_or(false);
         if !part_ok {
             if let Err(e) = Self::create_part(&row.part_path, row.total).await {
-                return Some(format!("创建 .part 失败: {e}"));
+                return Some(format!("failed to create .part file: {e}"));
             }
             row.done_segments = vec![false; n];
         }
@@ -371,7 +375,7 @@ impl TransferEngine {
         }
         row.state = TransferState::Running;
         if let Err(e) = self.store.upsert_transfer(row) {
-            return Some(format!("写入传输记录失败: {e}"));
+            return Some(format!("failed to write transfer record: {e}"));
         }
 
         // 工作者阶段：候选全部耗尽时再做一轮 BlobQuery 等待重试（最多
@@ -443,11 +447,11 @@ impl TransferEngine {
             }
             let fresh = self.candidates(&row.hash);
             if fresh.is_empty() {
-                return Some("源离线".into());
+                return Some("source offline".into());
             }
             candidates = fresh;
         }
-        Some("源离线".into())
+        Some("source offline".into())
     }
 
     /// 工作者：从共享队列取分段，绑定候选源下载，失败换绑下一个候选。
@@ -523,7 +527,7 @@ impl TransferEngine {
                     match Self::next_candidate(&shared, &job, cand) {
                         Some(next) => cand = next,
                         None => {
-                            *shared.failed_out.lock().unwrap() = Some("源离线".into());
+                            *shared.failed_out.lock().unwrap() = Some("source offline".into());
                             return;
                         }
                     }
@@ -553,7 +557,7 @@ impl TransferEngine {
                     .map_err(|_| FetchFail::Conn)?,
             );
         }
-        let stream = conn.as_mut().expect("conn 刚已填充");
+        let stream = conn.as_mut().expect("conn was just filled");
         let res = tokio::time::timeout(SEGMENT_TIMEOUT, async {
             write_data_frame(
                 stream,
@@ -736,18 +740,18 @@ impl TransferEngine {
         let part = row.part_path.clone();
         let hashed = match tokio::task::spawn_blocking(move || hash_file(&part)).await {
             Ok(Ok(h)) => h,
-            Ok(Err(e)) => return Some(format!("读取下载文件失败: {e}")),
-            Err(e) => return Some(format!("后台任务失败: {e}")),
+            Ok(Err(e)) => return Some(format!("failed to read downloaded file: {e}")),
+            Err(e) => return Some(format!("background task failed: {e}")),
         };
         if hashed.hash.0 != meta.hash.0 {
             if let Err(e) = std::fs::remove_file(&row.part_path) {
                 tracing::warn!(error = %e, "删除校验失败的 .part 失败");
             }
-            return Some("校验失败".into());
+            return Some("verification failed".into());
         }
         let final_path = unique_path(&row.dest_path);
         if let Err(e) = tokio::fs::rename(&row.part_path, &final_path).await {
-            return Some(format!("落地失败: {e}"));
+            return Some(format!("failed to finalize file: {e}"));
         }
         let local = BlobLocalRow {
             hash: row.hash,
@@ -757,7 +761,7 @@ impl TransferEngine {
             mtime: hashed.mtime,
         };
         if let Err(e) = self.store.set_local(&local) {
-            return Some(format!("写入本地记录失败: {e}"));
+            return Some(format!("failed to write local record: {e}"));
         }
         if let Err(e) = self
             .store
@@ -788,7 +792,7 @@ impl TransferEngine {
         // 下载走到这里即全部分段完成；内存副本的分段进度是过时的，全置 true。
         done_row.done_segments = vec![true; row.done_segments.len()];
         if let Err(e) = self.store.upsert_transfer(&done_row) {
-            return Some(format!("写入传输记录失败: {e}"));
+            return Some(format!("failed to write transfer record: {e}"));
         }
         let _ = self.events.send(Event::TransferFinished {
             transfer: row.transfer_id.clone(),
@@ -894,14 +898,14 @@ where
         let want = buf.len().min(remaining as usize);
         let n = r.read(&mut buf[..want]).await?;
         if n == 0 {
-            return Err(CoreError::Proto("分段数据提前结束".into()));
+            return Err(CoreError::Proto("segment data ended early".into()));
         }
         hasher.update(&buf[..n]);
         out.write_all(&buf[..n]).await?;
         remaining -= n as u64;
     }
     if hasher.finalize().as_bytes() != expect {
-        return Err(CoreError::Rejected("分段校验失败".into()));
+        return Err(CoreError::Rejected("segment verification failed".into()));
     }
     Ok(())
 }
@@ -923,7 +927,7 @@ async fn read_segment_to_file(
         let want = buf.len().min(remaining as usize);
         let n = r.read(&mut buf[..want]).await?;
         if n == 0 {
-            return Err(CoreError::Proto("分段数据提前结束".into()));
+            return Err(CoreError::Proto("segment data ended early".into()));
         }
         hasher.update(&buf[..n]);
         let chunk = buf[..n].to_vec();
@@ -941,7 +945,7 @@ async fn read_segment_to_file(
         remaining -= n as u64;
     }
     if hasher.finalize().as_bytes() != expect {
-        return Err(CoreError::Rejected("分段校验失败".into()));
+        return Err(CoreError::Rejected("segment verification failed".into()));
     }
     Ok(())
 }

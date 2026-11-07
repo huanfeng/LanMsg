@@ -7,7 +7,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 4 {
-        eprintln!("用法: lanmsg-thumb <输入路径> <mime> <输出.jpg>");
+        eprintln!("usage: lanmsg-thumb <input path> <mime> <output.jpg>");
         return ExitCode::from(1);
     }
     match run(&args[1], &args[2], &args[3]) {
