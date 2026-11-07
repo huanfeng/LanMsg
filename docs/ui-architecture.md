@@ -170,6 +170,7 @@
 | file_download_original | 下载原图 |
 | file_save_to_gallery | 保存到相册 |
 | file_saved | 已保存 |
+| file_save_failed | 保存失败 |
 | file_open_conversation | 打开所在会话 |
 | files_all | 全部 |
 | files_image | 图片 |
@@ -245,6 +246,8 @@
 | settings_battery_desc | 在系统电池优化中将 LanMsg 设为“不优化”，避免后台连接被中断 |
 | share_pick_title | 发送到 |
 | share_empty | 没有可用的会话 |
+| share_need_setup | 请先完成初始化，再分享文件 |
+| share_import_failed | 无法读取要发送的文件 |
 | path_vpn | VPN |
 | path_internet | 公网 |
 | path_relay | 中继 |

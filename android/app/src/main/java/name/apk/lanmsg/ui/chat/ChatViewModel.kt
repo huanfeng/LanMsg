@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.chat
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -10,6 +11,7 @@ import kotlinx.coroutines.launch
 import name.apk.lanmsg.core.ApiException
 import name.apk.lanmsg.core.CoreApi
 import name.apk.lanmsg.core.call
+import name.apk.lanmsg.files.Importer
 import name.apk.lanmsg.notify.VisibleConversation
 import uniffi.lanmsg_api.ConvKind
 import uniffi.lanmsg_api.ConversationSummary
@@ -52,6 +54,9 @@ class ChatViewModel(
 
     /** 重拉在途期间事件触达过的消息 id：响应合并时跳过，避免旧快照覆盖较新的事件版本。 */
     private val touched = mutableSetOf<String>()
+
+    /** 本地删除过的消息 id：重拉在途期间合并时过滤，避免旧响应让已删消息复活；无在途重拉时清空。 */
+    private val deleted = mutableSetOf<String>()
     private var inflight = 0
 
     init {
@@ -87,6 +92,12 @@ class ChatViewModel(
         viewModelScope.launch { guarded { core.request(Request.SendFiles(conv, paths)) } }
     }
 
+    /** 把外部 URI 落地到发件箱后发送；落地在 IO 线程，全部失败时不发请求。 */
+    fun importAndSend(importer: Importer, uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch { sendFiles(importer.import(uris)) }
+    }
+
     fun download(hash: String) {
         viewModelScope.launch {
             guarded {
@@ -106,10 +117,14 @@ class ChatViewModel(
     }
 
     fun deleteLocal(msgId: String) {
+        if (inflight > 0) deleted += msgId
         viewModelScope.launch {
-            guarded {
+            try {
                 core.request(Request.DeleteLocal(listOf(msgId), false))
                 _state.update { s -> s.copy(messages = s.messages.filter { it.id != msgId }) }
+            } catch (e: ApiException) {
+                deleted -= msgId
+                _state.update { it.copy(error = errorText(e)) }
             }
         }
     }
@@ -178,12 +193,15 @@ class ChatViewModel(
                     _state.update { cur ->
                         val have = cur.messages.mapTo(HashSet()) { it.id }
                         // 事件已写入列表的版本更新，不被旧响应覆盖
-                        cur.copy(messages = latest.filter { it.id !in touched || it.id !in have }.fold(cur.messages) { acc, m -> upsert(acc, m) })
+                        cur.copy(messages = latest.filter { it.id !in deleted && (it.id !in touched || it.id !in have) }.fold(cur.messages) { acc, m -> upsert(acc, m) })
                     }
                     markReadIfNeeded()
                 }
             } finally {
-                if (--inflight == 0) touched.clear()
+                if (--inflight == 0) {
+                    touched.clear()
+                    deleted.clear()
+                }
             }
         }
     }

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.BrokenImage
+import androidx.compose.material.icons.outlined.SaveAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -24,7 +25,10 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
@@ -130,7 +134,26 @@ fun ImageViewerScreen(conv: String, hash: String, onBack: () -> Unit) {
         factory = viewModelFactory { initializer { ImageViewerViewModel(ServiceLocator.core, conv, hash) } },
     )
     val state by vm.state.collectAsStateWithLifecycle()
-    ImageViewerContent(state, onBack, vm::download, vm::clearError)
+    val scope = rememberCoroutineScope()
+    var saveResult by remember { mutableStateOf<Int?>(null) }
+    ImageViewerContent(
+        state,
+        onBack,
+        vm::download,
+        vm::clearError,
+        onSaveToGallery = {
+            val item = state.item
+            val local = item?.localPath
+            if (item != null && local != null) {
+                scope.launch {
+                    val uri = ServiceLocator.mediaSaver.saveToGallery(local, item.mime, item.name)
+                    saveResult = if (uri != null) R.string.file_saved else R.string.file_save_failed
+                }
+            }
+        },
+        message = saveResult?.let { stringResource(it) },
+        onMessageShown = { saveResult = null },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -140,9 +163,19 @@ fun ImageViewerContent(
     onBack: () -> Unit,
     onDownload: () -> Unit,
     onDismissError: () -> Unit,
+    onSaveToGallery: () -> Unit = {},
+    /** 一次性提示（保存到相册的结果），显示后调用 [onMessageShown]。 */
+    message: String? = null,
+    onMessageShown: () -> Unit = {},
 ) {
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(message) {
+        if (message != null) {
+            snackbar.showSnackbar(message)
+            onMessageShown()
+        }
+    }
     val errorText = state.error?.let { stringResource(R.string.err_generic, it) }
     LaunchedEffect(errorText) {
         if (errorText != null) {
@@ -161,10 +194,18 @@ fun ImageViewerContent(
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = stringResource(R.string.back))
                     }
                 },
+                actions = {
+                    if (item != null && item.state == BlobState.LOCAL && item.localPath != null) {
+                        IconButton(onClick = onSaveToGallery) {
+                            Icon(Icons.Outlined.SaveAlt, contentDescription = stringResource(R.string.file_save_to_gallery))
+                        }
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = c.surface,
                     titleContentColor = c.ink,
                     navigationIconContentColor = c.ink,
+                    actionIconContentColor = c.ink,
                 ),
             )
         },

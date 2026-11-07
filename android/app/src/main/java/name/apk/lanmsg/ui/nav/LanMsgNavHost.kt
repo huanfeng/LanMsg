@@ -40,6 +40,8 @@ import name.apk.lanmsg.ui.chat.ImageViewerScreen
 import name.apk.lanmsg.ui.convs.ConversationListScreen
 import name.apk.lanmsg.ui.onboarding.OnboardingScreen
 import name.apk.lanmsg.ui.onboarding.OnboardingViewModel
+import name.apk.lanmsg.ui.share.SharePickScreen
+import name.apk.lanmsg.ui.share.SharePickViewModel
 import name.apk.lanmsg.ui.theme.LanMsgColors
 
 private class Tab(val route: String, val label: Int, val icon: ImageVector)
@@ -59,7 +61,7 @@ private val tabs = listOf(
  * 不要再给页面加 safeDrawingPadding 的底部部分。
  */
 @Composable
-fun LanMsgNavHost(nav: NavHostController, startDestination: String) {
+fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () -> SharePickViewModel) {
     val entry by nav.currentBackStackEntryAsState()
     val destination = entry?.destination
     val showBar = tabs.any { tab -> destination?.hierarchy?.any { it.route == tab.route } == true }
@@ -125,7 +127,14 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String) {
             composable(Routes.PAIR_HOST) { Placeholder(Routes.PAIR_HOST) }
             composable(Routes.PAIR_JOIN) { Placeholder(Routes.PAIR_JOIN) }
             composable(Routes.SETTINGS) { Placeholder(Routes.SETTINGS) }
-            composable(Routes.SHARE) { Placeholder(Routes.SHARE) }
+            composable(Routes.SHARE) {
+                val vm = shareVm()
+                SharePickScreen(
+                    vm,
+                    onBack = { vm.reset(); nav.popBackStack() },
+                    onSent = { nav.navigate(Routes.chat(it)) { popUpTo(Routes.SHARE) { inclusive = true } } },
+                )
+            }
             composable(Routes.SEARCH) { Placeholder(Routes.SEARCH) }
             composable(Routes.FORWARD) { Placeholder(Routes.FORWARD) }
             composable(Routes.CHAT, arguments = listOf(navArgument("conv") { type = NavType.StringType })) { entry ->

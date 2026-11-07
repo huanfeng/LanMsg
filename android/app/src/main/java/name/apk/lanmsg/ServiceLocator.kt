@@ -5,6 +5,8 @@ import android.content.Context
 import name.apk.lanmsg.core.CoreApi
 import name.apk.lanmsg.core.FfiCoreApi
 import name.apk.lanmsg.core.LocalPrefs
+import name.apk.lanmsg.files.MediaStoreSaver
+import name.apk.lanmsg.files.OutboxImporter
 
 object ServiceLocator {
     lateinit var app: Application
@@ -28,4 +30,8 @@ object ServiceLocator {
         get() = synchronized(this) { cachedCore ?: coreFactory(app).also { cachedCore = it } }
 
     val localPrefs: LocalPrefs by lazy { LocalPrefs(app) }
+
+    val importer: OutboxImporter by lazy { OutboxImporter(app) }
+
+    val mediaSaver: MediaStoreSaver by lazy { MediaStoreSaver(app) }
 }

@@ -1,5 +1,8 @@
 package name.apk.lanmsg.ui.chat
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -35,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -47,6 +51,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import kotlinx.coroutines.flow.filter
 import name.apk.lanmsg.R
 import name.apk.lanmsg.ServiceLocator
+import name.apk.lanmsg.files.FileOpener
 import name.apk.lanmsg.notify.VisibleConversation
 import name.apk.lanmsg.ui.common.formatTime
 import name.apk.lanmsg.ui.theme.LanMsgColors
@@ -54,7 +59,7 @@ import name.apk.lanmsg.ui.theme.LanMsgControls
 import uniffi.lanmsg_api.ConvKind
 import uniffi.lanmsg_api.MessageView
 
-/** ChatContent 的全部回调；附件按钮在 Task 7 接上系统选择器。 */
+/** ChatContent 的全部回调。 */
 class ChatActions(
     val onBack: () -> Unit = {},
     val onInputChange: (String) -> Unit = {},
@@ -83,22 +88,27 @@ fun ChatScreen(
         vm.onVisible()
         onStopOrDispose { vm.onHidden() }
     }
+    val ctx = LocalContext.current
+    val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_PICK_ITEMS)) { uris ->
+        vm.importAndSend(ServiceLocator.importer, uris)
+    }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        vm.importAndSend(ServiceLocator.importer, uris)
+    }
     val actions = ChatActions(
         onBack = onBack,
         onInputChange = vm::setInput,
         onSend = vm::sendText,
         onLoadMore = vm::loadMore,
         onDismissError = vm::clearError,
-        // Task 7 接上系统选择器与 OutboxImporter
-        onAttachMedia = {},
-        onAttachFile = {},
+        onAttachMedia = { mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
+        onAttachFile = { filePicker.launch(arrayOf("*/*")) },
         bubble = BubbleActions(
             onResend = vm::resend,
             onDownload = vm::download,
             onCancel = vm::cancel,
             onOpenImage = { onOpenImage(conv, it) },
-            // 打开已下载文件由 Task 7 的 FileOpener 接上
-            onOpenFile = {},
+            onOpenFile = { item -> item.localPath?.let { FileOpener.open(ctx, it, item.mime) } },
             onRecall = vm::recall,
             onDelete = vm::deleteLocal,
             onForward = onForward,
@@ -106,6 +116,8 @@ fun ChatScreen(
     )
     ChatContent(state, canRecall = { vm.canRecall(it, System.currentTimeMillis()) }, actions = actions)
 }
+
+private const val MAX_PICK_ITEMS = 30
 
 private sealed interface ChatRow {
     data class Separator(val millis: Long) : ChatRow

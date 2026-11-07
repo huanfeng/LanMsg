@@ -224,4 +224,46 @@ class ChatViewModelTest {
         assertEquals(Request.DeleteLocal(listOf("m1"), false), fake.requests.last())
         assertEquals(listOf("m2"), vm.ids())
     }
+
+    @Test fun delete_local_during_reload_is_not_resurrected_by_stale_response() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        var calls = 0
+        val fake = FakeCoreApi().apply {
+            handler = { r ->
+                when (r) {
+                    is Request.ListConversations -> Response.Conversations(listOf(Fixtures.conv("c1", "对端")))
+                    is Request.ListMessages -> {
+                        val n = calls++
+                        if (n > 0) gate.await()
+                        Response.Messages(listOf(m("m1"), m("m2")))
+                    }
+                    else -> Response.Ok
+                }
+            }
+        }
+        val vm = ChatViewModel(fake, "c1", VisibleConversation)
+        advanceUntilIdle()
+        assertEquals(listOf("m1", "m2"), vm.ids())
+        fake.emitLagged() // 触发重拉并挂起在 gate
+        advanceUntilIdle()
+        vm.deleteLocal("m1"); advanceUntilIdle()
+        assertEquals(listOf("m2"), vm.ids())
+        gate.complete(Unit) // 放行含 m1 的旧响应
+        advanceUntilIdle()
+        assertEquals(listOf("m2"), vm.ids())
+    }
+
+    @Test fun import_and_send_sends_imported_paths_and_skips_when_empty() = runTest {
+        val fake = fakeWith { emptyList() }
+        val vm = ChatViewModel(fake, "c1", VisibleConversation)
+        advanceUntilIdle()
+        val importer = object : name.apk.lanmsg.files.Importer {
+            override suspend fun import(uris: List<android.net.Uri>) = if (uris.size == 1) listOf("/o/a.jpg") else emptyList()
+        }
+        vm.importAndSend(importer, listOf(android.net.Uri.EMPTY)); advanceUntilIdle()
+        assertEquals(Request.SendFiles("c1", listOf("/o/a.jpg")), fake.requests.last())
+        val n = fake.requests.size
+        vm.importAndSend(importer, listOf(android.net.Uri.EMPTY, android.net.Uri.EMPTY)); advanceUntilIdle()
+        assertEquals(n, fake.requests.size)
+    }
 }

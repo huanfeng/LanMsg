@@ -43,6 +43,7 @@
     <string name="file_download_original">下载原图</string>
     <string name="file_save_to_gallery">保存到相册</string>
     <string name="file_saved">已保存</string>
+    <string name="file_save_failed">保存失败</string>
     <string name="file_open_conversation">打开所在会话</string>
     <string name="files_all">全部</string>
     <string name="files_image">图片</string>
@@ -118,6 +119,8 @@
     <string name="settings_battery_desc">在系统电池优化中将 LanMsg 设为“不优化”，避免后台连接被中断</string>
     <string name="share_pick_title">发送到</string>
     <string name="share_empty">没有可用的会话</string>
+    <string name="share_need_setup">请先完成初始化，再分享文件</string>
+    <string name="share_import_failed">无法读取要发送的文件</string>
     <string name="path_vpn">VPN</string>
     <string name="path_internet">公网</string>
     <string name="path_relay">中继</string>
