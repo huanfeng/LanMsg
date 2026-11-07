@@ -150,14 +150,14 @@ async fn on_read(svc: &Inner, m: &StoredMessage, upto: &Hlc) {
     let peers = svc.conns.peers();
     for id in ids {
         if let Ok(Some(sm)) = svc.store.get_message(&id) {
-            let _ = svc.events.send(Event::MessageUpdated {
-                msg: crate::service::views::message_view(
-                    svc.store.as_ref(),
-                    &self_device,
-                    &peers,
-                    &sm,
-                ),
-            });
+            if let Some(msg) = crate::service::views::visible_message_view(
+                svc.store.as_ref(),
+                &self_device,
+                &peers,
+                &sm,
+            ) {
+                let _ = svc.events.send(Event::MessageUpdated { msg });
+            }
         }
     }
 }
@@ -176,14 +176,14 @@ async fn on_recall(svc: &Inner, m: &StoredMessage, target: &MsgId) {
         (true, Some(t)) => {
             let self_device = svc.identity.read().unwrap().device_id();
             let peers = svc.conns.peers();
-            let _ = svc.events.send(Event::MessageUpdated {
-                msg: crate::service::views::message_view(
-                    svc.store.as_ref(),
-                    &self_device,
-                    &peers,
-                    &t,
-                ),
-            });
+            if let Some(msg) = crate::service::views::visible_message_view(
+                svc.store.as_ref(),
+                &self_device,
+                &peers,
+                &t,
+            ) {
+                let _ = svc.events.send(Event::MessageUpdated { msg });
+            }
             // 目标若是会话最后一条，预览变为“已撤回”。
             crate::service::notify_conversation(svc, &t.env.conv);
         }

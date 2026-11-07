@@ -180,13 +180,9 @@ fn conv_preview(c: &ConversationSummary) -> String {
         Some(LastMessageKind::Image { .. }) => strings::PREVIEW_IMAGE.into(),
         Some(LastMessageKind::Video { .. }) => strings::PREVIEW_VIDEO.into(),
         Some(LastMessageKind::File { count, .. }) if *count > 1 => {
-            format!(
-                "{} {}{}",
-                strings::PREVIEW_FILE,
-                count,
-                strings::FILE_COUNT_UNIT
-            )
+            format!("[{} {}]", count, strings::FILE_COUNT_UNIT)
         }
+        Some(LastMessageKind::File { name, .. }) if name.is_empty() => strings::PREVIEW_FILE.into(),
         Some(LastMessageKind::File { name, .. }) => format!("{} {name}", strings::PREVIEW_FILE),
         Some(LastMessageKind::Folder { name }) => format!("{} {name}", strings::PREVIEW_FOLDER),
         Some(LastMessageKind::System) => strings::PREVIEW_SYSTEM.into(),
@@ -517,7 +513,12 @@ mod tests {
             count,
         };
         assert_eq!(p(None, Some(file(1))), "[文件] a.pdf");
-        assert_eq!(p(None, Some(file(3))), "[文件] 3个文件");
+        assert_eq!(p(None, Some(file(3))), "[3 个文件]");
+        let nameless = LastMessageKind::File {
+            name: String::new(),
+            count: 0,
+        };
+        assert_eq!(p(None, Some(nameless)), "[文件]");
         assert_eq!(
             p(
                 None,

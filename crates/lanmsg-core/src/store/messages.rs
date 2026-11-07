@@ -419,7 +419,7 @@ impl Store {
     }
 
     /// 把该会话中 `author_user` 发出的、`hlc <= upto`、状态为 sent/delivered 的消息
-    /// 置 read，返回被改的 id。
+    /// 置 read，返回被改的 id（隐藏消息如 Read/Recall 回执本身不参与）。
     pub fn mark_read_upto(
         &self,
         conv: &ConvId,
@@ -435,6 +435,7 @@ impl Store {
             let mut stmt = conn.prepare(
                 "SELECT author, seq FROM messages
                  WHERE conv_id = ?1 AND author_user = ?2 AND state IN ('sent', 'delivered')
+                   AND hidden = 0
                    AND (hlc_millis < ?3 OR (hlc_millis = ?3 AND hlc_counter <= ?4))",
             )?;
             let rows = stmt.query_map(

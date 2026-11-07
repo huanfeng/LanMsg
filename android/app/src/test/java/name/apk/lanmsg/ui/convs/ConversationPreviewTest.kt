@@ -32,6 +32,11 @@ class ConversationPreviewTest {
         )
     }
 
+    @Test fun nameless_file_falls_back_to_plain_label() = assertEquals(
+        ConversationPreview(R.string.conv_preview_file_plain),
+        preview(LastMessageKind.File("", 0u)),
+    )
+
     @Test fun folder_system_recalled() {
         assertEquals(ConversationPreview(R.string.conv_preview_folder, "照片"), preview(LastMessageKind.Folder("照片")))
         assertEquals(ConversationPreview(R.string.conv_preview_system), preview(LastMessageKind.System))

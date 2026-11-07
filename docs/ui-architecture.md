@@ -150,6 +150,7 @@
 | conv_preview_image | [图片] |
 | conv_preview_video | [视频] |
 | conv_preview_file | [文件] %1$s |
+| conv_preview_file_plain | [文件] |
 | conv_preview_files | [%1$s 个文件] |
 | conv_preview_folder | [文件夹] %1$s |
 | conv_preview_system | [系统消息] |

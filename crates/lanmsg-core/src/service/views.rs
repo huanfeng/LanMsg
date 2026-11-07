@@ -352,6 +352,20 @@ pub fn message_view(
     }
 }
 
+/// 对外事件用的消息视图：隐藏消息（已读回执、撤回、资料更新等）返回 None，
+/// 所有发 MessageAdded/MessageUpdated 的地方都经此构造，避免隐藏消息漏到界面。
+pub fn visible_message_view(
+    store: &Store,
+    self_device: &DeviceId,
+    peers: &[PeerInfo],
+    m: &StoredMessage,
+) -> Option<MessageView> {
+    if lanmsg_proto::body_is_hidden(&m.env.body) {
+        return None;
+    }
+    Some(message_view(store, self_device, peers, m))
+}
+
 /// 最后一条消息的结构化类型；已撤回的消息不暴露原内容。
 fn last_message_kind(m: &StoredMessage) -> LastMessageKind {
     if m.state == MsgStateRow::Recalled {
@@ -359,6 +373,7 @@ fn last_message_kind(m: &StoredMessage) -> LastMessageKind {
     }
     match &m.env.body {
         MsgBody::Text { .. } => LastMessageKind::Text,
+        // 空文件列表（理论上不会出现）：按无名单文件处理，由各端显示不带名字的“[文件]”。
         MsgBody::Files { items } => {
             let count = items.len() as u32;
             if !items.is_empty() && items.iter().all(|b| b.mime.starts_with("image/")) {
@@ -726,6 +741,19 @@ mod tests {
             last(&s).last_kind,
             Some(LastMessageKind::Folder {
                 name: "照片".into()
+            })
+        );
+    }
+
+    #[test]
+    fn empty_files_message_falls_back_to_nameless_file() {
+        let s = Store::open_in_memory().unwrap();
+        put(&s, 1, MsgBody::Files { items: vec![] });
+        assert_eq!(
+            last(&s).last_kind,
+            Some(LastMessageKind::File {
+                name: String::new(),
+                count: 0
             })
         );
     }

@@ -19,8 +19,11 @@ fun conversationPreview(s: ConversationSummary): ConversationPreview? = when (va
     is LastMessageKind.Image -> ConversationPreview(R.string.conv_preview_image)
     is LastMessageKind.Video -> ConversationPreview(R.string.conv_preview_video)
     is LastMessageKind.File ->
-        if (k.count > 1u) ConversationPreview(R.string.conv_preview_files, k.count.toString())
-        else ConversationPreview(R.string.conv_preview_file, k.name)
+        when {
+            k.count > 1u -> ConversationPreview(R.string.conv_preview_files, k.count.toString())
+            k.name.isEmpty() -> ConversationPreview(R.string.conv_preview_file_plain)
+            else -> ConversationPreview(R.string.conv_preview_file, k.name)
+        }
     is LastMessageKind.Folder -> ConversationPreview(R.string.conv_preview_folder, k.name)
     LastMessageKind.System -> ConversationPreview(R.string.conv_preview_system)
     LastMessageKind.Recalled -> ConversationPreview(R.string.conv_preview_recalled)

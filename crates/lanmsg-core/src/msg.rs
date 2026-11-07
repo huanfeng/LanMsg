@@ -24,7 +24,9 @@ use crate::hlc::HlcClock;
 use crate::identity::Identity;
 use crate::net::{ConnManager, PeerInfo};
 use crate::platform::PlatformHooks;
-use crate::service::views::{conv_summary, message_view, preparing_view, request_view};
+use crate::service::views::{
+    conv_summary, message_view, preparing_view, request_view, visible_message_view,
+};
 use crate::store::{
     BlobLocalKind, BlobLocalRow, ContactState, ConvKindRow, ConvRow, Gate, MsgStateRow,
     PreparingKind, PreparingRow, Store, StoredMessage,
@@ -778,13 +780,12 @@ impl Messaging {
                                 };
                                 // 隐藏消息（已读回执、撤回、资料更新等）只入库不推界面，
                                 // 否则界面会收到无法渲染的 Unsupported 条目。
-                                if !lanmsg_proto::body_is_hidden(&env.body) {
-                                    let msg_view = message_view(
-                                        self.store.as_ref(),
-                                        &self_device,
-                                        &self.conns.peers(),
-                                        &stored,
-                                    );
+                                if let Some(msg_view) = visible_message_view(
+                                    self.store.as_ref(),
+                                    &self_device,
+                                    &self.conns.peers(),
+                                    &stored,
+                                ) {
                                     let _ = self.events.send(Event::MessageAdded { msg: msg_view });
                                 }
 
@@ -870,13 +871,12 @@ impl Messaging {
                     if delivered {
                         self.store.set_message_state(&id, MsgStateRow::Delivered)?;
                         // 自己发出的隐藏消息（已读回执/撤回）被确认时不推界面事件。
-                        if !lanmsg_proto::body_is_hidden(&m.env.body) {
-                            let msg_view = message_view(
-                                self.store.as_ref(),
-                                &self_device,
-                                &self.conns.peers(),
-                                &m,
-                            );
+                        if let Some(msg_view) = visible_message_view(
+                            self.store.as_ref(),
+                            &self_device,
+                            &self.conns.peers(),
+                            &m,
+                        ) {
                             let _ = self.events.send(Event::MessageUpdated { msg: msg_view });
                         }
                     }

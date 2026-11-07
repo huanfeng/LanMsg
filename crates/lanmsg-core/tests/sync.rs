@@ -584,8 +584,9 @@ async fn recall_within_window_hides_on_all_sides() {
     }
 }
 
-/// 回归：已读回执 / 撤回是隐藏消息，对端入库后不得作为 MessageAdded/MessageUpdated
-/// 推给界面（否则界面渲染出“不支持的消息类型”）。
+/// 回归：已读回执 / 撤回是隐藏消息，双方互相已读、互相收到对方 Read 后，
+/// 都不得把它们作为 MessageAdded/MessageUpdated 推给界面（否则界面渲染出
+/// “不支持的消息类型”）。同时断言预期的可见 MessageAdded 确实到达，排除事件整体丢失。
 #[tokio::test]
 async fn hidden_bodies_never_reach_ui_events() {
     let mut a = node_offline().await;
@@ -612,13 +613,15 @@ async fn hidden_bodies_never_reach_ui_events() {
     wait_until(|| async { list_texts(&x, &conv).await.len() == 2 }, 5).await;
     wait_until(|| async { list_texts(&a, &conv).await.len() == 2 }, 5).await;
 
-    // X 标记已读（向 A 发 Read 回执），A 撤回自己的消息（向 X 发 Recall）。
-    let msgs = list_texts(&x, &conv).await;
-    x.call(Request::MarkRead {
-        conv: conv.clone(),
-        upto: msgs[1].id.clone(),
-    })
-    .await;
+    // 双方都标已读（各向对方发 Read），A 再撤回自己的消息（向 X 发 Recall）。
+    for n in [&a, &x] {
+        let last = list_texts(n, &conv).await.pop().expect("有消息");
+        n.call(Request::MarkRead {
+            conv: conv.clone(),
+            upto: last.id,
+        })
+        .await;
+    }
     let mine = list_texts(&a, &conv)
         .await
         .into_iter()
@@ -641,15 +644,28 @@ async fn hidden_bodies_never_reach_ui_events() {
     // 再等回执往返完成。
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    for n in [&mut a, &mut x] {
-        while let Ok(ev) = n.events.try_recv() {
-            if let Event::MessageAdded { msg } | Event::MessageUpdated { msg } = ev {
-                assert!(
-                    !matches!(msg.body, MessageBodyView::Unsupported),
-                    "隐藏消息泄漏到界面事件: {msg:?}"
-                );
+    for (name, n, want) in [("A", &mut a, "对方回复"), ("X", &mut x, "待撤回")] {
+        let mut saw_visible = false;
+        loop {
+            match n.events.try_recv() {
+                Ok(Event::MessageAdded { msg }) | Ok(Event::MessageUpdated { msg }) => {
+                    assert!(
+                        !matches!(msg.body, MessageBodyView::Unsupported),
+                        "{name} 收到隐藏消息泄漏的界面事件: {msg:?}"
+                    );
+                    if matches!(&msg.body, MessageBodyView::Text { text } if text == want) {
+                        saw_visible = true;
+                    }
+                }
+                Ok(_) => {}
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    panic!("{name} 事件通道落后 {n} 条，断言不可靠")
+                }
+                Err(broadcast::error::TryRecvError::Closed) => break,
             }
         }
+        assert!(saw_visible, "{name} 应收到可见消息事件 {want}");
     }
 }
 
