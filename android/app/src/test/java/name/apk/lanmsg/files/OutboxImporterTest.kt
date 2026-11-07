@@ -88,6 +88,14 @@ class OutboxImporterTest {
         assertEquals("ab.txt", OutboxImporter.sanitize("a\u200Eb\u200F.txt"))
     }
 
+    @Test fun sanitize_keeps_zwj_in_emoji_names_and_strips_rlo() {
+        val family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67.png" // 👨‍👩‍👧
+        assertEquals(family, OutboxImporter.sanitize(family))
+        assertEquals("a\u200Cb.txt", OutboxImporter.sanitize("a\u200Cb.txt"))
+        assertEquals("gpj.exe", OutboxImporter.sanitize("\u202Egpj.exe"))
+        assertEquals("ab", OutboxImporter.sanitize("a\u2066\u061Cb"))
+    }
+
     @Test fun non_content_and_own_provider_uris_are_skipped() = runTest {
         val imp = importer()
         val secret = File(tmp.root, "secret.txt").apply { writeText("s") }

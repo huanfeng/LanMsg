@@ -38,6 +38,7 @@ import name.apk.lanmsg.R
 import name.apk.lanmsg.ui.chat.ChatScreen
 import name.apk.lanmsg.ui.chat.ImageViewerScreen
 import name.apk.lanmsg.ui.convs.ConversationListScreen
+import name.apk.lanmsg.ui.files.FilesScreen
 import name.apk.lanmsg.ui.onboarding.OnboardingScreen
 import name.apk.lanmsg.ui.onboarding.OnboardingViewModel
 import name.apk.lanmsg.ui.share.SharePickScreen
@@ -119,7 +120,13 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
             composable(
                 Routes.FILES,
                 arguments = listOf(navArgument("conv") { type = NavType.StringType; nullable = true; defaultValue = null }),
-            ) { Placeholder(Routes.FILES) }
+            ) { entry ->
+                FilesScreen(
+                    initialConv = entry.arguments?.getString("conv"),
+                    onOpenChat = { nav.navigate(Routes.chat(it)) },
+                    onForward = { nav.navigate(Routes.forward(it)) },
+                )
+            }
             composable(Routes.CONTACTS) { Placeholder(Routes.CONTACTS) }
             composable(Routes.REQUESTS) { Placeholder(Routes.REQUESTS) }
             composable(Routes.ME) { Placeholder(Routes.ME) }

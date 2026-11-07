@@ -98,13 +98,19 @@ class OutboxImporter(
 
         private fun utf8Len(s: String) = s.toByteArray(Charsets.UTF_8).size
 
+        /** 双向文本控制符（可用于伪装扩展名）；ZWJ/ZWNJ 等其他格式字符要保留，否则会破坏 emoji 序列与部分文字。 */
+        private fun isBidiControl(cp: Int) =
+            cp in 0x202A..0x202E || cp in 0x2066..0x2069 || cp == 0x200E || cp == 0x200F || cp == 0x061C
+
         /**
-         * 去掉路径分隔符、控制字符与 Unicode 格式字符（如 U+202E 双向覆盖）、首尾空白和点；空则 "file"；
+         * 去掉路径分隔符、控制字符与双向控制符（如 U+202E，按码点判断；保留 ZWJ/ZWNJ）、首尾空白和点；空则 "file"；
          * 超过 120 字符或 200 字节时按码点截断主名（不拆代理对）并保留扩展名。
          */
         fun sanitize(displayName: String?): String {
             val cleaned = (displayName ?: "")
-                .filter { it != '/' && it != '\\' && !it.isISOControl() && Character.getType(it) != Character.FORMAT.toInt() }
+                .codePoints().toArray()
+                .filter { it != '/'.code && it != '\\'.code && !Character.isISOControl(it) && !isBidiControl(it) }
+                .joinToString("") { String(Character.toChars(it)) }
                 .trim { it.isWhitespace() || it == '.' }
             if (cleaned.isEmpty()) return "file"
             if (cleaned.length <= MAX_NAME && utf8Len(cleaned) <= MAX_NAME_BYTES) return cleaned

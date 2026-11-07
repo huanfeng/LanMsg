@@ -117,7 +117,7 @@ fun FileCard(
 }
 
 @Composable
-private fun FileStateMark(item: FileItemView, progress: Pair<ULong, ULong>?, color: Color, onCancel: (String) -> Unit) {
+internal fun FileStateMark(item: FileItemView, progress: Pair<ULong, ULong>?, color: Color, onCancel: (String) -> Unit) {
     when (item.state) {
         BlobState.REMOTE -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(Icons.Outlined.Download, contentDescription = null, tint = color, modifier = Modifier.size(20.dp))
