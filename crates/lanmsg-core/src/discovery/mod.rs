@@ -85,6 +85,12 @@ impl DiscoveredTable {
         g.get(d).map(|(a, s, _)| (a.clone(), *s))
     }
 
+    /// 取某设备的连接地址与该条目的年龄（距最近一次收到其通告）。
+    pub fn addr_with_age(&self, d: &DeviceId) -> Option<(SocketAddr, Duration)> {
+        let g = self.0.lock().unwrap();
+        g.get(d).map(|(_, s, t)| (*s, t.elapsed()))
+    }
+
     /// 列出 `within` 内记录的设备。
     pub fn recent(&self, within: Duration) -> Vec<(Announce, SocketAddr)> {
         let g = self.0.lock().unwrap();

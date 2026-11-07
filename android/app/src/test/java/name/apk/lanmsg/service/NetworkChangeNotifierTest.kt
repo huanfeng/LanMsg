@@ -6,6 +6,8 @@ import android.net.LinkProperties
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -30,8 +32,20 @@ class NetworkChangeNotifierTest {
         val cb = callbacks.single()
         val network = requireNotNull(cm.activeNetwork)
         cb.onAvailable(network)
+        assertEquals(1, calls)
+        // 紧随 onAvailable 的首次 LinkProperties 只记基线，内容没变的重复回调也不转发
         cb.onLinkPropertiesChanged(network, LinkProperties())
-        assertEquals(2, calls)
+        cb.onLinkPropertiesChanged(network, LinkProperties())
+        assertEquals(1, calls)
+    }
+
+    @Test fun link_snapshot_change_requires_a_baseline_and_a_difference() {
+        val a = LinkSnapshot(setOf("192.168.1.2/24"), setOf("0.0.0.0/0"))
+        val b = LinkSnapshot(setOf("10.0.0.5/24"), setOf("0.0.0.0/0"))
+        assertFalse(LinkSnapshot.changed(null, a))
+        assertFalse(LinkSnapshot.changed(a, a.copy()))
+        assertTrue(LinkSnapshot.changed(a, b))
+        assertTrue(LinkSnapshot.changed(a, a.copy(routes = emptySet())))
     }
 
     @Test fun stop_unregisters_the_callback() {

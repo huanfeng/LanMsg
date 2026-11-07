@@ -386,6 +386,22 @@ impl Service {
         self.inner.redial.attempts()
     }
 
+    /// 测试辅助：去抖后已触发的网络变化次数。
+    #[doc(hidden)]
+    pub fn redial_net_signals_for_test(&self) -> u64 {
+        self.inner.redial.net_signals()
+    }
+
+    /// 测试辅助：要求对端为 `expect` 的拨号。
+    #[doc(hidden)]
+    pub async fn connect_expecting_for_test(
+        &self,
+        addr: SocketAddr,
+        expect: DeviceId,
+    ) -> Result<DeviceId, CoreError> {
+        self.inner.conns.connect_expecting(addr, Some(expect)).await
+    }
+
     /// 测试辅助：访问存储（集成测试断言 holders 等用）。
     #[doc(hidden)]
     pub fn store_for_test(&self) -> Arc<Store> {
@@ -472,7 +488,7 @@ async fn routing_task(
                     inner.sync.on_peer_down(&device);
                     // 关系可能在连接期间才变成受信（刚加联系人），断开时补建重连任务。
                     redial::ensure_task(&inner, device);
-                    redial::wake(&inner);
+                    redial::wake(&inner, &device);
                     let _ = inner
                         .events
                         .send(Event::PeerOffline { device: device.to_hex() });
@@ -674,6 +690,8 @@ async fn on_discovery(inner: &Arc<Inner>, de: DiscoveryEvent) {
     if inner.conns.is_connected_alive(&peer_device) {
         return;
     }
+    // 受信设备又出现了：若其重连任务正在退避，让它马上重试。
+    redial::kick_device(inner, &peer_device);
     {
         let st = inner.state.read().unwrap();
         // 未初始化的 Service 不因发现而自动拨号（配对经 PairJoin 显式连接）。
@@ -717,9 +735,9 @@ async fn on_discovery(inner: &Arc<Inner>, de: DiscoveryEvent) {
 }
 
 /// 发现触发拨号的在途登记：Drop 时移除，保证任何退出路径都不泄漏地址。
-struct DialingGuard {
-    inner: Arc<Inner>,
-    addr: SocketAddr,
+pub(crate) struct DialingGuard {
+    pub(crate) inner: Arc<Inner>,
+    pub(crate) addr: SocketAddr,
 }
 
 impl Drop for DialingGuard {

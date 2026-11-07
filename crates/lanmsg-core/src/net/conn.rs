@@ -139,8 +139,10 @@ pub(crate) struct Connection {
 
 impl Connection {
     /// 出站连接：TCP → TLS → 交换并校验 Hello → 启动读写任务。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn connect_outbound(
         addr: SocketAddr,
+        expect: Option<DeviceId>,
         device_key: &DeviceKey,
         self_device: DeviceId,
         hello: &HelloInfo,
@@ -159,6 +161,13 @@ impl Connection {
             .map_err(|e| CoreError::Tls(e.to_string()))?;
         let (_io, session) = tls_stream.get_ref();
         let peer_device = peer_device_id(session).map_err(|e| CoreError::Tls(e.to_string()))?;
+        // 按已知地址重连时，对端必须就是期望的设备：地址可能已被别的主机占用。
+        // 在发送通道字节与 Hello（含本机证书、显示名）之前就断开，不泄露本机身份。
+        if expect.is_some_and(|e| e != peer_device) {
+            return Err(CoreError::Rejected(
+                "peer device does not match the expected device".into(),
+            ));
+        }
         // TLS 导出值：双方一致当且仅当无中间人。
         let mut tls_exporter = [0u8; 32];
         session

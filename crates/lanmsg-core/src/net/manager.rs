@@ -140,6 +140,16 @@ impl ConnManager {
         addr: SocketAddr,
         _via_multicast: bool,
     ) -> Result<DeviceId, CoreError> {
+        self.connect_expecting(addr, None).await
+    }
+
+    /// 拨号并要求对端就是 `expect`（TLS 握手后校验，不符立即断开，不发 Hello、不登记、不发 Up）。
+    /// 按已知地址重连用它，避免把本机身份发给占用了旧地址的陌生主机。
+    pub async fn connect_expecting(
+        &self,
+        addr: SocketAddr,
+        expect: Option<DeviceId>,
+    ) -> Result<DeviceId, CoreError> {
         if self.read_inner().closed {
             return Err(CoreError::PeerOffline);
         }
@@ -153,7 +163,11 @@ impl ConnManager {
                 // 避免静态对端任务对已存活的入站连接反复重拨。
                 let same_peer =
                     entry.peer_addr == addr || entry.connection.peer_info().dial_addr == addr;
-                if same_peer && entry.up_sent && entry.connection.idle() < replace_idle {
+                if same_peer
+                    && entry.up_sent
+                    && entry.connection.idle() < replace_idle
+                    && expect.is_none_or(|e| e == *device)
+                {
                     return Ok(*device);
                 }
             }
@@ -166,6 +180,7 @@ impl ConnManager {
             timing::current().dial,
             Connection::connect_outbound(
                 addr,
+                expect,
                 &self.device_key(),
                 self.self_device(),
                 &hello,
