@@ -374,6 +374,7 @@ mod tests {
             kind: ConvKind::Dm,
             title: id.into(),
             last_text: None,
+            last_kind: None,
             last_hlc_millis: Some(1),
             unread: 0,
             peer_online: true,

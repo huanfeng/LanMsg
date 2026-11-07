@@ -363,6 +363,23 @@ pub enum ConvKind {
     Station,
 }
 
+/// 会话最后一条消息的结构化类型（供各端自行拼预览文案，core 不生成展示文本）。
+///
+/// 图片/视频判定与 mime 前缀一致：整条消息的文件 mime 全以 `image/` 开头 → `Image`，
+/// 全以 `video/` 开头 → `Video`，否则 `File`（`name` 取第一个文件名）。
+/// 注意：文档注释里不要写斜杠加星号，uniffi 会原样抄进 Kotlin KDoc，Kotlin 块注释可嵌套。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum LastMessageKind {
+    Text,
+    Image { count: u32 },
+    Video { count: u32 },
+    File { name: String, count: u32 },
+    Folder { name: String },
+    System,
+    Recalled,
+}
+
 /// 会话摘要。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -371,6 +388,8 @@ pub struct ConversationSummary {
     pub kind: ConvKind,
     pub title: String,
     pub last_text: Option<String>,
+    /// 最后一条可见消息的类型；会话无消息时为 None。
+    pub last_kind: Option<LastMessageKind>,
     pub last_hlc_millis: Option<i64>,
     pub unread: u32,
     pub peer_online: bool,

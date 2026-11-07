@@ -12,14 +12,15 @@ import uniffi.lanmsg_api.MessageView
 import uniffi.lanmsg_api.PathClassDto
 import uniffi.lanmsg_api.PeerView
 import uniffi.lanmsg_api.RequestKind
+import uniffi.lanmsg_api.LastMessageKind
 import uniffi.lanmsg_api.RequestView
 import uniffi.lanmsg_api.SelfInfo
 import uniffi.lanmsg_api.StatusDto
 
 object Fixtures {
-    fun conv(id: String = "c1", title: String = "我的设备", unread: UInt = 0u, last: Long? = 1000, kind: ConvKind = ConvKind.SELF_DEVICES): ConversationSummary =
+    fun conv(id: String = "c1", title: String = "我的设备", unread: UInt = 0u, last: Long? = 1000, kind: ConvKind = ConvKind.SELF_DEVICES, lastKind: LastMessageKind? = null, lastText: String? = null): ConversationSummary =
         ConversationSummary(
-            conv = id, kind = kind, title = title, lastText = null,
+            conv = id, kind = kind, title = title, lastText = lastText, lastKind = lastKind,
             lastHlcMillis = last, unread = unread, peerOnline = true,
         )
 

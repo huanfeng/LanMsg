@@ -5,8 +5,8 @@
 use std::path::PathBuf;
 
 use lanmsg_api::types::{
-    BlobState, ConvKind, ConversationSummary, FileItemView, MessageBodyView, MessageState,
-    MessageView,
+    BlobState, ConvKind, ConversationSummary, FileItemView, LastMessageKind, MessageBodyView,
+    MessageState, MessageView,
 };
 use lanmsg_proto::ids::{DeviceId, MsgId, UserId};
 use lanmsg_proto::types::{BlobMeta, MsgBody, SystemEvent};
@@ -352,11 +352,36 @@ pub fn message_view(
     }
 }
 
+/// 最后一条消息的结构化类型；已撤回的消息不暴露原内容。
+fn last_message_kind(m: &StoredMessage) -> LastMessageKind {
+    if m.state == MsgStateRow::Recalled {
+        return LastMessageKind::Recalled;
+    }
+    match &m.env.body {
+        MsgBody::Text { .. } => LastMessageKind::Text,
+        MsgBody::Files { items } => {
+            let count = items.len() as u32;
+            if !items.is_empty() && items.iter().all(|b| b.mime.starts_with("image/")) {
+                LastMessageKind::Image { count }
+            } else if !items.is_empty() && items.iter().all(|b| b.mime.starts_with("video/")) {
+                LastMessageKind::Video { count }
+            } else {
+                LastMessageKind::File {
+                    name: items.first().map(|b| b.name.clone()).unwrap_or_default(),
+                    count,
+                }
+            }
+        }
+        MsgBody::Folder { name, .. } => LastMessageKind::Folder { name: name.clone() },
+        _ => LastMessageKind::System,
+    }
+}
+
 /// 将会话行转换为会话摘要。
 ///
 /// - DM 标题 = 对端用户显示名（无则 user short）。
 /// - SelfDevices 标题 = `"我的设备"`。
-/// - `last_text`/`last_hlc_millis` 取最新一条消息。
+/// - `last_text`/`last_kind`/`last_hlc_millis` 取最新一条可见消息（隐藏的不计）。
 /// - `unread` = 他人发出、晚于已读水位、未隐藏未删除未召回的条数。
 pub fn conv_summary(
     store: &Store,
@@ -376,17 +401,18 @@ pub fn conv_summary(
     };
 
     let messages = store.list_messages(&conv.conv, None, 1).unwrap_or_default();
-    let (last_text, last_hlc_millis) = messages
+    let (last_text, last_kind, last_hlc_millis) = messages
         .into_iter()
         .next()
         .map(|m| {
-            let text = match &m.env.body {
-                MsgBody::Text { text } => Some(text.clone()),
+            let text = match (&m.env.body, m.state) {
+                (_, MsgStateRow::Recalled) => None,
+                (MsgBody::Text { text }, _) => Some(text.clone()),
                 _ => None,
             };
-            (text, Some(m.env.hlc.millis))
+            (text, Some(last_message_kind(&m)), Some(m.env.hlc.millis))
         })
-        .unwrap_or((None, None));
+        .unwrap_or((None, None, None));
 
     let kind = match conv.kind {
         crate::store::ConvKindRow::SelfDevices => ConvKind::SelfDevices,
@@ -415,6 +441,7 @@ pub fn conv_summary(
         kind,
         title,
         last_text,
+        last_kind,
         last_hlc_millis,
         unread,
         peer_online,
@@ -566,5 +593,179 @@ pub fn request_view(store: &Store, r: &RequestRow) -> RequestView {
         from_short,
         preview: r.preview.clone(),
         created_at: r.created_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{ConvKindRow, MsgStateRow};
+    use lanmsg_proto::ids::{BlobHash, ConvId};
+    use lanmsg_proto::types::{Envelope, Hlc, Signature64};
+
+    const CONV: ConvId = ConvId([1u8; 32]);
+    const AUTHOR: DeviceId = DeviceId([2u8; 32]);
+
+    fn conv_row() -> ConvRow {
+        ConvRow {
+            conv: CONV,
+            kind: ConvKindRow::Guest,
+            peer_user: None,
+            title: Some("t".into()),
+            created_at: 0,
+        }
+    }
+
+    fn blob(name: &str, mime: &str, tag: u8) -> BlobMeta {
+        BlobMeta {
+            hash: BlobHash([tag; 32]),
+            size: 1,
+            name: name.into(),
+            mime: mime.into(),
+            media: None,
+            thumb: None,
+        }
+    }
+
+    fn put(s: &Store, seq: u64, body: MsgBody) -> MsgId {
+        let id = MsgId {
+            author: AUTHOR,
+            seq,
+        };
+        let env = Envelope {
+            conv: CONV,
+            id: id.clone(),
+            conv_seq: seq,
+            hlc: Hlc {
+                millis: 100 + seq as i64,
+                counter: 0,
+            },
+            body,
+            enc: None,
+            sig: Signature64([0u8; 64]),
+        };
+        s.insert_envelope(&env, MsgStateRow::Delivered, 1).unwrap();
+        id
+    }
+
+    fn last(s: &Store) -> ConversationSummary {
+        conv_summary(s, None, &conv_row(), false)
+    }
+
+    #[test]
+    fn last_kind_is_none_without_messages() {
+        let s = Store::open_in_memory().unwrap();
+        let sum = last(&s);
+        assert_eq!(sum.last_kind, None);
+        assert_eq!(sum.last_text, None);
+    }
+
+    #[test]
+    fn last_kind_text_image_video_file_folder() {
+        let s = Store::open_in_memory().unwrap();
+        put(&s, 1, MsgBody::Text { text: "hi".into() });
+        let sum = last(&s);
+        assert_eq!(sum.last_kind, Some(LastMessageKind::Text));
+        assert_eq!(sum.last_text.as_deref(), Some("hi"));
+
+        put(
+            &s,
+            2,
+            MsgBody::Files {
+                items: vec![
+                    blob("a.png", "image/png", 1),
+                    blob("b.jpg", "image/jpeg", 2),
+                ],
+            },
+        );
+        let sum = last(&s);
+        assert_eq!(sum.last_kind, Some(LastMessageKind::Image { count: 2 }));
+        assert_eq!(sum.last_text, None);
+
+        put(
+            &s,
+            3,
+            MsgBody::Files {
+                items: vec![blob("v.mp4", "video/mp4", 3)],
+            },
+        );
+        assert_eq!(
+            last(&s).last_kind,
+            Some(LastMessageKind::Video { count: 1 })
+        );
+
+        put(
+            &s,
+            4,
+            MsgBody::Files {
+                items: vec![
+                    blob("r.pdf", "application/pdf", 4),
+                    blob("a.png", "image/png", 5),
+                ],
+            },
+        );
+        assert_eq!(
+            last(&s).last_kind,
+            Some(LastMessageKind::File {
+                name: "r.pdf".into(),
+                count: 2
+            })
+        );
+
+        put(
+            &s,
+            5,
+            MsgBody::Folder {
+                name: "照片".into(),
+                entries: vec![],
+            },
+        );
+        assert_eq!(
+            last(&s).last_kind,
+            Some(LastMessageKind::Folder {
+                name: "照片".into()
+            })
+        );
+    }
+
+    #[test]
+    fn recalled_last_message_does_not_leak_content() {
+        let s = Store::open_in_memory().unwrap();
+        let id = put(
+            &s,
+            1,
+            MsgBody::Text {
+                text: "秘密".into(),
+            },
+        );
+        s.set_message_state(&id, MsgStateRow::Recalled).unwrap();
+        let sum = last(&s);
+        assert_eq!(sum.last_kind, Some(LastMessageKind::Recalled));
+        assert_eq!(sum.last_text, None);
+    }
+
+    #[test]
+    fn hidden_messages_are_not_previewed() {
+        let s = Store::open_in_memory().unwrap();
+        put(
+            &s,
+            1,
+            MsgBody::Text {
+                text: "可见".into(),
+            },
+        );
+        put(
+            &s,
+            2,
+            MsgBody::Read {
+                upto: Hlc {
+                    millis: 1,
+                    counter: 0,
+                },
+            },
+        );
+        let sum = last(&s);
+        assert_eq!(sum.last_kind, Some(LastMessageKind::Text));
+        assert_eq!(sum.last_text.as_deref(), Some("可见"));
     }
 }

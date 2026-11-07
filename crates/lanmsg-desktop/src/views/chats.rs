@@ -1,7 +1,7 @@
 // 会话列表与搜索。注释中文，标识符英文。
 // 视图只经 UiState 读写；行数据先压成可比较的 Row，再交给 list_signal 做键控复用。
 
-use lanmsg_api::types::{ConversationSummary, MessageBodyView, MessageView};
+use lanmsg_api::types::{ConversationSummary, LastMessageKind, MessageBodyView, MessageView};
 use windui::prelude::*;
 
 use crate::strings;
@@ -172,16 +172,34 @@ struct ConvRow {
     selected: bool,
 }
 
+/// 会话行第二行预览：文本取 `last_text`，其余按 `last_kind` 拼文案（core 不生成展示文本）。
+fn conv_preview(c: &ConversationSummary) -> String {
+    match &c.last_kind {
+        None => String::new(),
+        Some(LastMessageKind::Text) => c.last_text.clone().unwrap_or_default(),
+        Some(LastMessageKind::Image { .. }) => strings::PREVIEW_IMAGE.into(),
+        Some(LastMessageKind::Video { .. }) => strings::PREVIEW_VIDEO.into(),
+        Some(LastMessageKind::File { count, .. }) if *count > 1 => {
+            format!(
+                "{} {}{}",
+                strings::PREVIEW_FILE,
+                count,
+                strings::FILE_COUNT_UNIT
+            )
+        }
+        Some(LastMessageKind::File { name, .. }) => format!("{} {name}", strings::PREVIEW_FILE),
+        Some(LastMessageKind::Folder { name }) => format!("{} {name}", strings::PREVIEW_FOLDER),
+        Some(LastMessageKind::System) => strings::PREVIEW_SYSTEM.into(),
+        Some(LastMessageKind::Recalled) => strings::MSG_RECALLED.into(),
+    }
+}
+
 fn conv_row(c: &ConversationSummary, selected: bool, now: i64, tz_offset: i32) -> ConvRow {
     ConvRow {
         conv: c.conv.clone(),
         title: c.title.clone(),
         // 预览压成单行，避免换行把行撑高
-        preview: c
-            .last_text
-            .as_deref()
-            .unwrap_or("")
-            .replace(['\n', '\r'], " "),
+        preview: conv_preview(c).replace(['\n', '\r'], " "),
         time: c
             .last_hlc_millis
             .map(|t| format_time(t, now, tz_offset))
@@ -473,6 +491,45 @@ mod tests {
 
     const H: i64 = 3_600_000;
     const D: i64 = 24 * H;
+
+    fn summary(last_text: Option<&str>, kind: Option<LastMessageKind>) -> ConversationSummary {
+        ConversationSummary {
+            conv: "c".into(),
+            kind: lanmsg_api::types::ConvKind::Dm,
+            title: "t".into(),
+            last_text: last_text.map(Into::into),
+            last_kind: kind,
+            last_hlc_millis: None,
+            unread: 0,
+            peer_online: false,
+        }
+    }
+
+    #[test]
+    fn conv_preview_per_kind() {
+        let p = |t, k| conv_preview(&summary(t, k));
+        assert_eq!(p(None, None), "");
+        assert_eq!(p(Some("你好"), Some(LastMessageKind::Text)), "你好");
+        assert_eq!(p(None, Some(LastMessageKind::Image { count: 2 })), "[图片]");
+        assert_eq!(p(None, Some(LastMessageKind::Video { count: 1 })), "[视频]");
+        let file = |count| LastMessageKind::File {
+            name: "a.pdf".into(),
+            count,
+        };
+        assert_eq!(p(None, Some(file(1))), "[文件] a.pdf");
+        assert_eq!(p(None, Some(file(3))), "[文件] 3个文件");
+        assert_eq!(
+            p(
+                None,
+                Some(LastMessageKind::Folder {
+                    name: "照片".into()
+                })
+            ),
+            "[文件夹] 照片"
+        );
+        assert_eq!(p(None, Some(LastMessageKind::System)), "[系统消息]");
+        assert_eq!(p(None, Some(LastMessageKind::Recalled)), "消息已撤回");
+    }
 
     #[test]
     fn format_time_cases() {

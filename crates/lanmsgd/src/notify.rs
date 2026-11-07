@@ -184,6 +184,7 @@ mod tests {
                 kind,
                 title: title.into(),
                 last_text: None,
+                last_kind: None,
                 last_hlc_millis: None,
                 unread: 1,
                 peer_online: true,

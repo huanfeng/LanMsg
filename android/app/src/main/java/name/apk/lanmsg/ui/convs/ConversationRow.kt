@@ -70,8 +70,13 @@ fun ConversationRow(row: ConversationListViewModel.Row, onClick: () -> Unit, onT
                             Icon(Icons.Outlined.NotificationsOff, contentDescription = stringResource(R.string.mute), tint = c.inkSubtle, modifier = Modifier.size(16.dp))
                         }
                     }
+                    val preview = conversationPreview(s)
                     Text(
-                        s.lastText?.takeIf { it.isNotEmpty() } ?: stringResource(R.string.conv_no_message),
+                        when {
+                            preview == null -> s.lastText.orEmpty()
+                            preview.arg == null -> stringResource(preview.res)
+                            else -> stringResource(preview.res, preview.arg)
+                        },
                         color = c.inkMuted,
                         style = MaterialTheme.typography.bodyMedium,
                         maxLines = 1,

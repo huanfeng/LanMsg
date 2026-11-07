@@ -20,6 +20,13 @@
     <string name="onb_mode_join_desc">扫描电脑上的二维码，和已有设备同步</string>
     <string name="conv_self_title">我的设备</string>
     <string name="conv_no_message">暂无消息</string>
+    <string name="conv_preview_image">[图片]</string>
+    <string name="conv_preview_video">[视频]</string>
+    <string name="conv_preview_file">[文件] %1$s</string>
+    <string name="conv_preview_files">[%1$s 个文件]</string>
+    <string name="conv_preview_folder">[文件夹] %1$s</string>
+    <string name="conv_preview_system">[系统消息]</string>
+    <string name="conv_preview_recalled">消息已撤回</string>
     <string name="convs_empty">还没有会话。同一局域网里的设备会自动出现在联系人中</string>
     <string name="chat_input_hint">输入消息</string>
     <string name="chat_send">发送</string>

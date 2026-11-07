@@ -62,6 +62,7 @@ fn conv(
         kind,
         title: title.into(),
         last_text: Some(text.into()),
+        last_kind: Some(lanmsg_api::types::LastMessageKind::Text),
         last_hlc_millis: Some(real_now() - ago * MIN),
         unread,
         peer_online: true,

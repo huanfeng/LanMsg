@@ -62,6 +62,11 @@ pub const CHAT_PANE_EMPTY_HINT: &str = "从左侧选择一个会话，或在“�
 pub const CHAT_PANE_EMPTY_ACTION: &str = "去添加设备";
 pub const YESTERDAY: &str = "昨天";
 pub const UNKNOWN_CONV: &str = "未知会话";
+pub const PREVIEW_IMAGE: &str = "[图片]";
+pub const PREVIEW_VIDEO: &str = "[视频]";
+pub const PREVIEW_FILE: &str = "[文件]";
+pub const PREVIEW_FOLDER: &str = "[文件夹]";
+pub const PREVIEW_SYSTEM: &str = "[系统消息]";
 
 /// 聊天区。
 pub const CHAT_ONLINE: &str = "在线";

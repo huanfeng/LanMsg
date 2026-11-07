@@ -1492,6 +1492,7 @@ mod tests {
             kind: ConvKind::Dm,
             title: conv.into(),
             last_text: None,
+            last_kind: None,
             last_hlc_millis: ts,
             unread: 0,
             peer_online: true,

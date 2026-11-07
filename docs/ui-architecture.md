@@ -82,7 +82,7 @@
 
 | 组件 | 内容与规则 |
 |---|---|
-| 会话行 | 头像、标题（单行省略）、右上时间、第二行 `last_text`（单行省略，空则显示 `conv_no_message`）、未读角标（>99 显示 `99+`，`signal_fill` 底白字）、对端在线时头像右下 8dp 绿点（`online`，见 §5.1）；免打扰会话标题后显示静音图标，未读角标改灰色 |
+| 会话行 | 头像、标题（单行省略）、右上时间、第二行预览（单行省略；文本消息显示 `last_text`，其余按 `last_kind` 选 `conv_preview_*`，无消息显示 `conv_no_message`）、未读角标（>99 显示 `99+`，`signal_fill` 底白字）、对端在线时头像右下 8dp 绿点（`online`，见 §5.1）；免打扰会话标题后显示静音图标，未读角标改灰色 |
 | 消息气泡 | 自己的消息靠右、`signal_fill` 底白字（见 §5.1，暗色下不是 `signal`）；他人靠左、`surface` 底 + 1px `line`、`ink` 字；最大宽度为屏宽 75%；`kind == SelfDevices` 或对方有多台设备时，气泡上方显示小字 `来自 {author_device_name}`；相邻两条间隔 > 5 分钟时插入居中时间分隔；`state`：Sending 显示转圈、Failed 显示 `danger` 色感叹号（点按重发 = 再次 `SendText` 同文本）、Delivered 不显示、Read 显示 `msg_read`、Recalled 整条替换为居中灰字 `msg_recalled_by_me`/`msg_recalled` |
 | 文件卡片 | 左侧类型图标（按 mime：图片/视频/音频/文档/压缩包/其他），名称（中间省略）、大小、`source_label`（灰色小字）；右侧状态：Remote → 下载图标 + `file_not_downloaded`；Downloading → 环形进度 + 百分比 + × 按钮；Local → 无标记，点按打开；SourceOffline → 灰色 `file_source_offline`，不可点；Preparing → 转圈 + `file_preparing` |
 | 媒体网格 | Files 消息中所有图片/视频条目组成网格：1 个时按宽高比显示（最长边 240dp），2–4 个 2 列，5 个以上 3 列，最多显示 9 个，第 9 格显示 `+N`；视频右下角显示时长；缩略图来自 `thumb_path`，没有就显示类型图标；Downloading 时叠加进度环 |
@@ -147,6 +147,13 @@
 | onb_mode_join_desc | 扫描电脑上的二维码，和已有设备同步 |
 | conv_self_title | 我的设备 |
 | conv_no_message | 暂无消息 |
+| conv_preview_image | [图片] |
+| conv_preview_video | [视频] |
+| conv_preview_file | [文件] %1$s |
+| conv_preview_files | [%1$s 个文件] |
+| conv_preview_folder | [文件夹] %1$s |
+| conv_preview_system | [系统消息] |
+| conv_preview_recalled | 消息已撤回 |
 | convs_empty | 还没有会话。同一局域网里的设备会自动出现在联系人中 |
 | chat_input_hint | 输入消息 |
 | chat_send | 发送 |
