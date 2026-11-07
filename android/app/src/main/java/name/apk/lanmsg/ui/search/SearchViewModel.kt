@@ -12,12 +12,16 @@ import kotlinx.coroutines.launch
 import name.apk.lanmsg.core.ApiException
 import name.apk.lanmsg.core.CoreApi
 import name.apk.lanmsg.core.call
+import uniffi.lanmsg_api.ConvKind
+import uniffi.lanmsg_api.ConversationSummary
+import uniffi.lanmsg_api.Event
 import uniffi.lanmsg_api.MessageView
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
 
 class SearchViewModel(private val core: CoreApi) : ViewModel() {
-    data class Row(val msg: MessageView, val convTitle: String)
+    /** [selfDevices] 为“我的设备”会话：标题由界面换成本地化文案（ViewModel 拿不到 Context）。 */
+    data class Row(val msg: MessageView, val convTitle: String, val selfDevices: Boolean = false)
 
     data class UiState(
         val query: String = "",
@@ -31,9 +35,19 @@ class SearchViewModel(private val core: CoreApi) : ViewModel() {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
-    /** conv -> 标题缓存，首次搜索前拉取一次。 */
-    private var titles: Map<String, String>? = null
+    /** conv -> 会话摘要缓存：首次搜索前拉取，ConversationUpdated 时更新，结果里出现缓存没有的会话时重拉。 */
+    private var convs: MutableMap<String, ConversationSummary>? = null
     private var job: Job? = null
+
+    init {
+        viewModelScope.launch {
+            core.events.collect { e -> if (e is Event.ConversationUpdated) convs?.put(e.summary.conv, e.summary) }
+        }
+    }
+
+    private suspend fun loadConvs(): MutableMap<String, ConversationSummary> =
+        core.call<Response.Conversations>(Request.ListConversations).value
+            .associateByTo(mutableMapOf()) { it.conv }.also { convs = it }
 
     /** 300ms 防抖；trim 后为空 → 清空结果，不发请求。 */
     fun setQuery(q: String) {
@@ -48,10 +62,13 @@ class SearchViewModel(private val core: CoreApi) : ViewModel() {
         job = viewModelScope.launch {
             delay(DEBOUNCE_MS)
             try {
-                val map = titles ?: core.call<Response.Conversations>(Request.ListConversations).value
-                    .associate { it.conv to it.title }.also { titles = it }
                 val found = core.call<Response.Messages>(Request.SearchMessages(text, null, LIMIT)).value
-                val rows = found.map { Row(it, map[it.conv].orEmpty()) }
+                var map = convs ?: loadConvs()
+                if (found.any { it.conv !in map }) map = loadConvs()
+                val rows = found.map { m ->
+                    val summary = map[m.conv]
+                    Row(m, summary?.title.orEmpty(), summary?.kind == ConvKind.SELF_DEVICES)
+                }
                 _state.update { it.copy(rows = rows, loading = false, error = null, coreOutdated = false) }
             } catch (e: ApiException) {
                 if (e.isNotImplemented()) {

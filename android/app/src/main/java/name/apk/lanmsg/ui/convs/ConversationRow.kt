@@ -12,10 +12,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -35,8 +33,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import name.apk.lanmsg.R
-import name.apk.lanmsg.ui.common.Avatar
-import name.apk.lanmsg.ui.common.StatusDot
+import name.apk.lanmsg.ui.common.ConversationAvatar
 import name.apk.lanmsg.ui.common.formatTime
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import uniffi.lanmsg_api.ConvKind
@@ -56,22 +53,7 @@ fun ConversationRow(row: ConversationListViewModel.Row, onClick: () -> Unit, onT
             Modifier.fillMaxWidth().background(c.surface).combinedClickable(onClick = onClick, onLongClick = { menu = true }),
         ) {
             Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (selfDevices) {
-                    // “我的设备”用设备图标代替首字母
-                    Box(Modifier.size(48.dp)) {
-                        Box(Modifier.size(48.dp).background(c.signalSoft, CircleShape), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Outlined.Devices, contentDescription = null, tint = c.signal)
-                        }
-                        if (s.peerOnline) {
-                            Box(
-                                Modifier.align(Alignment.BottomEnd).size(11.dp).background(c.surface, CircleShape),
-                                contentAlignment = Alignment.Center,
-                            ) { StatusDot(online = true) }
-                        }
-                    }
-                } else {
-                    Avatar(name = title, userIdHex = s.conv, size = 48.dp, online = s.peerOnline)
-                }
+                ConversationAvatar(s, size = 48.dp, online = s.peerOnline)
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {

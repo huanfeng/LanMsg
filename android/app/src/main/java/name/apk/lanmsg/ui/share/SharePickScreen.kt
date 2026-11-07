@@ -9,15 +9,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
-import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -41,7 +38,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import name.apk.lanmsg.R
-import name.apk.lanmsg.ui.common.Avatar
+import name.apk.lanmsg.ui.common.ConversationAvatar
 import name.apk.lanmsg.ui.common.EmptyState
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import name.apk.lanmsg.ui.theme.LanMsgControls
@@ -108,13 +105,7 @@ fun SharePickContent(
                         val title = if (selfDevices) stringResource(R.string.conv_self_title) else s.title
                         Column(Modifier.fillMaxWidth().background(c.surface).clickable(enabled = !state.busy) { onPick(s.conv) }) {
                             Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                if (selfDevices) {
-                                    Box(Modifier.size(40.dp).background(c.signalSoft, CircleShape), contentAlignment = Alignment.Center) {
-                                        Icon(Icons.Outlined.Devices, contentDescription = null, tint = c.signal)
-                                    }
-                                } else {
-                                    Avatar(name = title, userIdHex = s.conv, size = 40.dp, online = s.peerOnline)
-                                }
+                                ConversationAvatar(s, size = 40.dp, online = s.peerOnline)
                                 Spacer(Modifier.width(12.dp))
                                 Text(title, color = c.ink, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }

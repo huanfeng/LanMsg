@@ -18,6 +18,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import uniffi.lanmsg_api.ErrorCode
+import uniffi.lanmsg_api.Event
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
 
@@ -66,6 +67,42 @@ class SearchViewModelTest {
         vm.setQuery("hi")
         advanceUntilIdle()
         assertEquals("张三", vm.state.value.rows.single().convTitle)
+    }
+
+    @Test fun conversation_updated_refreshes_cached_title() = runTest {
+        val fake = fake()
+        val vm = SearchViewModel(fake)
+        vm.setQuery("a")
+        advanceUntilIdle()
+        fake.emit(Event.ConversationUpdated(Fixtures.conv("c1", title = "张三丰")))
+        vm.setQuery("ab")
+        advanceUntilIdle()
+        assertEquals("张三丰", vm.state.value.rows.single().convTitle)
+        assertEquals(1, fake.requests.count { it == Request.ListConversations })
+    }
+
+    @Test fun unknown_conversation_triggers_refetch() = runTest {
+        val fake = fake().apply {
+            val inner = handler
+            var calls = 0
+            handler = { req ->
+                if (req == Request.ListConversations) {
+                    calls++
+                    Response.Conversations(if (calls == 1) emptyList() else listOf(Fixtures.conv("c1", title = "张三")))
+                } else inner(req)
+            }
+        }
+        val vm = SearchViewModel(fake)
+        vm.setQuery("a")
+        advanceUntilIdle()
+        assertEquals("张三", vm.state.value.rows.single().convTitle)
+    }
+
+    @Test fun self_devices_conversation_is_flagged() = runTest {
+        val vm = SearchViewModel(fake())
+        vm.setQuery("a")
+        advanceUntilIdle()
+        assertTrue(vm.state.value.rows.single().selfDevices)
     }
 
     @Test fun not_implemented_sets_core_outdated() = runTest {

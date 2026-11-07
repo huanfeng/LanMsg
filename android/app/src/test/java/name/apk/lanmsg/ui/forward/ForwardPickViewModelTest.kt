@@ -52,6 +52,18 @@ class ForwardPickViewModelTest {
         assertEquals("c2", vm.state.value.done)
     }
 
+    @Test fun pick_after_done_is_ignored() = runTest {
+        val fake = fake()
+        val vm = ForwardPickViewModel(fake, listOf("h1"))
+        advanceUntilIdle()
+        vm.pick("c2")
+        advanceUntilIdle()
+        vm.pick("c3")
+        advanceUntilIdle()
+        assertEquals(1, fake.requests.count { it is Request.ForwardFiles })
+        assertEquals("c2", vm.state.value.done)
+    }
+
     @Test fun failure_sets_error_and_keeps_done_null() = runTest {
         val fake = fake().apply {
             val inner = handler

@@ -130,11 +130,12 @@ private fun ResultRow(row: SearchViewModel.Row, onClick: () -> Unit) {
         is MessageBodyView.System -> b.text
         else -> ""
     }
+    val title = if (row.selfDevices) stringResource(R.string.conv_self_title) else row.convTitle
     Column(Modifier.fillMaxWidth().background(c.surface).clickable(onClick = onClick)) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    row.convTitle,
+                    title,
                     color = c.ink,
                     style = MaterialTheme.typography.titleMedium,
                     maxLines = 1,
@@ -143,7 +144,12 @@ private fun ResultRow(row: SearchViewModel.Row, onClick: () -> Unit) {
                 )
                 Text(formatTime(msg.hlcMillis), color = c.inkSubtle, fontSize = 12.sp)
             }
-            Text(msg.authorDeviceName, color = c.inkMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (msg.authorDeviceName.isNotEmpty()) {
+                Text(
+                    stringResource(R.string.chat_from_device, msg.authorDeviceName),
+                    color = c.inkMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
             Text(snippet, color = c.inkMuted, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
         HorizontalDivider(color = c.line)

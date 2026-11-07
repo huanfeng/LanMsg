@@ -20,6 +20,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -43,7 +44,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import name.apk.lanmsg.R
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.ui.common.EmptyState
-import name.apk.lanmsg.ui.common.Avatar
+import name.apk.lanmsg.ui.common.ConversationAvatar
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import uniffi.lanmsg_api.ConvKind
 import uniffi.lanmsg_api.ConversationSummary
@@ -125,9 +126,9 @@ private fun PickRow(s: ConversationSummary, onClick: () -> Unit) {
     val title = if (s.kind == ConvKind.SELF_DEVICES) stringResource(R.string.conv_self_title) else s.title
     Column(Modifier.fillMaxWidth().background(c.surface).clickable(onClick = onClick)) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Avatar(name = title, userIdHex = s.conv, size = 40.dp, online = s.peerOnline)
+            ConversationAvatar(s, size = 40.dp, online = s.peerOnline)
             Spacer(Modifier.width(12.dp))
-            Text(title, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, color = c.ink, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         HorizontalDivider(color = c.line)
     }

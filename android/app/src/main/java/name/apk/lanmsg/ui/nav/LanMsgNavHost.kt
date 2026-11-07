@@ -155,7 +155,18 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                 ForwardPickScreen(
                     hashes = hashes,
                     onBack = { nav.popBackStack() },
-                    onDone = { nav.navigate(Routes.chat(it)) { popUpTo(Routes.FORWARD) { inclusive = true } } },
+                    onDone = { done ->
+                        // 从目标会话自身转发：直接退回，避免返回栈里出现两个相同的聊天页
+                        val prev = nav.previousBackStackEntry
+                        if (prev?.destination?.route == Routes.CHAT && prev.arguments?.getString("conv") == done) {
+                            nav.popBackStack()
+                        } else {
+                            nav.navigate(Routes.chat(done)) {
+                                popUpTo(Routes.FORWARD) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    },
                 )
             }
             composable(Routes.CHAT, arguments = listOf(navArgument("conv") { type = NavType.StringType })) { entry ->

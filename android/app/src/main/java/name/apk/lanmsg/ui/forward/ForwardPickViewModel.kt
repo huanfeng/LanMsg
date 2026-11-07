@@ -41,7 +41,7 @@ class ForwardPickViewModel(private val core: CoreApi, private val hashes: List<S
     }
 
     fun pick(conv: String) {
-        if (picking) return
+        if (picking || _state.value.done != null) return
         picking = true
         viewModelScope.launch {
             try {
