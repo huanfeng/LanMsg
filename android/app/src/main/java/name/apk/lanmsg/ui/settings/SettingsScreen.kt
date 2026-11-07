@@ -168,6 +168,8 @@ fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onB
                 ActionRow(stringResource(R.string.settings_battery), stringResource(R.string.settings_battery_desc)) { openBatterySettings(ctx) }
             }
 
+            BatteryGuidanceCard(settings.backgroundMode)
+
             SectionHeader(stringResource(R.string.settings_trusted_wifi))
             Group {
                 for (ssid in state.trustedWifi.sorted()) {

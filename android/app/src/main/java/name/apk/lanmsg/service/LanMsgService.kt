@@ -20,10 +20,11 @@ import name.apk.lanmsg.R
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.core.CoreHolder
 import name.apk.lanmsg.notify.NotificationChannels
+import uniffi.lanmsg_api.BackgroundMode
 
-/** 常驻前台服务（specialUse）：持有 core 与 MulticastLock，保证后台也能收到局域网消息。 */
+/** 常驻前台服务（specialUse）：持有 core 与网络锁，保证后台也能收到局域网消息。 */
 class LanMsgService : LifecycleService() {
-    private var multicastLock: WifiManager.MulticastLock? = null
+    private var locks: NetworkLocks? = null
 
     // 常量在编译期内联；API 34 以下系统忽略类型参数
     @SuppressLint("InlinedApi")
@@ -40,9 +41,12 @@ class LanMsgService : LifecycleService() {
             return
         }
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        multicastLock = wifi.createMulticastLock("lanmsg").apply {
-            setReferenceCounted(false)
-            acquire()
+        locks = NetworkLocks(wifi).also { it.start() }
+        // WifiLock 只在实时档持有；档位变化时随之获取 / 释放
+        lifecycleScope.launch {
+            ServiceLocator.coreHolder.backgroundMode.collect { mode ->
+                locks?.setWifiLockWanted(mode == BackgroundMode.REALTIME)
+            }
         }
         // UNDISPATCHED：owner 在主线程上同步登记，onDestroy 的 release 一定排在它之后
         lifecycleScope.launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
@@ -64,8 +68,8 @@ class LanMsgService : LifecycleService() {
 
     override fun onDestroy() {
         super.onDestroy()
-        multicastLock?.takeIf { it.isHeld }?.release()
-        multicastLock = null
+        locks?.stop()
+        locks = null
         ServiceLocator.coreHolder.release(CoreHolder.SERVICE)
     }
 

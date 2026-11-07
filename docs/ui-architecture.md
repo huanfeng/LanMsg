@@ -267,6 +267,11 @@
 | settings_save_gallery | 收到的图片和视频保存到相册 |
 | settings_battery | 允许后台运行 |
 | settings_battery_desc | 在系统电池优化中将 LanMsg 设为“不优化”，避免后台连接被中断 |
+| battery_card_title | 后台连接可能被系统中断 |
+| battery_card_body | 系统正在对 LanMsg 做电池优化，熄屏后网络可能被切断，电脑端会显示本机离线。请允许 LanMsg 在后台不受限制地运行。 |
+| battery_card_action | 允许后台运行 |
+| battery_vendor_xiaomi | 在系统设置 → 应用设置 → 应用管理 → LanMsg 里，把“省电策略”设为“无限制”，并打开“自启动”。 |
+| battery_vendor_action | 打开应用详情 |
 | settings_clear_outbox | 清理已分享文件的副本 |
 | settings_clear_outbox_desc | 仅清理 7 天前的副本，当前共占用 %1$s |
 | settings_clear_outbox_confirm | 清理 7 天前的副本。尚未下载这些文件的设备将无法再获取它们；你手机里的原文件不受影响。 |
