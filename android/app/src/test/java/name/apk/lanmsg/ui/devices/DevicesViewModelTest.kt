@@ -2,6 +2,7 @@
 
 package name.apk.lanmsg.ui.devices
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.advanceTimeBy
@@ -119,7 +120,7 @@ class DevicesViewModelTest {
         vm.askRemove(other)
         vm.confirmRemove()
         advanceUntilIdle()
-        assertEquals("disk", vm.state.value.error)
+        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
         assertNull(vm.state.value.confirmRemove)
     }
 

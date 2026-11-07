@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.me
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,7 +17,7 @@ import uniffi.lanmsg_api.SelfInfo
 import uniffi.lanmsg_api.StatusDto
 
 class MeViewModel(private val core: CoreApi) : ViewModel() {
-    data class UiState(val self: SelfInfo? = null, val error: String? = null)
+    data class UiState(val self: SelfInfo? = null, val error: Int? = null)
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -41,7 +42,7 @@ class MeViewModel(private val core: CoreApi) : ViewModel() {
             core.call<Response.Ok>(req)
             reload()
         } catch (e: ApiException) {
-            _state.update { it.copy(error = e.message ?: e.code.name) }
+            _state.update { it.copy(error = errorTextRes(e.code)) }
         }
     }
 
@@ -50,7 +51,7 @@ class MeViewModel(private val core: CoreApi) : ViewModel() {
             val self = core.call<Response.SelfInfo>(Request.GetSelf).value
             _state.update { it.copy(self = self, error = null) }
         } catch (e: ApiException) {
-            _state.update { it.copy(error = e.message ?: e.code.name) }
+            _state.update { it.copy(error = errorTextRes(e.code)) }
         }
     }
 }

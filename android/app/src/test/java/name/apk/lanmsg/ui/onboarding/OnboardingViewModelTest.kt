@@ -2,6 +2,8 @@
 
 package name.apk.lanmsg.ui.onboarding
 
+import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.errorTextRes
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import name.apk.lanmsg.core.ApiException
@@ -46,10 +48,10 @@ class OnboardingViewModelTest {
     }
 
     @Test fun init_failure_shows_error_and_stays() = runTest {
-        val fake = FakeCoreApi().apply { handler = { throw ApiException(ErrorCode.IO, "磁盘已满") } }
+        val fake = FakeCoreApi().apply { handler = { throw ApiException(ErrorCode.IO, "disk full") } }
         val vm = OnboardingViewModel(fake, "Pixel 8")
         vm.next(); vm.setDisplayName("小明"); vm.next(); vm.chooseFirstDevice(); advanceUntilIdle()
-        assertEquals("磁盘已满", vm.state.value.error)
+        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
         assertNull(vm.state.value.done)
         assertEquals(false, vm.state.value.busy)
     }
@@ -59,7 +61,7 @@ class OnboardingViewModelTest {
         val vm = OnboardingViewModel(fake, "Pixel 8", onInitialized = { throw IllegalStateException("boom") })
         vm.next(); vm.setDisplayName("小明"); vm.next(); vm.chooseFirstDevice(); advanceUntilIdle()
         assertEquals(false, vm.state.value.busy)
-        assertNotNull(vm.state.value.error)
+        assertEquals(R.string.err_internal, vm.state.value.error)
         assertNull(vm.state.value.done)
     }
 }

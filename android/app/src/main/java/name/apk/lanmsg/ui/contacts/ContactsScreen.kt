@@ -67,9 +67,7 @@ fun ContactsContent(
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
     val toastText = state.toast?.let { stringResource(it) }
-    val errorText = state.error?.let {
-        if (it == ContactsViewModel.ERROR_PEER_OFFLINE) stringResource(R.string.err_peer_offline) else stringResource(R.string.err_generic, it)
-    }
+    val errorText = state.error?.let { stringResource(it) }
     LaunchedEffect(toastText) {
         if (toastText != null) {
             snackbar.showSnackbar(toastText)

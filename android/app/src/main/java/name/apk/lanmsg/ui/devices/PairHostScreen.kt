@@ -119,7 +119,7 @@ fun PairHostContent(
             }
             state.error?.let {
                 Spacer(Modifier.height(12.dp))
-                Text(stringResource(R.string.err_generic, it), color = c.danger, style = MaterialTheme.typography.bodyMedium)
+                Text(stringResource(it), color = c.danger, style = MaterialTheme.typography.bodyMedium)
             }
         }
     }

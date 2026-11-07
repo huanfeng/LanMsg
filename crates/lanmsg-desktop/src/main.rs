@@ -10,6 +10,7 @@ mod autostart;
 mod bridge;
 mod debounce;
 mod decoders;
+mod error_text;
 mod fixtures;
 mod model;
 mod strings;

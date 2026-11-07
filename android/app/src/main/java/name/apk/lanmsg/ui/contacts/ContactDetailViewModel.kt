@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.contacts
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,7 +19,7 @@ import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
 
 class ContactDetailViewModel(private val core: CoreApi, private val user: String) : ViewModel() {
-    data class UiState(val contact: ContactView? = null, val openConv: String? = null, val error: String? = null)
+    data class UiState(val contact: ContactView? = null, val openConv: String? = null, val error: Int? = null)
 
     /** core 最近确认的联系人（读取或写入成功）。仅在 policyLock 内写入，refresh 也更新它。 */
     private var confirmed: ContactView? = null
@@ -42,7 +43,7 @@ class ContactDetailViewModel(private val core: CoreApi, private val user: String
                     // 等锁期间若来了新的写入，界面是乐观值：不覆盖，写完后补拉
                     if (pendingPolicy == 0) _state.update { it.copy(contact = found, error = null) } else reloadAfterWrites = true
                 } catch (e: ApiException) {
-                    _state.update { it.copy(error = e.message ?: e.code.name) }
+                    _state.update { it.copy(error = errorTextRes(e.code)) }
                 }
             }
         }
@@ -54,7 +55,7 @@ class ContactDetailViewModel(private val core: CoreApi, private val user: String
                 val conv = core.call<Response.ConvId>(Request.OpenDm(user)).value
                 _state.update { it.copy(openConv = conv, error = null) }
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = errorTextRes(e.code)) }
             }
         }
     }
@@ -74,7 +75,7 @@ class ContactDetailViewModel(private val core: CoreApi, private val user: String
     private var reloadAfterWrites = false
 
     /** 被后续成功写入掩盖的失败，最后一次写完时一并输出。仅在 policyLock 内读写。 */
-    private var lastFailure: String? = null
+    private var lastFailure: Int? = null
 
     /** 先乐观更新；失败后重新读取 core 为准，读取也失败才回落到最近一次确认的值。 */
     private fun setPolicy(change: (ContactView) -> ContactView) {
@@ -86,12 +87,12 @@ class ContactDetailViewModel(private val core: CoreApi, private val user: String
                 // 在最近确认值上重放修改，前一次失败的改动不会被带出去
                 val base = confirmed ?: cur
                 val new = change(base)
-                var failure: String? = null
+                var failure: Int? = null
                 try {
                     core.call<Response.Ok>(Request.SetContactPolicy(user, new.autoAccept, new.askAboveBytes))
                     confirmed = new
                 } catch (e: ApiException) {
-                    failure = e.message ?: e.code.name
+                    failure = errorTextRes(e.code)
                     lastFailure = failure
                 } finally {
                     pendingPolicy--

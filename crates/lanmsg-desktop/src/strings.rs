@@ -24,13 +24,24 @@ pub const NAV_SETTINGS: &str = "设置";
 pub const PAGE_FILES: &str = "文件";
 pub const PAGE_SETTINGS: &str = "设置";
 
-/// 传输失败提示前缀，后接错误原因。
-pub const DOWNLOAD_FAILED_PREFIX: &str = "下载失败：";
-/// 传输失败但无原因时的兜底文字。
-pub const UNKNOWN_ERROR: &str = "未知错误";
+/// 传输失败原因文案（按 TransferFailReason）。
+pub const DOWNLOAD_CANCELLED: &str = "已取消下载";
+pub const DOWNLOAD_SOURCE_OFFLINE: &str = "下载失败：文件所在设备不在线";
+pub const DOWNLOAD_VERIFY_FAILED: &str = "下载失败：文件校验不通过";
+pub const DOWNLOAD_IO_FAILED: &str = "下载失败：无法写入文件";
+pub const DOWNLOAD_FAILED: &str = "下载失败";
+/// 错误码文案（按 ErrorCode）。
+pub const ERR_NOT_INITIALIZED: &str = "请先完成初始设置";
+pub const ERR_ALREADY_INITIALIZED: &str = "已经完成初始设置";
+pub const ERR_NOT_FOUND: &str = "内容不存在或已被删除";
+pub const ERR_INVALID_ARGUMENT: &str = "输入有误，请检查后重试";
+pub const ERR_PEER_OFFLINE: &str = "对方不在线";
+pub const ERR_REJECTED: &str = "操作被拒绝";
+pub const ERR_IO: &str = "读写文件失败";
+pub const ERR_INTERNAL: &str = "出错了，请重试";
+pub const ERR_UNIMPLEMENTED: &str = "此功能暂不可用";
 /// 转发成功提示。
 pub const FORWARDED: &str = "已转发";
-pub const NOT_CONNECTED: &str = "未连接后台服务";
 
 /// 首次向导。
 pub const WIZARD_TITLE: &str = "欢迎使用 LanMsg";

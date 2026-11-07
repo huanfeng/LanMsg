@@ -2,6 +2,7 @@
 
 package name.apk.lanmsg.ui.search
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -125,7 +126,7 @@ class SearchViewModelTest {
         val vm = SearchViewModel(fake)
         vm.setQuery("a")
         advanceUntilIdle()
-        assertEquals("boom", vm.state.value.error)
+        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
     }
 
     @Test fun permanently_missing_conversation_is_refetched_only_once() = runTest {

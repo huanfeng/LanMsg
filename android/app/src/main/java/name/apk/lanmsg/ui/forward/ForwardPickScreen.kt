@@ -77,7 +77,7 @@ fun ForwardPickContent(
     val c = LanMsgColors.current
     val ctx = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
-    val errorText = state.error?.let { stringResource(R.string.err_generic, it) }
+    val errorText = state.error?.let { stringResource(it) }
     LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it); onDismissError() } }
     val forwarded = stringResource(R.string.toast_forwarded)
     LaunchedEffect(state.done) {

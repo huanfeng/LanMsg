@@ -180,7 +180,7 @@ fun PairJoinContent(
                 }
             }
             state.error?.let {
-                Text(stringResource(R.string.err_generic, it), color = c.danger, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(16.dp))
+                Text(stringResource(it), color = c.danger, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(16.dp))
             }
         }
     }

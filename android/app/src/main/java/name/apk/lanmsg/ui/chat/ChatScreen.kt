@@ -165,13 +165,7 @@ fun ChatContent(
 ) {
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
-    val errorText = state.error?.let {
-        when (it) {
-            ChatViewModel.ERROR_PEER_OFFLINE -> stringResource(R.string.err_peer_offline)
-            ChatViewModel.ERROR_IMPORT_FAILED -> stringResource(R.string.share_import_failed)
-            else -> stringResource(R.string.err_generic, it)
-        }
-    }
+    val errorText = state.error?.let { stringResource(it) }
     LaunchedEffect(errorText) {
         if (errorText != null) {
             snackbar.showSnackbar(errorText)

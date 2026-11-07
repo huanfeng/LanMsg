@@ -2,6 +2,9 @@
 
 package name.apk.lanmsg.ui.files
 
+import uniffi.lanmsg_api.TransferFailReason
+import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -165,7 +168,7 @@ class FilesViewModelTest {
         }
         val vm = FilesViewModel(fake, null)
         advanceUntilIdle()
-        assertEquals("boom", vm.state.value.error)
+        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
         assertFalse(vm.state.value.coreOutdated)
     }
 
@@ -189,10 +192,10 @@ class FilesViewModelTest {
         val vm = FilesViewModel(fake, null)
         advanceUntilIdle()
         fake.emit(Event.TransferProgress("t1", "h1", 1uL, 10uL, 0uL)); advanceUntilIdle()
-        fake.emit(Event.TransferFinished("t1", "h1", false, "connection reset"))
+        fake.emit(Event.TransferFinished("t1", "h1", false, "connection reset", TransferFailReason.SOURCE_OFFLINE))
         // 500ms 后的重查成功不能清掉下载失败提示，否则 Snackbar 只闪一下
         advanceUntilIdle()
-        assertEquals("connection reset", vm.state.value.downloadError)
+        assertEquals(R.string.download_source_offline, vm.state.value.downloadError)
         assertNull(vm.state.value.error)
         assertTrue(vm.state.value.progress.isEmpty())
         vm.clearDownloadError()
@@ -205,7 +208,7 @@ class FilesViewModelTest {
         advanceUntilIdle()
         fake.emit(Event.TransferProgress("t2", "h2", 1uL, 10uL, 0uL)); advanceUntilIdle()
         vm.cancel("h2"); advanceUntilIdle()
-        fake.emit(Event.TransferFinished("t2", "h2", false, "cancelled")); advanceUntilIdle()
+        fake.emit(Event.TransferFinished("t2", "h2", false, "cancelled", TransferFailReason.CANCELLED)); advanceUntilIdle()
         assertNull(vm.state.value.downloadError)
     }
 
@@ -220,8 +223,8 @@ class FilesViewModelTest {
         vm.cancel("h3"); advanceUntilIdle()
         vm.clearDownloadError()
         // 取消请求失败后，传输随后真实失败应当提示
-        fake.emit(Event.TransferFinished("t3", "h3", false, "reset")); advanceUntilIdle()
-        assertEquals("reset", vm.state.value.downloadError)
+        fake.emit(Event.TransferFinished("t3", "h3", false, "reset", TransferFailReason.IO)); advanceUntilIdle()
+        assertEquals(R.string.download_io_failed, vm.state.value.downloadError)
     }
 
     @Test fun new_download_clears_stale_cancelled_mark() = runTest {
@@ -235,8 +238,8 @@ class FilesViewModelTest {
         vm.cancel("h4"); advanceUntilIdle()
         // 取消后没有收到结束事件就重新下载，旧的取消标记不应吞掉这次的真实失败
         vm.download("h4"); advanceUntilIdle()
-        fake.emit(Event.TransferFinished("t4", "h4", false, "reset")); advanceUntilIdle()
-        assertEquals("reset", vm.state.value.downloadError)
+        fake.emit(Event.TransferFinished("t4", "h4", false, "reset", TransferFailReason.IO)); advanceUntilIdle()
+        assertEquals(R.string.download_io_failed, vm.state.value.downloadError)
     }
 
     @Test fun source_devices_list_own_devices_first_then_other_peers() = runTest {

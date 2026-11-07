@@ -519,7 +519,7 @@ mod tests {
             },
             result: Err(lanmsg_api::types::ApiError {
                 code: lanmsg_api::types::ErrorCode::PeerOffline,
-                message: "对方离线".into(),
+                message: "peer offline".into(),
             }),
         }
     }

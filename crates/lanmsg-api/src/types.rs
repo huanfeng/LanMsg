@@ -61,6 +61,22 @@ pub enum ErrorCode {
     Unimplemented,
 }
 
+/// 传输失败原因（界面据此本地化文案）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum TransferFailReason {
+    /// 用户取消。
+    Cancelled,
+    /// 持有文件的设备不在线。
+    SourceOffline,
+    /// 整文件校验不通过。
+    VerifyFailed,
+    /// 本地读写失败。
+    Io,
+    /// 未知原因。
+    Unknown,
+}
+
 // ===== Request =====
 
 /// 客户端请求。
@@ -269,7 +285,10 @@ pub enum Event {
         transfer: String,
         hash: String,
         ok: bool,
+        /// 英文排障信息，不用于界面显示。
         error: Option<String>,
+        /// 失败原因（界面据此取文案）；成功时为 None。
+        reason: Option<TransferFailReason>,
     },
     IncomingRequest {
         request: RequestView,

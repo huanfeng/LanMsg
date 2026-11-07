@@ -96,7 +96,7 @@ class MainActivityLaunchTest {
         val owner = Owner()
         owner.registry.currentState = Lifecycle.State.STARTED
         var result: Boolean? = null
-        var failure: String? = null
+        var failure: Int? = null
         val ui = CoroutineScope(Dispatchers.Main)
         ui.launch {
             fetchSelfWhileStarted(

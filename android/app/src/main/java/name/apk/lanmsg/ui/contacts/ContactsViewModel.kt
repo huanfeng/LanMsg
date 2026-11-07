@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.contacts
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,8 +27,8 @@ class ContactsViewModel(private val core: CoreApi) : ViewModel() {
         val requestCount: Int = 0,
         /** 字符串资源 id，界面显示后调用 [toastShown]。 */
         val toast: Int? = null,
-        /** 对方不在线时为 [ERROR_PEER_OFFLINE]（界面显示 err_peer_offline），其余为 core 的错误消息。 */
-        val error: String? = null,
+        /** 文案资源 id（按错误码取）。 */
+        val error: Int? = null,
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -101,10 +102,5 @@ class ContactsViewModel(private val core: CoreApi) : ViewModel() {
         }
     }
 
-    private fun errorText(e: ApiException) =
-        if (e.code == ErrorCode.PEER_OFFLINE) ERROR_PEER_OFFLINE else e.message ?: e.code.name
-
-    companion object {
-        const val ERROR_PEER_OFFLINE = "peer_offline"
-    }
+    private fun errorText(e: ApiException) = errorTextRes(e.code)
 }

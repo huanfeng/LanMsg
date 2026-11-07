@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.devices
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
@@ -36,7 +37,7 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
         val candidates: List<PeerView> = emptyList(),
         val cameraGranted: Boolean = false,
         val confirmSent: Boolean = false,
-        val error: String? = null,
+        val error: Int? = null,
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -112,7 +113,7 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
             try {
                 core.call<Response.Ok>(Request.PairConfirm(session, matches, code))
             } catch (e: ApiException) {
-                _state.update { it.copy(confirmSent = false, error = e.message ?: e.code.name) }
+                _state.update { it.copy(confirmSent = false, error = errorTextRes(e.code)) }
             }
         }
     }
@@ -156,7 +157,7 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
                 val info = core.call<Response.PairSession>(Request.PairStart(method)).value
                 onSession(info.session, info.qrUri)
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = errorTextRes(e.code)) }
             } finally {
                 requesting = false
             }
@@ -172,7 +173,7 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
                 val info = core.call<Response.PairSession>(Request.PairJoin(target)).value
                 onSession(info.session, info.qrUri)
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = errorTextRes(e.code)) }
                 // 加入失败仍停留在选设备页：恢复候选轮询
                 if (_state.value.joinMode == JoinMode.PICK) startPolling()
             } finally {
@@ -220,7 +221,7 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
                 it.copy(candidates = peers.filter { p -> p.userId.isNotEmpty() && !p.isMine }.distinctBy { p -> p.deviceId })
             }
         } catch (e: ApiException) {
-            _state.update { it.copy(error = e.message ?: e.code.name) }
+            _state.update { it.copy(error = errorTextRes(e.code)) }
         }
     }
 

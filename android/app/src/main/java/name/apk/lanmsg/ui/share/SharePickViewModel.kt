@@ -1,5 +1,7 @@
 package name.apk.lanmsg.ui.share
 
+import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.errorTextRes
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -25,7 +27,7 @@ class SharePickViewModel(private val core: CoreApi, private val importer: Import
         val busy: Boolean = false,
         /** 发送成功的会话 id，界面据此跳转聊天页。 */
         val sentTo: String? = null,
-        val error: String? = null,
+        val error: Int? = null,
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -44,7 +46,7 @@ class SharePickViewModel(private val core: CoreApi, private val importer: Import
                 val list = core.call<Response.Conversations>(Request.ListConversations).value
                 _state.update { it.copy(items = list.sortedByDescending { c -> c.lastHlcMillis ?: Long.MIN_VALUE }) }
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = errorTextRes(e.code)) }
             }
         }
     }
@@ -58,7 +60,7 @@ class SharePickViewModel(private val core: CoreApi, private val importer: Import
                 if (s.pendingUris.isNotEmpty()) {
                     val paths = importer.import(s.pendingUris)
                     if (paths.isEmpty()) {
-                        _state.update { it.copy(busy = false, error = ERROR_IMPORT_FAILED) }
+                        _state.update { it.copy(busy = false, error = R.string.share_import_failed) }
                         return@launch
                     }
                     core.request(Request.SendFiles(conv, paths))
@@ -67,7 +69,7 @@ class SharePickViewModel(private val core: CoreApi, private val importer: Import
                 }
                 _state.update { it.copy(busy = false, sentTo = conv) }
             } catch (e: ApiException) {
-                _state.update { it.copy(busy = false, error = e.message ?: e.code.name) }
+                _state.update { it.copy(busy = false, error = errorTextRes(e.code)) }
             }
         }
     }
@@ -76,8 +78,4 @@ class SharePickViewModel(private val core: CoreApi, private val importer: Import
 
     /** 跳转聊天页后调用，清掉待发送内容，避免重复发送。 */
     fun reset() = _state.update { UiState(items = it.items) }
-
-    companion object {
-        const val ERROR_IMPORT_FAILED = "import_failed"
-    }
 }

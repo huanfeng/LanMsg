@@ -11,7 +11,7 @@ import uniffi.lanmsg_api.Response
 
 class FakeCoreApi : CoreApi {
     val requests = mutableListOf<Request>()
-    var handler: suspend (Request) -> Response = { throw ApiException(ErrorCode.INTERNAL, "fake 未配置") }
+    var handler: suspend (Request) -> Response = { throw ApiException(ErrorCode.INTERNAL, "fake not configured") }
     val eventsFlow = MutableSharedFlow<Event>(extraBufferCapacity = 64)
     val laggedFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
     var shutdownCount = 0

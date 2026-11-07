@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.forward
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,7 +20,7 @@ class ForwardPickViewModel(private val core: CoreApi, private val hashes: List<S
         val items: List<ConversationSummary> = emptyList(),
         /** 转发成功的目标会话。 */
         val done: String? = null,
-        val error: String? = null,
+        val error: Int? = null,
         /** ForwardFiles / ListConversations 未实现时为 true，界面显示 err_core_outdated。 */
         val coreOutdated: Boolean = false,
     )
@@ -58,6 +59,6 @@ class ForwardPickViewModel(private val core: CoreApi, private val hashes: List<S
     fun clearError() = _state.update { it.copy(error = null) }
 
     private fun fail(e: ApiException): (UiState) -> UiState = {
-        if (e.isNotImplemented()) it.copy(coreOutdated = true, error = null) else it.copy(error = e.message ?: e.code.name)
+        if (e.isNotImplemented()) it.copy(coreOutdated = true, error = null) else it.copy(error = errorTextRes(e.code))
     }
 }

@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.chat
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -72,7 +73,7 @@ class ImageViewerViewModel(private val core: CoreApi, private val conv: String, 
         val item: FileItemView? = null,
         val progress: Pair<ULong, ULong>? = null,
         val loading: Boolean = true,
-        val error: String? = null,
+        val error: Int? = null,
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -101,7 +102,7 @@ class ImageViewerViewModel(private val core: CoreApi, private val conv: String, 
             try {
                 core.request(Request.DownloadBlob(hash))
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = errorTextRes(e.code)) }
             }
         }
     }
@@ -116,7 +117,7 @@ class ImageViewerViewModel(private val core: CoreApi, private val conv: String, 
                 val found = msgs.firstNotNullOfOrNull { findItem(it.body) } ?: findInFiles()
                 _state.update { it.copy(item = found ?: it.item, loading = false, error = null) }
             } catch (e: ApiException) {
-                _state.update { it.copy(loading = false, error = e.message ?: e.code.name) }
+                _state.update { it.copy(loading = false, error = errorTextRes(e.code)) }
             }
         }
     }
@@ -201,7 +202,7 @@ fun ImageViewerContent(
             onMessageShown()
         }
     }
-    val errorText = state.error?.let { stringResource(R.string.err_generic, it) }
+    val errorText = state.error?.let { stringResource(it) }
     LaunchedEffect(errorText) {
         if (errorText != null) {
             snackbar.showSnackbar(errorText)

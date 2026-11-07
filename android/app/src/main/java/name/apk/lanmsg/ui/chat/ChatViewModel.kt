@@ -1,5 +1,9 @@
 package name.apk.lanmsg.ui.chat
 
+import uniffi.lanmsg_api.TransferFailReason
+import name.apk.lanmsg.ui.common.transferFailRes
+import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.errorTextRes
 import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -40,8 +44,8 @@ class ChatViewModel(
         val input: String = "",
         /** hash -> (已完成, 总量)。 */
         val progress: Map<String, Pair<ULong, ULong>> = emptyMap(),
-        /** 对方不在线时为 [ERROR_PEER_OFFLINE]（界面显示 err_peer_offline），其余为 core 的错误消息。 */
-        val error: String? = null,
+        /** 文案资源 id（按错误码或传输失败原因取）。 */
+        val error: Int? = null,
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -99,7 +103,7 @@ class ChatViewModel(
         if (uris.isEmpty()) return
         viewModelScope.launch {
             val paths = importer.import(uris)
-            if (paths.isEmpty()) _state.update { it.copy(error = ERROR_IMPORT_FAILED) } else sendFiles(paths)
+            if (paths.isEmpty()) _state.update { it.copy(error = R.string.share_import_failed) } else sendFiles(paths)
         }
     }
 
@@ -244,7 +248,7 @@ class ChatViewModel(
                 val userCancelled = cancelled.remove(e.hash)
                 _state.update { s ->
                     val cleared = s.copy(progress = s.progress - e.hash)
-                    if (e.ok || userCancelled) cleared else cleared.copy(error = e.error ?: DOWNLOAD_FAILED)
+                    if (e.ok || userCancelled) cleared else cleared.copy(error = transferFailRes(e.reason ?: TransferFailReason.UNKNOWN))
                 }
                 loadLatest()
             }
@@ -277,13 +281,10 @@ class ChatViewModel(
         }
     }
 
-    private fun errorText(e: ApiException): String =
-        if (e.code == ErrorCode.PEER_OFFLINE) ERROR_PEER_OFFLINE else e.message ?: e.code.name
+    private fun errorText(e: ApiException): Int =
+        errorTextRes(e.code)
 
     companion object {
-        const val ERROR_PEER_OFFLINE = "peer_offline"
-        const val ERROR_IMPORT_FAILED = "import_failed"
-        private const val DOWNLOAD_FAILED = "Download failed"
         private const val TAG = "ChatViewModel"
         private const val PAGE = 50u
         private const val RECALL_WINDOW_MS = 120_000L

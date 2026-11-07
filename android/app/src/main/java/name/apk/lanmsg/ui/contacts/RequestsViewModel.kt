@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.contacts
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,7 +18,7 @@ import uniffi.lanmsg_api.RequestView
 import uniffi.lanmsg_api.Response
 
 class RequestsViewModel(private val core: CoreApi) : ViewModel() {
-    data class UiState(val items: List<RequestView> = emptyList(), val error: String? = null)
+    data class UiState(val items: List<RequestView> = emptyList(), val error: Int? = null)
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -34,7 +35,7 @@ class RequestsViewModel(private val core: CoreApi) : ViewModel() {
                 val list = core.call<Response.Requests>(Request.ListRequests).value
                 _state.update { it.copy(items = list, error = null) }
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = errorTextRes(e.code)) }
             }
         }
     }
@@ -46,7 +47,7 @@ class RequestsViewModel(private val core: CoreApi) : ViewModel() {
                 core.call<Response.Ok>(Request.RespondRequest(request, action))
                 _state.update { s -> s.copy(items = s.items.filter { it.request != request }, error = null) }
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = errorTextRes(e.code)) }
             }
         }
     }

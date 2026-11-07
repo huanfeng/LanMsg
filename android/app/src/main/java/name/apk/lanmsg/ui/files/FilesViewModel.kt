@@ -1,5 +1,8 @@
 package name.apk.lanmsg.ui.files
 
+import uniffi.lanmsg_api.TransferFailReason
+import name.apk.lanmsg.ui.common.transferFailRes
+import name.apk.lanmsg.ui.common.errorTextRes
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -29,9 +32,9 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
         val filter: FileFilter,
         val items: List<FileView> = emptyList(),
         val loading: Boolean = true,
-        val error: String? = null,
+        val error: Int? = null,
         /** 下载/取消失败的一次性提示；独立于 [error]，重查不会清掉它，由界面消费后 [clearDownloadError]。 */
-        val downloadError: String? = null,
+        val downloadError: Int? = null,
         /** QueryFiles 未实现时为 true，界面显示 err_core_outdated。 */
         val coreOutdated: Boolean = false,
         val devices: List<DeviceOption> = emptyList(),
@@ -82,7 +85,7 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
                 if (r is Response.TransferId) transfers[hash] = r.value
                 scheduleRefresh()
             } catch (e: ApiException) {
-                _state.update { it.copy(downloadError = e.message ?: e.code.name) }
+                _state.update { it.copy(downloadError = errorTextRes(e.code)) }
             }
         }
     }
@@ -96,7 +99,7 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
             } catch (e: ApiException) {
                 // 取消没发出去，之后的失败是真实失败，不能再当作用户取消
                 cancelled -= hash
-                _state.update { it.copy(downloadError = e.message ?: e.code.name) }
+                _state.update { it.copy(downloadError = errorTextRes(e.code)) }
             }
         }
     }
@@ -123,7 +126,7 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
                 val userCancelled = cancelled.remove(e.hash)
                 _state.update { s ->
                     val cleared = s.copy(progress = s.progress - e.hash)
-                    if (e.ok || userCancelled) cleared else cleared.copy(downloadError = e.error ?: DOWNLOAD_FAILED)
+                    if (e.ok || userCancelled) cleared else cleared.copy(downloadError = transferFailRes(e.reason ?: TransferFailReason.UNKNOWN))
                 }
                 scheduleRefresh()
             }
@@ -151,7 +154,7 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
                 if (e.isNotImplemented()) {
                     _state.update { it.copy(loading = false, error = null, coreOutdated = true) }
                 } else {
-                    _state.update { it.copy(loading = false, error = e.message ?: e.code.name) }
+                    _state.update { it.copy(loading = false, error = errorTextRes(e.code)) }
                 }
             }
         }
@@ -181,7 +184,6 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
 
     companion object {
         private const val TAG = "FilesViewModel"
-        private const val DOWNLOAD_FAILED = "Download failed"
         private val LIMIT = 200u
         private const val QUERY_DEBOUNCE_MS = 300L
         private const val REFRESH_DEBOUNCE_MS = 500L

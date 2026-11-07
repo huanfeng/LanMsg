@@ -50,7 +50,7 @@
 ## §3 全局规则
 - 事件订阅：每个页面在可见期间订阅事件；收到"事件落后"（Android：`CoreApi.lagged`）或 App 回到前台时，当前页面执行一次"全量刷新"（重新发该页的加载请求）。
 - 合并规则：列表按 id 去重，后到的同 id 数据覆盖旧数据。
-- 错误：请求失败用底部提示条显示 `错误：<message>`；`PeerOffline` 显示文案 `err_peer_offline`；`NotInitialized` 跳回引导。
+- 错误：请求失败用底部提示条显示按 `ErrorCode` 取的本地化文案（桌面 `error_text`、Android `errorTextRes`，每个错误码一条 `err_*`）；传输失败按 `TransferFailReason` 取 `download_*` 文案；界面绝不显示 core 的 `ApiException.message`（英文排障信息）；`NotInitialized` 跳回引导。
 - 时间格式：今天 `HH:mm`；昨天 `昨天 HH:mm`；今年 `M月d日`；更早 `yyyy/M/d`。
 - 大小格式：`< 1024` → `N B`；`< 1024²` → `x.x KB`；`< 1024³` → `x.x MB`；否则 `x.x GB`（一位小数，去掉 `.0`）。
 - 时长格式：`m:ss`，超过 1 小时 `h:mm:ss`。
@@ -304,7 +304,19 @@
 | preview_open_with | 用其他应用打开 |
 | preview_truncated | 仅显示前 1 MB |
 | preview_failed | 无法预览这个文件 |
-| err_generic | 错误：%1$s |
+| err_not_initialized | 请先完成初始设置 |
+| err_already_initialized | 已经完成初始设置 |
+| err_not_found | 内容不存在或已被删除 |
+| err_invalid_argument | 输入有误，请检查后重试 |
+| err_rejected | 操作被拒绝 |
+| err_io | 读写文件失败 |
+| err_internal | 出错了，请重试 |
+| err_unimplemented | 此功能暂不可用 |
+| download_cancelled | 已取消下载 |
+| download_source_offline | 下载失败：文件所在设备不在线 |
+| download_verify_failed | 下载失败：文件校验不通过 |
+| download_io_failed | 下载失败：无法写入文件 |
+| download_failed | 下载失败 |
 | err_peer_offline | 对方不在线 |
 | err_core_outdated | 该功能需要更新核心库 |
 | search_hint | 搜索聊天记录 |

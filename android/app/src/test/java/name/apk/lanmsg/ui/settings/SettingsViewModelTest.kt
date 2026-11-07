@@ -2,6 +2,7 @@
 
 package name.apk.lanmsg.ui.settings
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -194,7 +195,7 @@ class SettingsViewModelTest {
         assertEquals(initial.autoImageMax, coreValue.autoImageMax)
         assertEquals(7uL, coreValue.autoFileMax)
         assertEquals(initial.autoImageMax, vm.state.value.settings?.autoImageMax)
-        assertEquals("once", vm.state.value.error)
+        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
     }
 
     @Test fun lagged_during_write_does_not_override_optimistic_value() = runTest {

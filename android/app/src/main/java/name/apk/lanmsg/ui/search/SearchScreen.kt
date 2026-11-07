@@ -108,7 +108,7 @@ fun SearchContent(
         Box(Modifier.padding(inner).fillMaxSize()) {
             when {
                 state.coreOutdated -> EmptyState(stringResource(R.string.err_core_outdated), Icons.Outlined.Search)
-                state.error != null -> EmptyState(stringResource(R.string.err_generic, state.error), Icons.Outlined.Search)
+                state.error != null -> EmptyState(stringResource(state.error), Icons.Outlined.Search)
                 state.rows.isNotEmpty() -> LazyColumn(Modifier.fillMaxSize()) {
                     items(state.rows, key = { it.msg.id }) { row -> ResultRow(row) { onOpenChat(row.msg.conv) } }
                 }

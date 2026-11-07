@@ -2,6 +2,7 @@
 
 package name.apk.lanmsg.notify
 
+import uniffi.lanmsg_api.TransferFailReason
 import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
@@ -366,10 +367,10 @@ class NotifierTest {
         val n = notifier()
         n.handle(Event.MessageAdded(imageMsg("h1", "image/jpeg")))
         serveLocalPath("h1", "image/jpeg", "/data/a.jpg")
-        n.handle(Event.TransferFinished("t1", "h1", true, null))
+        n.handle(Event.TransferFinished("t1", "h1", true, null, null))
         assertEquals(listOf(Triple("/data/a.jpg", "image/jpeg", "a.bin")), saver.saved)
         // 同一次下载不会重复入库
-        n.handle(Event.TransferFinished("t1", "h1", true, null))
+        n.handle(Event.TransferFinished("t1", "h1", true, null, null))
         assertEquals(1, saver.saved.size)
     }
 
@@ -377,7 +378,7 @@ class NotifierTest {
         val n = notifier()
         n.handle(Event.MessageAdded(imageMsg("h2", "application/pdf")))
         serveLocalPath("h2", "application/pdf", "/data/a.pdf")
-        n.handle(Event.TransferFinished("t1", "h2", true, null))
+        n.handle(Event.TransferFinished("t1", "h2", true, null, null))
         assertEquals(0, saver.saved.size)
     }
 
@@ -385,19 +386,19 @@ class NotifierTest {
         val n = notifier()
         n.handle(Event.MessageAdded(imageMsg("h3", "image/png")))
         serveLocalPath("h3", "image/png", "/data/b.png")
-        n.handle(Event.TransferFinished("t", "h3", false, "boom")) // 失败
-        n.handle(Event.TransferFinished("t", "unknown", true, null)) // 缓存未命中
+        n.handle(Event.TransferFinished("t", "h3", false, "boom", TransferFailReason.IO)) // 失败
+        n.handle(Event.TransferFinished("t", "unknown", true, null, null)) // 缓存未命中
         assertEquals(0, saver.saved.size)
 
         prefs.setSaveMediaToGallery(false)
         n.handle(Event.MessageAdded(imageMsg("h4", "image/png")))
-        n.handle(Event.TransferFinished("t", "h4", true, null))
+        n.handle(Event.TransferFinished("t", "h4", true, null, null))
         assertEquals(0, saver.saved.size)
 
         prefs.setSaveMediaToGallery(true)
         serveLocalPath("h5", "image/png", null)
         n.handle(Event.MessageAdded(imageMsg("h5", "image/png")))
-        n.handle(Event.TransferFinished("t", "h5", true, null))
+        n.handle(Event.TransferFinished("t", "h5", true, null, null))
         assertEquals(0, saver.saved.size)
     }
 }

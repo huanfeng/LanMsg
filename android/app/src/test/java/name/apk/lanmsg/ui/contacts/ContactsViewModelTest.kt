@@ -77,7 +77,7 @@ class ContactsViewModelTest {
         fake.handler = { throw ApiException(ErrorCode.PEER_OFFLINE, "offline") }
         vm.add("u2")
         advanceUntilIdle()
-        assertEquals(ContactsViewModel.ERROR_PEER_OFFLINE, vm.state.value.error)
+        assertEquals(R.string.err_peer_offline, vm.state.value.error)
         assertNull(vm.state.value.toast)
     }
 

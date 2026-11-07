@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.settings
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CoroutineDispatcher
@@ -39,7 +40,7 @@ class SettingsViewModel(
         val saveToGallery: Boolean = true,
         val trustedWifi: Set<String> = emptySet(),
         val outboxBytes: Long = 0,
-        val error: String? = null,
+        val error: Int? = null,
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -59,7 +60,7 @@ class SettingsViewModel(
     private var reloadAfterWrites = false
 
     /** 被后续成功写入掩盖的失败，最后一次写完时一并输出。仅在 writeLock 内读写。 */
-    private var lastFailure: String? = null
+    private var lastFailure: Int? = null
 
     init {
         viewModelScope.launch { prefs.notificationsEnabled.collect { v -> _state.update { it.copy(notifications = v) } } }
@@ -84,13 +85,13 @@ class SettingsViewModel(
             writeLock.withLock {
                 val base = confirmed ?: cur
                 val new = transform(base.copy())
-                var failure: String? = null
+                var failure: Int? = null
                 try {
                     core.call<Response.Ok>(Request.SetSettings(new))
                     confirmed = new
                     if (new.backgroundMode != base.backgroundMode) onBackgroundMode(new.backgroundMode)
                 } catch (e: ApiException) {
-                    failure = e.message ?: e.code.name
+                    failure = errorTextRes(e.code)
                     lastFailure = failure
                 } finally {
                     pendingWrites--
@@ -163,7 +164,7 @@ class SettingsViewModel(
                 // 等锁期间若来了新的写入，界面是乐观值：不覆盖，写完后会补拉
                 if (pendingWrites == 0) _state.update { it.copy(settings = s, error = null) } else reloadAfterWrites = true
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = errorTextRes(e.code)) }
             }
         }
     }

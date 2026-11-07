@@ -71,7 +71,7 @@ fun MeContent(
 ) {
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
-    val errorText = state.error?.let { stringResource(R.string.err_generic, it) }
+    val errorText = state.error?.let { stringResource(it) }
     LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it) } }
     var editing by remember { mutableStateOf(false) }
 

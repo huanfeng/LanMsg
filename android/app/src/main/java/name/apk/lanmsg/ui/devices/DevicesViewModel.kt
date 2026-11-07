@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.devices
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
@@ -22,7 +23,7 @@ class DevicesViewModel(private val core: CoreApi) : ViewModel() {
     data class UiState(
         val devices: List<DeviceView> = emptyList(),
         val confirmRemove: DeviceView? = null,
-        val error: String? = null,
+        val error: Int? = null,
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -50,7 +51,7 @@ class DevicesViewModel(private val core: CoreApi) : ViewModel() {
             try {
                 core.call<Response.Ok>(Request.RemoveDevice(target.deviceId))
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = errorTextRes(e.code)) }
             }
             load()
         }
@@ -72,7 +73,7 @@ class DevicesViewModel(private val core: CoreApi) : ViewModel() {
                 val list = core.call<Response.Devices>(Request.ListMyDevices).value
                 _state.update { it.copy(devices = list) }
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = errorTextRes(e.code)) }
             }
         }
     }

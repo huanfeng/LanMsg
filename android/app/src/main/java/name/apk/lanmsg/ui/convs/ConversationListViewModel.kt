@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.convs
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,7 +20,7 @@ import uniffi.lanmsg_api.Response
 class ConversationListViewModel(private val core: CoreApi, private val prefs: MutedStore) : ViewModel() {
     data class Row(val summary: ConversationSummary, val muted: Boolean)
 
-    data class UiState(val rows: List<Row> = emptyList(), val loading: Boolean = true, val error: String? = null)
+    data class UiState(val rows: List<Row> = emptyList(), val loading: Boolean = true, val error: Int? = null)
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -48,7 +49,7 @@ class ConversationListViewModel(private val core: CoreApi, private val prefs: Mu
                 _state.update { it.copy(loading = false, error = null) }
                 publish()
             } catch (e: ApiException) {
-                _state.update { it.copy(loading = false, error = e.message ?: e.code.name) }
+                _state.update { it.copy(loading = false, error = errorTextRes(e.code)) }
             } finally {
                 if (--inflight == 0) touched.clear()
             }

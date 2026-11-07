@@ -1,5 +1,7 @@
 package name.apk.lanmsg.ui.onboarding
 
+import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
@@ -29,8 +31,8 @@ class OnboardingViewModel(
         val displayName: String = "",
         val deviceName: String,
         val busy: Boolean = false,
-        /** 名字为空时为 [ERROR_NAME_REQUIRED]（界面显示 onb_name_required），其余为 core 的错误消息。 */
-        val error: String? = null,
+        /** 文案资源 id；名字为空时是 onb_name_required（界面已在输入框下方显示，不再重复）。 */
+        val error: Int? = null,
         val done: Destination? = null,
     )
 
@@ -47,7 +49,7 @@ class OnboardingViewModel(
             Step.WELCOME -> _state.update { it.copy(step = Step.NAME, error = null) }
             Step.NAME ->
                 if (s.displayName.isBlank()) {
-                    _state.update { it.copy(error = ERROR_NAME_REQUIRED) }
+                    _state.update { it.copy(error = R.string.onb_name_required) }
                 } else {
                     _state.update { it.copy(step = Step.MODE, error = null) }
                 }
@@ -70,18 +72,15 @@ class OnboardingViewModel(
                 onInitialized()
                 _state.update { it.copy(done = destination) }
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(error = errorTextRes(e.code)) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _state.update { it.copy(error = e.message ?: e.javaClass.simpleName) }
+                _state.update { it.copy(error = R.string.err_internal) }
             } finally {
                 _state.update { it.copy(busy = false) }
             }
         }
     }
 
-    companion object {
-        const val ERROR_NAME_REQUIRED = "name_required"
-    }
 }

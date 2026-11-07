@@ -2,6 +2,7 @@
 
 package name.apk.lanmsg.ui.contacts
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -83,7 +84,7 @@ class ContactDetailViewModelTest {
         vm.setAutoAccept(true)
         advanceUntilIdle()
         assertEquals(false, vm.state.value.contact?.autoAccept)
-        assertEquals("disk", vm.state.value.error)
+        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
     }
 
     @Test fun consecutive_policy_failures_end_with_core_value() = runTest {
@@ -97,7 +98,7 @@ class ContactDetailViewModelTest {
         advanceUntilIdle()
         assertEquals(false, vm.state.value.contact?.autoAccept)
         assertEquals(null, vm.state.value.contact?.askAboveBytes)
-        assertEquals("disk", vm.state.value.error)
+        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
     }
 
     @Test fun failed_first_policy_is_not_carried_by_second() = runTest {
@@ -111,7 +112,7 @@ class ContactDetailViewModelTest {
         vm.setAskAbove(10uL)
         advanceUntilIdle()
         assertEquals(Request.SetContactPolicy("u2", false, 10uL), fake.requests.last { it is Request.SetContactPolicy })
-        assertEquals("once", vm.state.value.error)
+        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
     }
 
     @Test fun stale_list_response_does_not_revert_confirmed_after_write() = runTest {

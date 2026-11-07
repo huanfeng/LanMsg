@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use lanmsg_api::types::*;
 
 use crate::bridge::{ReplyTag, UiMsg};
+use crate::error_text::{error_text, transfer_fail_text};
 use crate::strings;
 
 /// 一次拉取的消息页大小。
@@ -328,7 +329,7 @@ impl Model {
                     // 断线期间的自动请求会得到“未连接”，顶部提示条已说明，不再弹 toast
                     let offline_io = e.code == ErrorCode::Io && self.conn.is_down();
                     if !offline_io {
-                        self.toast = Some(e.message);
+                        self.toast = Some(error_text(&e.code).to_string());
                     }
                     match &tag {
                         // 文字发送失败：草稿交还输入框，避免用户重打
@@ -758,15 +759,15 @@ impl Model {
                 Vec::new()
             }
             Event::TransferFinished {
-                hash, ok, error, ..
+                hash, ok, reason, ..
             } => {
                 self.transfers.remove(&hash);
                 self.transfer_ids.remove(&hash);
                 self.pending_downloads.remove(&hash);
                 let cancelled = self.cancelled_downloads.remove(&hash);
                 if !ok && !cancelled {
-                    let why = error.unwrap_or_else(|| strings::UNKNOWN_ERROR.to_string());
-                    self.toast = Some(format!("{}{}", strings::DOWNLOAD_FAILED_PREFIX, why));
+                    let reason = reason.unwrap_or(TransferFailReason::Unknown);
+                    self.toast = Some(transfer_fail_text(&reason).to_string());
                 }
                 Vec::new()
             }
@@ -1847,6 +1848,7 @@ mod tests {
             hash: "h1".into(),
             ok: true,
             error: None,
+            reason: None,
         }));
         assert!(m.transfers.is_empty());
         assert_eq!(m.toast, None);
@@ -1854,9 +1856,10 @@ mod tests {
             transfer: "t".into(),
             hash: "h2".into(),
             ok: false,
-            error: Some("磁盘已满".into()),
+            error: Some("disk full".into()),
+            reason: Some(TransferFailReason::Io),
         }));
-        assert_eq!(m.toast.as_deref(), Some("下载失败：磁盘已满"));
+        assert_eq!(m.toast.as_deref(), Some(strings::DOWNLOAD_IO_FAILED));
     }
 
     #[test]
@@ -1947,10 +1950,13 @@ mod tests {
             tag: ReplyTag::Generic,
             result: Err(ApiError {
                 code: ErrorCode::PeerOffline,
-                message: "对方不在线".into(),
+                message: "peer offline".into(),
             }),
         });
-        assert_eq!(m.toast.as_deref(), Some("对方不在线"));
+        assert_eq!(
+            m.toast.as_deref(),
+            Some(error_text(&ErrorCode::PeerOffline))
+        );
     }
 
     #[test]
@@ -1968,7 +1974,7 @@ mod tests {
             tag,
             result: Err(ApiError {
                 code: ErrorCode::PeerOffline,
-                message: "对方离线".into(),
+                message: "peer offline".into(),
             }),
         });
         assert_eq!(
@@ -1985,7 +1991,7 @@ mod tests {
             },
             result: Err(ApiError {
                 code: ErrorCode::PeerOffline,
-                message: "对方离线".into(),
+                message: "peer offline".into(),
             }),
         });
     }
@@ -2022,7 +2028,7 @@ mod tests {
             tag: ReplyTag::Generic,
             result: Err(ApiError {
                 code: ErrorCode::Io,
-                message: "未连接".into(),
+                message: "not connected".into(),
             }),
         });
         assert_eq!(m.toast, None);
@@ -2121,7 +2127,7 @@ mod tests {
             tag: ReplyTag::Generic,
             result: Err(ApiError {
                 code: ErrorCode::Io,
-                message: "未连接".into(),
+                message: "not connected".into(),
             }),
         });
         assert_eq!(m.toast, None);
@@ -2223,14 +2229,14 @@ mod tests {
                 tag: ReplyTag::Init,
                 result: Err(ApiError {
                     code: ErrorCode::Io,
-                    message: "初始化失败".into(),
+                    message: "init failed".into(),
                 }),
             });
             assert!(fx.is_empty());
             assert!(!m.wizard_joining);
             assert!(!m.init_in_flight);
             assert_eq!(m.init_mode, None);
-            assert_eq!(m.toast.as_deref(), Some("初始化失败"));
+            assert_eq!(m.toast.as_deref(), Some(error_text(&ErrorCode::Io)));
         }
     }
 
@@ -2369,6 +2375,7 @@ mod tests {
             hash: "h1".into(),
             ok: true,
             error: None,
+            reason: None,
         }));
         assert!(m.cancel_transfer("h1").is_empty());
     }
@@ -2422,7 +2429,8 @@ mod tests {
             transfer: "t1".into(),
             hash: "h1".into(),
             ok: false,
-            error: Some("断开".into()),
+            error: Some("source offline".into()),
+            reason: Some(TransferFailReason::SourceOffline),
         }));
         assert_eq!(effective_state(&item, &m), BlobState::Remote);
         // 其它状态不被覆盖
@@ -2441,7 +2449,8 @@ mod tests {
             transfer: "t1".into(),
             hash: "h1".into(),
             ok: false,
-            error: Some("已取消".into()),
+            error: Some("cancelled".into()),
+            reason: Some(TransferFailReason::Cancelled),
         }));
         assert_eq!(m.toast, None);
         assert!(m.cancelled_downloads.is_empty());
@@ -2597,7 +2606,7 @@ mod tests {
             },
             result: Err(ApiError {
                 code: ErrorCode::Io,
-                message: "失败".into(),
+                message: "failed".into(),
             }),
         });
         assert!(m.has_newer, "失败后仍提示有新消息");
@@ -2724,10 +2733,10 @@ mod tests {
             ReplyTag::Responded {
                 request: "r1".into(),
             },
-            "处理失败",
+            "failed",
         ));
         assert_eq!(m.requests.len(), 1);
-        assert_eq!(m.toast.as_deref(), Some("处理失败"));
+        assert_eq!(m.toast.as_deref(), Some(error_text(&ErrorCode::Io)));
         assert_eq!(
             m.respond_request("r1".into(), RequestAction::AcceptOnce)
                 .len(),
@@ -2948,12 +2957,12 @@ mod tests {
             if user == "u1" && *n == 5 << 20)));
         assert!(m.contacts[0].auto_accept);
         assert_eq!(m.contacts[0].ask_above_bytes, Some(5 << 20));
-        let fx = m.apply(err_reply(ReplyTag::Policy, "保存失败"));
+        let fx = m.apply(err_reply(ReplyTag::Policy, "failed"));
         assert!(
             has(&fx, |r| matches!(r, Request::ListContacts)),
             "失败后以服务端为准"
         );
-        assert_eq!(m.toast.as_deref(), Some("保存失败"));
+        assert_eq!(m.toast.as_deref(), Some(error_text(&ErrorCode::Io)));
     }
 
     #[test]
@@ -3039,10 +3048,10 @@ mod tests {
             ReplyTag::Pair {
                 nonce: m.pair_nonce,
             },
-            "无法开始",
+            "failed",
         ));
         assert_eq!(m.pair, None);
-        assert_eq!(m.toast.as_deref(), Some("无法开始"));
+        assert_eq!(m.toast.as_deref(), Some(error_text(&ErrorCode::Io)));
     }
 
     #[test]
@@ -3407,6 +3416,7 @@ mod tests {
             hash: "h".into(),
             ok: true,
             error: None,
+            reason: None,
         }));
         assert_eq!(m.files_view_epoch, e2);
     }
@@ -3421,6 +3431,7 @@ mod tests {
                 hash: "h0".into(),
                 ok: true,
                 error: None,
+                reason: None,
             })
         };
         assert!(!has(&m.apply(ev()), |r| matches!(
@@ -3561,10 +3572,10 @@ mod tests {
     }
 
     #[test]
-    fn settings_save_failure_shows_server_message() {
+    fn settings_save_failure_shows_localized_text() {
         let mut m = Model::new();
-        m.apply(err_reply(ReplyTag::SettingsSaved, "下载目录不能为空"));
-        assert_eq!(m.toast.as_deref(), Some("下载目录不能为空"));
+        m.apply(err_reply(ReplyTag::SettingsSaved, "failed"));
+        assert_eq!(m.toast.as_deref(), Some(error_text(&ErrorCode::Io)));
     }
 
     #[test]

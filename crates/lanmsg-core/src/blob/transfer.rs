@@ -23,7 +23,7 @@ use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use lanmsg_api::types::{Event, SettingsDto};
+use lanmsg_api::types::{Event, SettingsDto, TransferFailReason};
 use lanmsg_proto::consts::{
     BLOB_PARALLEL_CONNS, BLOB_QUERY_WAIT, BLOB_SEGMENT_LEN, PROGRESS_INTERVAL,
 };
@@ -42,6 +42,9 @@ use crate::settings::load_settings;
 use crate::store::{
     BlobLocalKind, BlobLocalRow, ConvKindRow, MessageBlobRow, Store, TransferRow, TransferState,
 };
+
+/// 传输失败：界面依据的结构化原因 + 英文排障信息。
+type Failure = (TransferFailReason, String);
 
 /// 单段交换超时（含连接建立）：空闲超时的 2 倍。
 const SEGMENT_TIMEOUT: Duration = Duration::from_secs(30 * 2);
@@ -87,7 +90,7 @@ struct Shared {
     failures: StdMutex<HashMap<DeviceId, u32>>,
     /// 已耗尽的源。
     dead: StdMutex<Vec<DeviceId>>,
-    /// 任一工作者宣告全部源不可用时的错误信息。
+    /// 任一工作者宣告全部源不可用时的错误信息（仅作停止标志与排障）。
     failed_out: StdMutex<Option<String>>,
     /// 进度窗口。
     progress: StdMutex<Progress>,
@@ -224,6 +227,7 @@ impl TransferEngine {
             hash: row.hash.to_hex(),
             ok: false,
             error: Some("cancelled".into()),
+            reason: Some(TransferFailReason::Cancelled),
         });
         Ok(())
     }
@@ -304,7 +308,7 @@ impl TransferEngine {
             Self::create_part(&row.part_path, 0)
                 .await
                 .err()
-                .map(|e| e.to_string())
+                .map(|e| (TransferFailReason::Io, e.to_string()))
         } else {
             engine.download_segments(&mut row, &mb, &token).await
         };
@@ -316,11 +320,11 @@ impl TransferEngine {
         match err.take() {
             None => {
                 let self_device = self.identity.read().unwrap().device_id();
-                if let Some(msg) = self.finalize(&row, &mb.meta, &self_device).await {
-                    self.fail(&row, &msg);
+                if let Some((reason, msg)) = self.finalize(&row, &mb.meta, &self_device).await {
+                    self.fail(&row, reason, &msg);
                 }
             }
-            Some(msg) => self.fail(&row, &msg),
+            Some((reason, msg)) => self.fail(&row, reason, &msg),
         }
     }
 
@@ -331,7 +335,7 @@ impl TransferEngine {
         row: &mut TransferRow,
         mb: &MessageBlobRow,
         token: &CancellationToken,
-    ) -> Option<String> {
+    ) -> Option<Failure> {
         let mut candidates = self.candidates(&row.hash);
         if candidates.is_empty() {
             self.solicit(&row.hash, &mb.conv, token).await;
@@ -340,7 +344,7 @@ impl TransferEngine {
             }
             candidates = self.candidates(&row.hash);
             if candidates.is_empty() {
-                return Some("source offline".into());
+                return Some((TransferFailReason::SourceOffline, "source offline".into()));
             }
         }
 
@@ -355,7 +359,7 @@ impl TransferEngine {
                     }
                     s
                 }
-                None => return Some("source offline".into()),
+                None => return Some((TransferFailReason::SourceOffline, "source offline".into())),
             },
         };
 
@@ -366,7 +370,10 @@ impl TransferEngine {
             .unwrap_or(false);
         if !part_ok {
             if let Err(e) = Self::create_part(&row.part_path, row.total).await {
-                return Some(format!("failed to create .part file: {e}"));
+                return Some((
+                    TransferFailReason::Io,
+                    format!("failed to create .part file: {e}"),
+                ));
             }
             row.done_segments = vec![false; n];
         }
@@ -375,7 +382,10 @@ impl TransferEngine {
         }
         row.state = TransferState::Running;
         if let Err(e) = self.store.upsert_transfer(row) {
-            return Some(format!("failed to write transfer record: {e}"));
+            return Some((
+                TransferFailReason::Io,
+                format!("failed to write transfer record: {e}"),
+            ));
         }
 
         // 工作者阶段：候选全部耗尽时再做一轮 BlobQuery 等待重试（最多
@@ -447,11 +457,11 @@ impl TransferEngine {
             }
             let fresh = self.candidates(&row.hash);
             if fresh.is_empty() {
-                return Some("source offline".into());
+                return Some((TransferFailReason::SourceOffline, "source offline".into()));
             }
             candidates = fresh;
         }
-        Some("source offline".into())
+        Some((TransferFailReason::SourceOffline, "source offline".into()))
     }
 
     /// 工作者：从共享队列取分段，绑定候选源下载，失败换绑下一个候选。
@@ -463,7 +473,8 @@ impl TransferEngine {
         {
             Ok(f) => Arc::new(StdMutex::new(f)),
             Err(e) => {
-                *shared.failed_out.lock().unwrap() = Some(format!("打开 .part 失败: {e}"));
+                *shared.failed_out.lock().unwrap() =
+                    Some(format!("failed to open .part file: {e}"));
                 return;
             }
         };
@@ -736,22 +747,38 @@ impl TransferEngine {
         row: &TransferRow,
         meta: &BlobMeta,
         self_device: &DeviceId,
-    ) -> Option<String> {
+    ) -> Option<Failure> {
         let part = row.part_path.clone();
         let hashed = match tokio::task::spawn_blocking(move || hash_file(&part)).await {
             Ok(Ok(h)) => h,
-            Ok(Err(e)) => return Some(format!("failed to read downloaded file: {e}")),
-            Err(e) => return Some(format!("background task failed: {e}")),
+            Ok(Err(e)) => {
+                return Some((
+                    TransferFailReason::Io,
+                    format!("failed to read downloaded file: {e}"),
+                ))
+            }
+            Err(e) => {
+                return Some((
+                    TransferFailReason::Io,
+                    format!("background task failed: {e}"),
+                ))
+            }
         };
         if hashed.hash.0 != meta.hash.0 {
             if let Err(e) = std::fs::remove_file(&row.part_path) {
                 tracing::warn!(error = %e, "删除校验失败的 .part 失败");
             }
-            return Some("verification failed".into());
+            return Some((
+                TransferFailReason::VerifyFailed,
+                "verification failed".into(),
+            ));
         }
         let final_path = unique_path(&row.dest_path);
         if let Err(e) = tokio::fs::rename(&row.part_path, &final_path).await {
-            return Some(format!("failed to finalize file: {e}"));
+            return Some((
+                TransferFailReason::Io,
+                format!("failed to finalize file: {e}"),
+            ));
         }
         let local = BlobLocalRow {
             hash: row.hash,
@@ -761,7 +788,10 @@ impl TransferEngine {
             mtime: hashed.mtime,
         };
         if let Err(e) = self.store.set_local(&local) {
-            return Some(format!("failed to write local record: {e}"));
+            return Some((
+                TransferFailReason::Io,
+                format!("failed to write local record: {e}"),
+            ));
         }
         if let Err(e) = self
             .store
@@ -792,13 +822,17 @@ impl TransferEngine {
         // 下载走到这里即全部分段完成；内存副本的分段进度是过时的，全置 true。
         done_row.done_segments = vec![true; row.done_segments.len()];
         if let Err(e) = self.store.upsert_transfer(&done_row) {
-            return Some(format!("failed to write transfer record: {e}"));
+            return Some((
+                TransferFailReason::Io,
+                format!("failed to write transfer record: {e}"),
+            ));
         }
         let _ = self.events.send(Event::TransferFinished {
             transfer: row.transfer_id.clone(),
             hash: row.hash.to_hex(),
             ok: true,
             error: None,
+            reason: None,
         });
         // 对引用该 blob 的每条消息发 MessageUpdated（视图状态随下载完成变化）。
         let peers = self.conns.peers();
@@ -817,7 +851,7 @@ impl TransferEngine {
     }
 
     /// 失败收尾：写行 Failed 并发 TransferFinished{ok:false}。
-    fn fail(&self, row: &TransferRow, msg: &str) {
+    fn fail(&self, row: &TransferRow, reason: TransferFailReason, msg: &str) {
         let mut r = row.clone();
         r.state = TransferState::Failed;
         r.error = Some(msg.to_string());
@@ -829,6 +863,7 @@ impl TransferEngine {
             hash: row.hash.to_hex(),
             ok: false,
             error: Some(msg.to_string()),
+            reason: Some(reason),
         });
     }
 

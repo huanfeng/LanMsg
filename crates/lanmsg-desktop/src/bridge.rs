@@ -216,7 +216,7 @@ pub fn launch_failure_text(e: &std::io::Error) -> String {
 fn not_connected() -> ApiError {
     ApiError {
         code: ErrorCode::Io,
-        message: crate::strings::NOT_CONNECTED.to_string(),
+        message: "not connected to lanmsgd".to_string(),
     }
 }
 

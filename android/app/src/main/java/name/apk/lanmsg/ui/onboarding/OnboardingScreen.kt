@@ -139,9 +139,9 @@ fun OnboardingContent(
                 }
             }
             val error = state.error
-            if (error != null && error != OnboardingViewModel.ERROR_NAME_REQUIRED) {
+            if (error != null && error != R.string.onb_name_required) {
                 Spacer(Modifier.height(16.dp))
-                Text(stringResource(R.string.err_generic, error), color = c.danger, style = MaterialTheme.typography.bodyMedium)
+                Text(stringResource(error), color = c.danger, style = MaterialTheme.typography.bodyMedium)
             }
         }
     }

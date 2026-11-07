@@ -2,6 +2,8 @@
 
 package name.apk.lanmsg.ui.chat
 
+import uniffi.lanmsg_api.TransferFailReason
+import name.apk.lanmsg.R
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -169,7 +171,7 @@ class ChatViewModelTest {
         advanceUntilIdle()
         vm.setInput("hi"); vm.sendText(); advanceUntilIdle()
         assertEquals("hi", vm.state.value.input)
-        assertEquals(ChatViewModel.ERROR_PEER_OFFLINE, vm.state.value.error)
+        assertEquals(R.string.err_peer_offline, vm.state.value.error)
     }
 
     @Test fun mark_read_sent_once_per_last_id_when_visible() = runTest {
@@ -193,7 +195,7 @@ class ChatViewModelTest {
         val base = fake.handler
         var failing = true
         fake.handler = { r ->
-            if (r is Request.MarkRead && failing) throw ApiException(ErrorCode.NOT_FOUND, "消息不存在") else base(r)
+            if (r is Request.MarkRead && failing) throw ApiException(ErrorCode.NOT_FOUND, "message not found") else base(r)
         }
         val vm = ChatViewModel(fake, "c1", VisibleConversation)
         vm.onVisible(); advanceUntilIdle()
@@ -212,7 +214,7 @@ class ChatViewModelTest {
             override suspend fun import(uris: List<android.net.Uri>) = emptyList<String>()
         }
         vm.importAndSend(importer, listOf(android.net.Uri.EMPTY)); advanceUntilIdle()
-        assertEquals(ChatViewModel.ERROR_IMPORT_FAILED, vm.state.value.error)
+        assertEquals(R.string.share_import_failed, vm.state.value.error)
     }
 
     @Test fun can_recall_only_own_within_two_minutes() = runTest {
@@ -232,7 +234,7 @@ class ChatViewModelTest {
         val before = fake.requests.count { it is Request.ListMessages }
         fake.emit(Event.TransferProgress("t1", "h", 5uL, 10uL, 0uL)); advanceUntilIdle()
         assertEquals(5uL to 10uL, vm.state.value.progress["h"])
-        fake.emit(Event.TransferFinished("t1", "h", true, null)); advanceUntilIdle()
+        fake.emit(Event.TransferFinished("t1", "h", true, null, null)); advanceUntilIdle()
         assertTrue(vm.state.value.progress.isEmpty())
         assertEquals(before + 1, fake.requests.count { it is Request.ListMessages })
     }
@@ -242,8 +244,8 @@ class ChatViewModelTest {
         val vm = ChatViewModel(fake, "c1", VisibleConversation)
         advanceUntilIdle()
         fake.emit(Event.TransferProgress("t1", "h", 5uL, 10uL, 0uL)); advanceUntilIdle()
-        fake.emit(Event.TransferFinished("t1", "h", false, "connection reset")); advanceUntilIdle()
-        assertEquals("connection reset", vm.state.value.error)
+        fake.emit(Event.TransferFinished("t1", "h", false, "connection reset", TransferFailReason.SOURCE_OFFLINE)); advanceUntilIdle()
+        assertEquals(R.string.download_source_offline, vm.state.value.error)
         assertTrue(vm.state.value.progress.isEmpty())
     }
 
@@ -253,7 +255,7 @@ class ChatViewModelTest {
         advanceUntilIdle()
         fake.emit(Event.TransferProgress("t1", "h", 5uL, 10uL, 0uL)); advanceUntilIdle()
         vm.cancel("h"); advanceUntilIdle()
-        fake.emit(Event.TransferFinished("t1", "h", false, "cancelled")); advanceUntilIdle()
+        fake.emit(Event.TransferFinished("t1", "h", false, "cancelled", TransferFailReason.CANCELLED)); advanceUntilIdle()
         assertNull(vm.state.value.error)
     }
 
@@ -264,7 +266,7 @@ class ChatViewModelTest {
         val vm = ChatViewModel(fake, "c1", VisibleConversation)
         advanceUntilIdle()
         vm.download("h"); advanceUntilIdle()
-        assertEquals(ChatViewModel.ERROR_PEER_OFFLINE, vm.state.value.error)
+        assertEquals(R.string.err_peer_offline, vm.state.value.error)
     }
 
     @Test fun failed_cancel_request_does_not_swallow_later_real_failure() = runTest {
@@ -275,8 +277,8 @@ class ChatViewModelTest {
         advanceUntilIdle()
         fake.emit(Event.TransferProgress("t1", "h", 5uL, 10uL, 0uL)); advanceUntilIdle()
         vm.cancel("h"); advanceUntilIdle()
-        fake.emit(Event.TransferFinished("t1", "h", false, "reset")); advanceUntilIdle()
-        assertEquals("reset", vm.state.value.error)
+        fake.emit(Event.TransferFinished("t1", "h", false, "reset", TransferFailReason.IO)); advanceUntilIdle()
+        assertEquals(R.string.download_io_failed, vm.state.value.error)
     }
 
     @Test fun new_download_clears_stale_cancelled_mark() = runTest {
@@ -288,8 +290,8 @@ class ChatViewModelTest {
         fake.emit(Event.TransferProgress("t1", "h", 5uL, 10uL, 0uL)); advanceUntilIdle()
         vm.cancel("h"); advanceUntilIdle()
         vm.download("h"); advanceUntilIdle()
-        fake.emit(Event.TransferFinished("t1", "h", false, "reset")); advanceUntilIdle()
-        assertEquals("reset", vm.state.value.error)
+        fake.emit(Event.TransferFinished("t1", "h", false, "reset", TransferFailReason.IO)); advanceUntilIdle()
+        assertEquals(R.string.download_io_failed, vm.state.value.error)
     }
 
     @Test fun cancel_uses_transfer_id_from_progress() = runTest {

@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.search
 
+import name.apk.lanmsg.ui.common.errorTextRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
@@ -27,7 +28,7 @@ class SearchViewModel(private val core: CoreApi) : ViewModel() {
         val query: String = "",
         val rows: List<Row> = emptyList(),
         val loading: Boolean = false,
-        val error: String? = null,
+        val error: Int? = null,
         /** SearchMessages 未实现时为 true，界面显示 err_core_outdated。 */
         val coreOutdated: Boolean = false,
     )
@@ -85,7 +86,7 @@ class SearchViewModel(private val core: CoreApi) : ViewModel() {
                 if (e.isNotImplemented()) {
                     _state.update { it.copy(rows = emptyList(), loading = false, error = null, coreOutdated = true) }
                 } else {
-                    _state.update { it.copy(loading = false, error = e.message ?: e.code.name) }
+                    _state.update { it.copy(loading = false, error = errorTextRes(e.code)) }
                 }
             }
         }

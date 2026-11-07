@@ -50,7 +50,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import name.apk.lanmsg.core.ApiException
 import name.apk.lanmsg.core.CoreHolder
+import name.apk.lanmsg.ui.common.errorTextRes
 import name.apk.lanmsg.core.call
 import name.apk.lanmsg.files.ShareIntentParser
 import name.apk.lanmsg.files.ShareText
@@ -166,6 +168,10 @@ internal suspend fun fetchSelf(holder: CoreHolder): SelfInfo = withContext(Dispa
     holder.api.call<Response.SelfInfo>(Request.GetSelf).value
 }
 
+/** 获取失败对应的界面文案资源：core 错误按错误码，其余统一为通用失败。 */
+private fun failureTextRes(e: Exception): Int =
+    if (e is ApiException) errorTextRes(e.code) else R.string.err_internal
+
 /**
  * 只在前台（STARTED）期间获取：onStop 会 release("ui")，后台里的在途 acquire 会被取消，
  * 也不会在后台重新登记 "ui"；下次进入前台时若还没有结果自动重试。
@@ -177,7 +183,7 @@ internal suspend fun fetchSelfWhileStarted(
     hasResult: () -> Boolean,
     onStart: () -> Unit,
     onSelf: (SelfInfo) -> Unit,
-    onFailure: (String) -> Unit,
+    onFailure: (Int) -> Unit,
 ) {
     lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
         if (hasResult()) return@repeatOnLifecycle
@@ -186,9 +192,9 @@ internal suspend fun fetchSelfWhileStarted(
             onSelf(fetchSelf(holder))
         } catch (e: CancellationException) {
             if (!currentCoroutineContext().isActive) throw e
-            onFailure(e.message ?: e.toString())
+            onFailure(failureTextRes(e))
         } catch (e: Exception) {
-            onFailure(e.message ?: e.toString())
+            onFailure(failureTextRes(e))
         }
     }
 }
@@ -219,7 +225,7 @@ private fun Launcher(
     onRouteConsumed: () -> Unit,
 ) {
     var start by remember { mutableStateOf<String?>(null) }
-    var failure by remember { mutableStateOf<String?>(null) }
+    var failure by remember { mutableStateOf<Int?>(null) }
     var attempt by remember { mutableIntStateOf(0) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(attempt) {
@@ -265,7 +271,7 @@ private fun Launcher(
         }
         failure != null -> Box(Modifier.fillMaxSize().background(c.canvas).safeDrawingPadding().padding(24.dp)) {
             Column {
-                Text(stringResource(R.string.err_generic, failure.orEmpty()), color = c.danger)
+                Text(stringResource(failure ?: R.string.err_internal), color = c.danger)
                 TextButton(onClick = { attempt++ }, colors = LanMsgButtons.text()) { Text(stringResource(R.string.retry)) }
             }
         }
