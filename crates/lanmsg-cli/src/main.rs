@@ -339,7 +339,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(api_err)?;
             match resp {
-                Response::Ok => println!("已加入（等待配对完成）"),
+                Response::Ok => println!("joined (waiting for pairing to complete)"),
                 other => println!("{other:?}"),
             }
         }
@@ -377,7 +377,7 @@ async fn main() -> Result<()> {
             if let Response::PairSession { value } = &resp {
                 println!("session: {}", value.session);
             }
-            println!("已发起加入，等待配对状态…");
+            println!("join started, waiting for pairing status...");
             watch_pair_any(rx).await;
         }
         Cmd::PairConfirm {
@@ -785,20 +785,22 @@ async fn watch_pair_any(mut rx: EventRx) {
 /// 打印一条配对状态；返回 true 表示已结束（Done/Failed）。
 fn print_pair_state(state: &PairStateDto) -> bool {
     match state {
-        PairStateDto::WaitingPeer => println!("等待对端加入…"),
+        PairStateDto::WaitingPeer => println!("waiting for peer to join..."),
         PairStateDto::ShowSas {
             code,
             peer_name,
             peer_type,
             peer_short,
-        } => println!("比对数字：{code}（对方：{peer_name}，{peer_type}，指纹 {peer_short}）"),
-        PairStateDto::Verifying => println!("校验中…"),
+        } => println!(
+            "compare digits: {code} (peer: {peer_name}, {peer_type}, fingerprint {peer_short})"
+        ),
+        PairStateDto::Verifying => println!("verifying..."),
         PairStateDto::Done => {
-            println!("配对完成");
+            println!("pairing complete");
             return true;
         }
         PairStateDto::Failed { reason } => {
-            println!("配对失败：{reason}");
+            println!("pairing failed: {}", reason.wire_key());
             return true;
         }
     }

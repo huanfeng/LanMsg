@@ -1125,7 +1125,7 @@ impl Model {
             PairStateDto::Verifying
         } else {
             PairStateDto::Failed {
-                reason: strings::PAIR_SAS_MISMATCH.to_string(),
+                reason: PairFailReason::SasMismatch,
             }
         };
         vec![call(
@@ -3164,7 +3164,9 @@ mod tests {
         ));
         m.apply(pair_event(
             "s3",
-            PairStateDto::Failed { reason: "x".into() },
+            PairStateDto::Failed {
+                reason: PairFailReason::Unknown,
+            },
         ));
         assert!(m.pair_cancel().is_empty());
         // 选择界面直接关闭：没有会话可取消
@@ -3214,7 +3216,7 @@ mod tests {
         m.apply(pair_event(
             "s1",
             PairStateDto::Failed {
-                reason: "超时".into(),
+                reason: PairFailReason::Timeout,
             },
         ));
         let fx = m.pair_retry();
@@ -3237,7 +3239,9 @@ mod tests {
         ));
         m.apply(pair_event(
             "s1",
-            PairStateDto::Failed { reason: "x".into() },
+            PairStateDto::Failed {
+                reason: PairFailReason::Unknown,
+            },
         ));
         let fx = m.pair_retry();
         assert_eq!(m.pair, Some(PairUi::Picking));

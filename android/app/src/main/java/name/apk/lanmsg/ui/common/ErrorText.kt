@@ -3,6 +3,7 @@ package name.apk.lanmsg.ui.common
 import androidx.annotation.StringRes
 import name.apk.lanmsg.R
 import uniffi.lanmsg_api.ErrorCode
+import uniffi.lanmsg_api.PairFailReason
 import uniffi.lanmsg_api.TransferFailReason
 
 /** 错误码对应的界面文案。core 的 message 只是英文排障信息，界面不显示。 */
@@ -27,4 +28,20 @@ fun transferFailRes(reason: TransferFailReason): Int = when (reason) {
     TransferFailReason.VERIFY_FAILED -> R.string.download_verify_failed
     TransferFailReason.IO -> R.string.download_io_failed
     TransferFailReason.UNKNOWN -> R.string.download_failed
+}
+
+/** 配对失败原因对应的界面文案。 */
+@StringRes
+fun pairFailRes(reason: PairFailReason): Int = when (reason) {
+    PairFailReason.TIMEOUT -> R.string.pair_fail_timeout
+    PairFailReason.CANCELLED -> R.string.pair_fail_cancelled
+    PairFailReason.NOT_OPEN -> R.string.pair_fail_not_open
+    PairFailReason.WRONG_SECRET -> R.string.pair_fail_wrong_secret
+    PairFailReason.BUSY -> R.string.pair_fail_busy
+    PairFailReason.CERT_MISMATCH -> R.string.pair_fail_cert_mismatch
+    PairFailReason.BAD_SIGNATURE -> R.string.pair_fail_bad_signature
+    PairFailReason.IDENTITY_MISMATCH -> R.string.pair_fail_identity_mismatch
+    PairFailReason.INVALID_NAME -> R.string.pair_fail_invalid_name
+    PairFailReason.SAS_MISMATCH -> R.string.pair_fail_sas_mismatch
+    PairFailReason.UNKNOWN -> R.string.pair_fail_unknown
 }

@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
 import uniffi.lanmsg_api.ErrorCode
+import uniffi.lanmsg_api.PairFailReason
 import uniffi.lanmsg_api.TransferFailReason
 
 class ErrorTextTest {
@@ -22,5 +23,11 @@ class ErrorTextTest {
 
     @Test fun peer_offline_keeps_its_dedicated_text() {
         assertEquals(R.string.err_peer_offline, errorTextRes(ErrorCode.PEER_OFFLINE))
+    }
+
+    @Test fun every_pair_fail_reason_maps_to_a_distinct_string_resource() {
+        val ids = PairFailReason.entries.map { pairFailRes(it) }
+        ids.forEach { assertNotEquals(0, it) }
+        assertEquals(PairFailReason.entries.size, ids.toSet().size)
     }
 }

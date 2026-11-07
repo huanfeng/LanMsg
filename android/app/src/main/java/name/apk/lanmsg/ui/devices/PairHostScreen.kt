@@ -43,6 +43,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.pairFailRes
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.ui.common.QrImage
 import name.apk.lanmsg.ui.theme.LanMsgButtons
@@ -205,7 +206,7 @@ internal fun PairProgress(state: PairViewModel.UiState, onConfirm: (Boolean) -> 
         PairStateDto.Verifying -> Waiting(R.string.pair_verifying)
         is PairStateDto.Failed -> {
             Text(
-                stringResource(R.string.pair_failed, s.reason),
+                stringResource(pairFailRes(s.reason)),
                 color = c.danger,
                 style = MaterialTheme.typography.bodyLarge,
                 textAlign = TextAlign.Center,

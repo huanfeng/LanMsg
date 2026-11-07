@@ -330,6 +330,8 @@ pub enum PairMsg {
     },
     Bundle(Box<PairBundle>),
     Done,
+    /// 中止配对。`reason` 取值为稳定的 snake_case 键名（如 `timeout`、`wrong_secret`），
+    /// 由 api 层的 `PairFailReason` 解释；未知键名按“未知原因”处理。
     Abort {
         reason: String,
     },

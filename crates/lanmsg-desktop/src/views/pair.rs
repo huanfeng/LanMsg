@@ -1,6 +1,7 @@
 // 配对对话框：发起方显示二维码或 6 位比对数字，加入方选择设备或粘贴配对链接。
 // 注释中文，标识符英文。
 
+use crate::error_text::pair_fail_text;
 use lanmsg_api::types::{PairStateDto, PairTarget, PeerView};
 use qrcode::{Color as QrColor, QrCode};
 use windui::prelude::*;
@@ -211,7 +212,7 @@ fn showing(qr_uri: Option<&str>, state: &PairStateDto) -> Element {
                     .fg_role(Role::Danger),
             )
             .child(
-                Element::label(reason.clone())
+                Element::label(pair_fail_text(reason))
                     .font_size(style::FONT_BODY)
                     .fg_role(Role::TextMuted)
                     .max_lines(3),

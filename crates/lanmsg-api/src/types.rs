@@ -594,8 +594,73 @@ pub enum PairStateDto {
     Verifying,
     Done,
     Failed {
-        reason: String,
+        reason: PairFailReason,
     },
+}
+
+/// 配对失败原因（界面据此本地化文案）。线上 `PairMsg::Abort.reason` 使用 `wire_key()`
+/// 的稳定键名；收到未知键名（含旧版本发来的文本）一律解析为 `Unknown`。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum PairFailReason {
+    /// 配对窗口超时。
+    Timeout,
+    /// 用户取消。
+    Cancelled,
+    /// 对端未开启配对。
+    NotOpen,
+    /// 口令错误。
+    WrongSecret,
+    /// 对端正在与其他设备配对。
+    Busy,
+    /// 证书不是发给本机的。
+    CertMismatch,
+    /// 证书验签失败。
+    BadSignature,
+    /// 用户身份与证书不一致。
+    IdentityMismatch,
+    /// 显示名不合法。
+    InvalidName,
+    /// 双方确认的数字不一致。
+    SasMismatch,
+    /// 未知原因。
+    Unknown,
+}
+
+impl PairFailReason {
+    /// 线上使用的稳定键名（Unknown 也有键名，但解析时不会还原为别的变体）。
+    pub fn wire_key(&self) -> &'static str {
+        match self {
+            PairFailReason::Timeout => "timeout",
+            PairFailReason::Cancelled => "cancelled",
+            PairFailReason::NotOpen => "not_open",
+            PairFailReason::WrongSecret => "wrong_secret",
+            PairFailReason::Busy => "busy",
+            PairFailReason::CertMismatch => "cert_mismatch",
+            PairFailReason::BadSignature => "bad_signature",
+            PairFailReason::IdentityMismatch => "identity_mismatch",
+            PairFailReason::InvalidName => "invalid_name",
+            PairFailReason::SasMismatch => "sas_mismatch",
+            PairFailReason::Unknown => "unknown",
+        }
+    }
+
+    /// 由线上键名还原；未知键名映射为 `Unknown`。
+    pub fn from_wire(key: &str) -> Self {
+        match key {
+            "timeout" => PairFailReason::Timeout,
+            "cancelled" => PairFailReason::Cancelled,
+            "not_open" => PairFailReason::NotOpen,
+            "wrong_secret" => PairFailReason::WrongSecret,
+            "busy" => PairFailReason::Busy,
+            "cert_mismatch" => PairFailReason::CertMismatch,
+            "bad_signature" => PairFailReason::BadSignature,
+            "identity_mismatch" => PairFailReason::IdentityMismatch,
+            "invalid_name" => PairFailReason::InvalidName,
+            "sas_mismatch" => PairFailReason::SasMismatch,
+            _ => PairFailReason::Unknown,
+        }
+    }
 }
 
 /// 文件种类过滤。
@@ -719,4 +784,51 @@ pub struct WebSessionInfo {
     pub code: String,
     pub qr_uri: String,
     pub urls: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod pair_fail_reason_tests {
+    use super::PairFailReason;
+
+    const ALL: [PairFailReason; 11] = [
+        PairFailReason::Timeout,
+        PairFailReason::Cancelled,
+        PairFailReason::NotOpen,
+        PairFailReason::WrongSecret,
+        PairFailReason::Busy,
+        PairFailReason::CertMismatch,
+        PairFailReason::BadSignature,
+        PairFailReason::IdentityMismatch,
+        PairFailReason::InvalidName,
+        PairFailReason::SasMismatch,
+        PairFailReason::Unknown,
+    ];
+
+    #[test]
+    fn wire_keys_round_trip() {
+        for r in ALL {
+            assert_eq!(PairFailReason::from_wire(r.wire_key()), r, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_wire_key_maps_to_unknown() {
+        assert_eq!(
+            PairFailReason::from_wire("未开启配对"),
+            PairFailReason::Unknown
+        );
+        assert_eq!(PairFailReason::from_wire(""), PairFailReason::Unknown);
+        assert_eq!(
+            PairFailReason::from_wire("no_such_key"),
+            PairFailReason::Unknown
+        );
+    }
+
+    #[test]
+    fn wire_keys_are_distinct() {
+        let mut keys: Vec<_> = ALL.iter().map(|r| r.wire_key()).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), ALL.len());
+    }
 }

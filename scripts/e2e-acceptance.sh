@@ -161,8 +161,8 @@ pair_qr_join() {
     local uri
     uri="$(awk '/^qr_uri:/{print $2}' "$ps")"
     bg "$pj" "$n" pair-join "$uri"
-    wait_for 30 "$a 配对完成" grep -q '配对完成' "$ps"
-    wait_for 30 "$n 配对完成" grep -q '配对完成' "$pj"
+    wait_for 30 "$a 配对完成" grep -q 'pairing complete' "$ps"
+    wait_for 30 "$n 配对完成" grep -q 'pairing complete' "$pj"
 }
 
 # 取「我的设备」会话 ID。
@@ -259,11 +259,11 @@ sas_pair() {
     done
     # 数字与会话 ID 直接取自 pair-start / pair-join 的输出（CLI 先订阅事件再发请求，
     # 响应方事件会话与 pair-start 返回值一致）。
-    wait_for 30 "$a 打印比对数字" grep -q '比对数字：' "$ps"
-    wait_for 30 "$n 打印比对数字" grep -q '比对数字：' "$pj"
+    wait_for 30 "$a 打印比对数字" grep -q 'compare digits: ' "$ps"
+    wait_for 30 "$n 打印比对数字" grep -q 'compare digits: ' "$pj"
     local code_a code_n sess_n
-    code_a="$(grep -o '比对数字：[0-9]*' "$ps" | head -1 | sed -E 's/.*：//')"
-    code_n="$(grep -o '比对数字：[0-9]*' "$pj" | head -1 | sed -E 's/.*：//')"
+    code_a="$(grep -o 'compare digits: [0-9]*' "$ps" | head -1 | sed -E 's/.*: //')"
+    code_n="$(grep -o 'compare digits: [0-9]*' "$pj" | head -1 | sed -E 's/.*: //')"
     [ "${#code_a}" = 6 ] || fail "A 端数字不是 6 位：'$code_a'"
     [ "$code_a" = "$code_n" ] || fail "两端数字不同：A=$code_a N=$code_n"
     sess_n="$(awk '/^session:/{print $2}' "$pj" | head -1)"

@@ -480,7 +480,7 @@ async fn second_peer_is_rejected_while_session_active_and_first_completes() {
     // C 在 B 的会话进行中加入：被拒绝
     let session_c = join_device(&c, &a_dev).await;
     let failed = c.wait_event(is_failed(&session_c), 5).await;
-    assert!(format!("{failed:?}").contains("正在与其他设备配对"));
+    assert!(format!("{failed:?}").contains("reason: Busy"));
     assert_uninitialized(&c).await;
 
     // 原会话照常完成
@@ -554,7 +554,7 @@ async fn show_sas_carries_peer_device_info() {
     assert_eq!(name_b, "甲机");
 }
 
-/// Sas 数字不一致：双方 Failed{"数字不一致"}，B 保持未初始化。
+/// Sas 数字不一致：双方 Failed{SasMismatch}，B 保持未初始化。
 #[tokio::test]
 async fn sas_mismatch_fails_both() {
     init_log();
@@ -581,7 +581,7 @@ async fn sas_mismatch_fails_both() {
     let _ = wait_show_sas(&mut a, &session_a).await;
     let _ = wait_show_sas(&mut b, &session).await;
 
-    // B 确认不一致：双方 Failed{"数字不一致"}。
+    // B 确认不一致：双方 Failed{SasMismatch}。
     b.try_call(Request::PairConfirm {
         session: session.clone(),
         matches: false,
@@ -591,8 +591,8 @@ async fn sas_mismatch_fails_both() {
     .expect("PairConfirm 失败");
     let fa = a.wait_event(is_failed(&session_a), 5).await;
     let fb = b.wait_event(is_failed(&session), 5).await;
-    assert!(format!("{fa:?}").contains("数字不一致"));
-    assert!(format!("{fb:?}").contains("数字不一致"));
+    assert!(format!("{fa:?}").contains("reason: SasMismatch"));
+    assert!(format!("{fb:?}").contains("reason: SasMismatch"));
 
     // B 保持未初始化。
     match b.try_call(Request::GetSelf).await.expect("GetSelf 失败") {
@@ -601,7 +601,7 @@ async fn sas_mismatch_fails_both() {
     }
 }
 
-/// Qr 口令错误：双方 Failed{"口令错误"}，B 未初始化且 keystore 无 user.key。
+/// Qr 口令错误：双方 Failed{WrongSecret}，B 未初始化且 keystore 无 user.key。
 #[tokio::test]
 async fn qr_pairing_with_wrong_secret_fails_and_leaks_nothing() {
     init_log();
@@ -635,8 +635,8 @@ async fn qr_pairing_with_wrong_secret_fails_and_leaks_nothing() {
 
     let fa = a.wait_event(is_failed(&session), 5).await;
     let fb = b.wait_event(is_failed(&session), 5).await;
-    assert!(format!("{fa:?}").contains("口令错误"));
-    assert!(format!("{fb:?}").contains("口令错误"));
+    assert!(format!("{fa:?}").contains("reason: WrongSecret"));
+    assert!(format!("{fb:?}").contains("reason: WrongSecret"));
 
     // B 保持未初始化，keystore 无 user.key。
     match b.try_call(Request::GetSelf).await.expect("GetSelf 失败") {
@@ -715,9 +715,9 @@ async fn pairing_window_closed_rejects_uninitialized_peer() {
                     loop {
                         match b.events.recv().await {
                             Ok(Event::PairStatus {
-                                state: PairStateDto::Failed { .. },
+                                state: PairStateDto::Failed { reason },
                                 ..
-                            }) => return true,
+                            }) => return reason == lanmsg_api::types::PairFailReason::NotOpen,
                             Ok(_) => {}
                             Err(_) => return false,
                         }

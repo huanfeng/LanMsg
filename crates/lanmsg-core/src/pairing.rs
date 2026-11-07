@@ -15,7 +15,7 @@ use rand::RngCore;
 use sha2::Sha256;
 use tokio::sync::{broadcast, watch};
 
-use lanmsg_api::types::{Event, PairSessionInfo, PairStateDto, PairTarget};
+use lanmsg_api::types::{Event, PairFailReason, PairSessionInfo, PairStateDto, PairTarget};
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{ConvId, DeviceId};
 use lanmsg_proto::sign::UserKey;
@@ -404,7 +404,7 @@ impl Pairing {
         let qr_uri = secret.map(|s| pair_uri(&device, &addrs, &session, &s));
         self.emit_status(&session, PairStateDto::WaitingPeer);
 
-        // 到期任务：窗口仍是本会话且已过期 → 关闭并发 Failed{"超时"}。
+        // 到期任务：窗口仍是本会话且已过期 → 关闭并发 Failed{Timeout}。
         let slot = self.inner.window.clone();
         let events = self.inner.events.clone();
         let exp_session = session.clone();
@@ -415,7 +415,7 @@ impl Pairing {
                 let _ = events.send(Event::PairStatus {
                     session: exp_session,
                     state: PairStateDto::Failed {
-                        reason: "超时".into(),
+                        reason: PairFailReason::Timeout,
                     },
                 });
             }
@@ -586,7 +586,8 @@ impl Pairing {
         if matches {
             self.advance_sas(session).await?;
         } else {
-            self.fail_session(session, &peer, "数字不一致").await;
+            self.fail_session(session, &peer, PairFailReason::SasMismatch)
+                .await;
         }
         Ok(())
     }
@@ -610,18 +611,19 @@ impl Pairing {
                 .send(
                     &peer,
                     Frame::Pair(PairMsg::Abort {
-                        reason: "已取消".into(),
+                        reason: PairFailReason::Cancelled.wire_key().into(),
                     }),
                 )
                 .await;
-            self.fail_session(session, &peer, "已取消").await;
+            self.fail_session(session, &peer, PairFailReason::Cancelled)
+                .await;
             return Ok(());
         }
         if self.inner.window.clear_if_session(session) {
             self.emit_status(
                 session,
                 PairStateDto::Failed {
-                    reason: "已取消".into(),
+                    reason: PairFailReason::Cancelled,
                 },
             );
             return Ok(());
@@ -681,7 +683,7 @@ impl Pairing {
                 .send(
                     &from.device,
                     Frame::Pair(PairMsg::Abort {
-                        reason: "未开启配对".into(),
+                        reason: PairFailReason::NotOpen.wire_key().into(),
                     }),
                 )
                 .await;
@@ -734,7 +736,7 @@ impl Pairing {
                 .send(
                     &from.device,
                     Frame::Pair(PairMsg::Abort {
-                        reason: "正在与其他设备配对".into(),
+                        reason: PairFailReason::Busy.wire_key().into(),
                     }),
                 )
                 .await;
@@ -783,11 +785,12 @@ impl Pairing {
                     .send(
                         &from.device,
                         Frame::Pair(PairMsg::Abort {
-                            reason: "口令错误".into(),
+                            reason: PairFailReason::WrongSecret.wire_key().into(),
                         }),
                     )
                     .await;
-                self.fail_session(&session, &from.device, "口令错误").await;
+                self.fail_session(&session, &from.device, PairFailReason::WrongSecret)
+                    .await;
                 return Ok(());
             }
             // MAC 通过：持锁确认会话仍是同一对端、同一连接（口令与导出值未变）后授权发包。
@@ -824,11 +827,12 @@ impl Pairing {
                     .send(
                         &from.device,
                         Frame::Pair(PairMsg::Abort {
-                            reason: "口令错误".into(),
+                            reason: PairFailReason::WrongSecret.wire_key().into(),
                         }),
                     )
                     .await;
-                self.fail_session(&session, &from.device, "口令错误").await;
+                self.fail_session(&session, &from.device, PairFailReason::WrongSecret)
+                    .await;
             }
         }
         Ok(())
@@ -841,7 +845,7 @@ impl Pairing {
         };
         self.set_peer_confirmed(&session, ok);
         if !ok {
-            self.fail_session(&session, &from.device, "数字不一致")
+            self.fail_session(&session, &from.device, PairFailReason::SasMismatch)
                 .await;
             return Ok(());
         }
@@ -859,15 +863,14 @@ impl Pairing {
         let self_device = self.self_device().await;
 
         // 校验：设备指向自己、证书验签、用户密钥与证书一致。
-        let reject = |reason: &str| reason.to_string();
         let reason = if bundle.device_cert.device != self_device {
-            Some(reject("证书设备不符"))
+            Some(PairFailReason::CertMismatch)
         } else if bundle.device_cert.verify().is_err() {
-            Some(reject("证书验签失败"))
+            Some(PairFailReason::BadSignature)
         } else if UserKey::from_bytes(&bundle.user_secret).user_id() != bundle.device_cert.user {
-            Some(reject("用户身份不符"))
+            Some(PairFailReason::IdentityMismatch)
         } else if crate::identity::validate_display_name(&bundle.display_name).is_err() {
-            Some(reject("显示名非法"))
+            Some(PairFailReason::InvalidName)
         } else {
             None
         };
@@ -878,11 +881,11 @@ impl Pairing {
                 .send(
                     &a_device,
                     Frame::Pair(PairMsg::Abort {
-                        reason: reason.clone(),
+                        reason: reason.wire_key().into(),
                     }),
                 )
                 .await;
-            self.fail_session(&session, &a_device, &reason).await;
+            self.fail_session(&session, &a_device, reason).await;
             return Ok(());
         }
 
@@ -1075,7 +1078,8 @@ impl Pairing {
         let Some(session) = self.session_for_peer(&from.device) else {
             return Ok(());
         };
-        self.fail_session(&session, &from.device, &reason).await;
+        self.fail_session(&session, &from.device, PairFailReason::from_wire(&reason))
+            .await;
         Ok(())
     }
 
@@ -1193,19 +1197,14 @@ impl Pairing {
     }
 
     /// 会话失败：清除状态、发 Failed 事件并断开对端。
-    async fn fail_session(&self, session: &str, device: &DeviceId, reason: &str) {
+    async fn fail_session(&self, session: &str, device: &DeviceId, reason: PairFailReason) {
         {
             let mut g = self.inner.active.lock().unwrap();
             if g.as_ref().is_some_and(|a| a.session == session) {
                 *g = None;
             }
         }
-        self.emit_status(
-            session,
-            PairStateDto::Failed {
-                reason: reason.to_string(),
-            },
-        );
+        self.emit_status(session, PairStateDto::Failed { reason });
         // 缓冲后再断开：此前发出的帧经 write 通道异步冲刷，且立即断开会因
         // 读半部带未读数据关闭 socket（RST）而丢失在途帧。
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;

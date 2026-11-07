@@ -25,6 +25,7 @@ import uniffi.lanmsg_api.ErrorCode
 import uniffi.lanmsg_api.Event
 import uniffi.lanmsg_api.PairMethod
 import uniffi.lanmsg_api.PairSessionInfo
+import uniffi.lanmsg_api.PairFailReason
 import uniffi.lanmsg_api.PairStateDto
 import uniffi.lanmsg_api.PairTarget
 import uniffi.lanmsg_api.Request
@@ -251,7 +252,7 @@ class PairViewModelTest {
             val r = ok(req)
             if (req is Request.PairStart) {
                 f.emit(Event.PairStatus("s1", PairStateDto.ShowSas("123456", "乙机", "phone", "a1b2c3d4")))
-                f.emit(Event.PairStatus("old", PairStateDto.Failed("stale")))
+                f.emit(Event.PairStatus("old", PairStateDto.Failed(PairFailReason.TIMEOUT)))
             }
             r
         }
@@ -303,7 +304,7 @@ class PairViewModelTest {
         advanceUntilIdle()
         vm.start()
         advanceUntilIdle()
-        f.emit(Event.PairStatus("s1", PairStateDto.Failed("boom")))
+        f.emit(Event.PairStatus("s1", PairStateDto.Failed(PairFailReason.WRONG_SECRET)))
         advanceUntilIdle()
         vm.retry()
         advanceUntilIdle()
