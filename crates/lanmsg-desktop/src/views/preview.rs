@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::io::Read;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windui::prelude::*;
@@ -21,11 +22,9 @@ pub const TEXT_MAX_BYTES: usize = 1 << 20;
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 /// 图片预览允许读入内存的文件上限。
 const IMAGE_MAX_BYTES: u64 = 64 * 1024 * 1024;
-/// 预览对话框宽度与图片可用区域。
-const DIALOG_W: i32 = 720;
-const IMAGE_BOX_W: u32 = 672;
-const IMAGE_BOX_H: u32 = 440;
-const TEXT_BOX_H: i32 = 420;
+/// 预览对话框：距窗口边缘的留白与宽度上限（高度撑满；对 Match 子节点再设 max_height 不会重新测量，故不设）。
+const PANEL_MARGIN: i32 = 32;
+const PANEL_MAX_W: i32 = 900;
 /// 文本预览用等宽字体；非 Windows 平台交给系统的 monospace 别名。
 const MONO_FONT: &str = if cfg!(windows) {
     "Consolas"
@@ -99,9 +98,32 @@ pub fn decode_text(bytes: &[u8], truncated: bool) -> Option<TextPreview> {
         }
     }
     Some(TextPreview {
-        text: String::from_utf8_lossy(data).into_owned(),
+        text: split_long_lines(&String::from_utf8_lossy(data)),
         truncated,
     })
+}
+
+/// 单行最多显示的字符数；更长的行硬切分，避免压缩 JSON 这类超长单行拖垮排版。
+pub const MAX_LINE_CHARS: usize = 4096;
+
+/// 把超过 `MAX_LINE_CHARS` 个字符的行按该长度插入换行（按字符边界切，不拆 UTF-8）。
+pub fn split_long_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / MAX_LINE_CHARS + 1);
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let mut count = 0;
+        for ch in line.chars() {
+            if count == MAX_LINE_CHARS {
+                out.push('\n');
+                count = 0;
+            }
+            out.push(ch);
+            count += 1;
+        }
+    }
+    out
 }
 
 /// 读取文件前 1 MiB 并解码；二进制返回 `Ok(None)`。
@@ -124,18 +146,6 @@ fn looks_binary(path: &Path) -> bool {
         Ok(_) => head.contains(&0),
         Err(_) => false,
     }
-}
-
-/// 把图片等比缩进 `max_w x max_h`，且不放大超过原尺寸。
-pub fn fit_within(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
-    if w == 0 || h == 0 || (w <= max_w && h <= max_h) {
-        return (w, h);
-    }
-    let scale = (max_w as f64 / w as f64).min(max_h as f64 / h as f64);
-    (
-        ((w as f64 * scale).round() as u32).max(1),
-        ((h as f64 * scale).round() as u32).max(1),
-    )
 }
 
 /// 一次预览请求；`epoch` 保证对同一文件再次预览也会重建对话框。
@@ -221,7 +231,21 @@ pub struct PreviewState {
     /// 加载结果每变一次自增，对话框内容按它重建。
     version: Signal<u64>,
     body: Rc<RefCell<PreviewBody>>,
-    inbox: Arc<Mutex<Option<(u64, Loaded)>>>,
+    /// 只增不减的代次：每次打开自增，关闭不回退，旧请求的结果因此永远对不上新请求。
+    latest: Arc<AtomicU64>,
+    inbox: Inbox,
+}
+
+/// 后台线程的收件槽：（代次，结果）。
+type Inbox = Arc<Mutex<Option<(u64, Loaded)>>>;
+
+/// 后台线程投递结果：代次已不是最新（又打开过别的文件）就丢弃，不会覆盖新结果。
+fn deliver(inbox: &Inbox, latest: &AtomicU64, epoch: u64, loaded: Loaded) {
+    if let Ok(mut slot) = inbox.lock() {
+        if latest.load(Ordering::SeqCst) == epoch {
+            *slot = Some((epoch, loaded));
+        }
+    }
 }
 
 impl PreviewState {
@@ -230,12 +254,13 @@ impl PreviewState {
             req: signal(None),
             version: signal(0),
             body: Rc::new(RefCell::new(PreviewBody::Loading)),
+            latest: Arc::new(AtomicU64::new(0)),
             inbox: Arc::new(Mutex::new(None)),
         }
     }
 
     fn next_epoch(&self) -> u64 {
-        self.req.get().map_or(0, |r| r.epoch) + 1
+        self.latest.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     fn set_body(&self, b: PreviewBody) {
@@ -246,6 +271,9 @@ impl PreviewState {
     /// 打开预览：对话框立即出现，读取与解码在后台线程进行。
     pub fn open(&self, path: String, name: String, kind: PreviewKind) {
         let epoch = self.next_epoch();
+        if let Ok(mut slot) = self.inbox.lock() {
+            slot.take();
+        }
         self.set_body(PreviewBody::Loading);
         self.req.set(Some(PreviewReq {
             epoch,
@@ -253,12 +281,10 @@ impl PreviewState {
             name,
             kind,
         }));
-        let inbox = self.inbox.clone();
+        let (inbox, latest) = (self.inbox.clone(), self.latest.clone());
         std::thread::spawn(move || {
             let loaded = load(kind, &path);
-            if let Ok(mut slot) = inbox.lock() {
-                *slot = Some((epoch, loaded));
-            }
+            deliver(&inbox, &latest, epoch, loaded);
         });
     }
 
@@ -349,25 +375,48 @@ fn preview_dialog(state: &PreviewState, req: PreviewReq) -> Element {
                 .on_click(move |ctx| ctx.open_url(&path_open)),
         )
         .child(Element::button(strings::PREVIEW_CLOSE).on_click(move |_| st_close.close()));
-    Element::dialog_panel(
-        show,
-        req.name,
-        DIALOG_W,
-        move |_| st_x.close(),
-        body,
-        footer,
-    )
+    // 面板随窗口伸缩：撑满可用区域，再由上限收住（拿不到窗口尺寸，故用 Match + max）
+    let th = windui::theme::current();
+    let header = Element::row()
+        .width_match()
+        .cross(Align::Center)
+        .child(
+            Element::label(req.name)
+                .font_size(th.metrics.font_lg)
+                .font_weight(windui::text::WEIGHT_SEMIBOLD)
+                .max_lines(1)
+                .truncate(Truncate::End)
+                .fg_role(Role::Text)
+                .weight(1.0),
+        )
+        .child(
+            Element::icon_button("\u{2715}")
+                .size(28, 28)
+                .fg_role(Role::TextMuted)
+                .on_click(move |_| st_x.close()),
+        );
+    let panel = Element::col()
+        .width_match()
+        .max_width(PANEL_MAX_W)
+        .height_match()
+        .margin(PANEL_MARGIN)
+        .bg_role(Role::Surface)
+        .corner(th.metrics.corner_lg)
+        .padding(th.metrics.space_xl)
+        .spacing(th.metrics.space_lg)
+        .child(header)
+        .child(body.fill().weight(1.0))
+        .child(footer);
+    Element::dialog(show, panel)
 }
 
 fn body_view(b: &PreviewBody) -> Element {
     match b {
-        PreviewBody::Loading => muted(strings::PREVIEW_LOADING)
-            .width_match()
-            .height(TEXT_BOX_H),
+        PreviewBody::Loading => muted(strings::PREVIEW_LOADING).fill(),
         PreviewBody::Binary => muted(strings::PREVIEW_BINARY).width_match(),
         PreviewBody::Failed => muted(strings::PREVIEW_FAILED).width_match(),
         PreviewBody::Text(t) => {
-            let mut col = Element::col().width_match().spacing(style::SPACE_SM).child(
+            let mut col = Element::col().fill().spacing(style::SPACE_SM).child(
                 Element::text_input(signal(t.text.clone()), "")
                     .multiline()
                     .wrap(true)
@@ -376,7 +425,7 @@ fn body_view(b: &PreviewBody) -> Element {
                     .font_family(MONO_FONT)
                     .font_size(style::FONT_BODY)
                     .width_match()
-                    .height(TEXT_BOX_H),
+                    .weight(1.0),
             );
             if t.truncated {
                 col = col.child(
@@ -387,17 +436,15 @@ fn body_view(b: &PreviewBody) -> Element {
             }
             col
         }
-        PreviewBody::Image { w, h, rgba } => {
-            let (dw, dh) = fit_within(*w, *h, IMAGE_BOX_W, IMAGE_BOX_H);
-            Element::stack()
-                .width_match()
-                .height(IMAGE_BOX_H as i32)
-                .child(
-                    Element::image_rgba(*w, *h, rgba)
-                        .size(dw as i32, dh as i32)
-                        .align(Align::Center),
-                )
-        }
+        // 铺满可用区域、等比适配；封顶于原尺寸，小图不放大
+        PreviewBody::Image { w, h, rgba } => Element::stack().fill().child(
+            Element::image_rgba(*w, *h, rgba)
+                .fit(Fit::Contain)
+                .fill()
+                .max_width(*w as i32)
+                .max_height(*h as i32)
+                .align(Align::Center),
+        ),
     }
 }
 
@@ -474,7 +521,8 @@ mod tests {
         let big = dir.path().join("big.txt");
         std::fs::write(&big, vec![b'x'; TEXT_MAX_BYTES + 10]).expect("write");
         let t = read_text_preview(&big).expect("read").expect("text");
-        assert_eq!(t.text.len(), TEXT_MAX_BYTES);
+        // 超长单行会被硬切分，换行符不计入
+        assert_eq!(t.text.replace('\n', "").len(), TEXT_MAX_BYTES);
         assert!(t.truncated);
 
         let exact = dir.path().join("exact.txt");
@@ -490,10 +538,83 @@ mod tests {
     }
 
     #[test]
-    fn fit_never_upscales() {
-        assert_eq!(fit_within(100, 50, 672, 440), (100, 50));
-        assert_eq!(fit_within(1344, 440, 672, 440), (672, 220));
-        assert_eq!(fit_within(800, 1760, 672, 440), (200, 440));
-        assert_eq!(fit_within(0, 0, 10, 10), (0, 0));
+    fn long_lines_are_split_on_char_boundaries() {
+        let short = "ab\ncd\n";
+        assert_eq!(split_long_lines(short), short);
+        let line: String = "你".repeat(MAX_LINE_CHARS * 2 + 5);
+        let out = split_long_lines(&line);
+        let parts: Vec<&str> = out.split('\n').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].chars().count(), MAX_LINE_CHARS);
+        assert_eq!(parts[1].chars().count(), MAX_LINE_CHARS);
+        assert_eq!(parts[2].chars().count(), 5);
+        assert_eq!(out.replace('\n', ""), line);
+        // 恰好等于上限不切
+        let exact = "x".repeat(MAX_LINE_CHARS);
+        assert_eq!(split_long_lines(&exact), exact);
+    }
+
+    fn text_loaded(s: &str) -> Loaded {
+        Loaded::Text(TextPreview {
+            text: s.into(),
+            truncated: false,
+        })
+    }
+
+    fn shown_text(st: &PreviewState) -> Option<String> {
+        match &*st.body.borrow() {
+            PreviewBody::Text(t) => Some(t.text.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn epoch_never_repeats_after_close() {
+        let st = PreviewState::new();
+        st.open_blocking("/nonexistent/a".into(), "a".into(), PreviewKind::Text);
+        let a = st.req.get().expect("req").epoch;
+        st.close();
+        st.open_blocking("/nonexistent/b".into(), "b".into(), PreviewKind::Text);
+        assert!(st.req.get().expect("req").epoch > a);
+    }
+
+    #[test]
+    fn stale_result_after_close_and_reopen_is_discarded() {
+        let st = PreviewState::new();
+        // 打开 A（后台线程尚未返回），关闭，再打开 B
+        let a = st.next_epoch();
+        st.close();
+        let b = st.next_epoch();
+        st.req.set(Some(PreviewReq {
+            epoch: b,
+            path: "/b".into(),
+            name: "b".into(),
+            kind: PreviewKind::Text,
+        }));
+        // A 的结果迟到：因代次已不是最新，不会进入收件槽
+        deliver(&st.inbox, &st.latest, a, text_loaded("from A"));
+        st.tick();
+        assert_eq!(shown_text(&st), None);
+        deliver(&st.inbox, &st.latest, b, text_loaded("from B"));
+        st.tick();
+        assert_eq!(shown_text(&st).as_deref(), Some("from B"));
+    }
+
+    #[test]
+    fn old_result_cannot_overwrite_new_one() {
+        let st = PreviewState::new();
+        let a = st.next_epoch();
+        let b = st.next_epoch();
+        st.req.set(Some(PreviewReq {
+            epoch: b,
+            path: "/b".into(),
+            name: "b".into(),
+            kind: PreviewKind::Text,
+        }));
+        // B 先返回，A 后到：A 不能覆盖 B
+        deliver(&st.inbox, &st.latest, b, text_loaded("from B"));
+        deliver(&st.inbox, &st.latest, a, text_loaded("from A"));
+        st.tick();
+        assert_eq!(shown_text(&st).as_deref(), Some("from B"));
     }
 }
