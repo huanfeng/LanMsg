@@ -184,8 +184,6 @@ async fn on_recall(svc: &Inner, m: &StoredMessage, target: &MsgId) {
             ) {
                 let _ = svc.events.send(Event::MessageUpdated { msg });
             }
-            // 目标若是会话最后一条，预览变为“已撤回”。
-            crate::service::notify_conversation(svc, &t.env.conv);
         }
         _ => {
             if let Err(e) = svc.store.undo_recall(target) {
@@ -193,6 +191,10 @@ async fn on_recall(svc: &Inner, m: &StoredMessage, target: &MsgId) {
             }
         }
     }
+    // 入库时存储层已先把目标置 Recalled 并发过一次摘要；有效撤回时这里重发一次是
+    // 幂等的（兜底同步补齐等未经入库广播的路径），无效撤回被 undo 后必须再发，
+    // 否则对端预览会一直停在“已撤回”。
+    crate::service::notify_conversation(svc, &m.env.conv);
 }
 
 /// System{LocalDeleted}：作者用户 == 自己（我的其他设备的删除广播）→

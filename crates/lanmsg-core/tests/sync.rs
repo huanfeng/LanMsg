@@ -731,6 +731,116 @@ async fn mark_read_on_hidden_message_does_not_loop() {
     assert_eq!(count(), before, "对隐藏消息 MarkRead 不应产生新 Read");
 }
 
+/// 构造并注入一条由 X 设备密钥签名的 Recall（绕过本地校验，模拟对端发来无效撤回）。
+async fn inject_recall(x: &TestNode, a: &TestNode, conv: &str, target: &str, hlc_millis: i64) {
+    use lanmsg_proto::frame::Frame;
+    use lanmsg_proto::ids::{DeviceId, MsgId};
+    use lanmsg_proto::sign::{sign_with_zeroed_sig, DeviceKey};
+    use lanmsg_proto::types::{Envelope, Hlc, MsgBody, Signature64, SyncPush};
+
+    let conv_id = ConvId::from_hex(conv).expect("conv");
+    let x_dev = DeviceId::from_hex(&x.device_id().await).expect("x device");
+    let a_dev = DeviceId::from_hex(&a.device_id().await).expect("a device");
+    let (seq, conv_seq) = x
+        .svc
+        .store_for_test()
+        .next_seqs(&x_dev, &conv_id)
+        .expect("next_seqs");
+    let key_bytes: [u8; 32] = std::fs::read(x.dir.path().join("keys").join("device.key"))
+        .expect("device key")
+        .try_into()
+        .expect("key len");
+    let mut env = Envelope {
+        conv: conv_id,
+        id: MsgId { author: x_dev, seq },
+        conv_seq,
+        hlc: Hlc {
+            millis: hlc_millis,
+            counter: 0,
+        },
+        body: MsgBody::Recall {
+            target: target.parse().expect("msg id"),
+        },
+        enc: None,
+        sig: Signature64([0u8; 64]),
+    };
+    let key = DeviceKey::from_bytes(&key_bytes);
+    sign_with_zeroed_sig(&mut env, |b| key.sign(b));
+    x.svc
+        .send_frame_for_test(
+            &a_dev,
+            Frame::SyncPush(SyncPush {
+                envelopes: vec![env],
+            }),
+        )
+        .await
+        .expect("send");
+}
+
+/// 回归：无效撤回（非作者本人 / 超时）到达后，存储层入库时先把目标置 Recalled 并发
+/// 过“已撤回”摘要；判定无效、undo 之后必须再发摘要，预览恢复为原内容。
+#[tokio::test]
+async fn invalid_recall_restores_conversation_preview() {
+    for case in ["not_author", "expired"] {
+        let mut a = node_offline().await;
+        let a_user = a.init_first("甲").await;
+        let mut x = node_offline().await;
+        let x_user = x.init_first("小张").await;
+        befriend(&mut a, &mut x).await;
+        let conv = ConvId::dm(&user(&a_user), &user(&x_user)).to_hex();
+        a.call(Request::OpenDm {
+            user: x_user.clone(),
+        })
+        .await;
+        // 目标：not_author 用 A 的消息（X 无权撤回）；expired 用 X 自己的消息 + 3 分钟后的撤回。
+        let (sender, text) = if case == "not_author" {
+            (&a, "保留我")
+        } else {
+            (&x, "保留我")
+        };
+        sender
+            .call(Request::SendText {
+                conv: conv.clone(),
+                text: text.into(),
+            })
+            .await;
+        wait_until(|| async { list_texts(&a, &conv).await.len() == 1 }, 5).await;
+        wait_until(|| async { list_texts(&x, &conv).await.len() == 1 }, 5).await;
+        let target = list_texts(&a, &conv).await.remove(0);
+        let millis = if case == "not_author" {
+            target.hlc_millis + 1000
+        } else {
+            target.hlc_millis + 3 * 60 * 1000
+        };
+        while a.events.try_recv().is_ok() {}
+
+        inject_recall(&x, &a, &conv, &target.id, millis).await;
+
+        // 先出现入库时的“已撤回”摘要，随后必须出现恢复后的原预览。
+        a.wait_event(
+            |e| {
+                matches!(e, Event::ConversationUpdated { summary }
+                    if summary.conv == conv && summary.last_kind == Some(lanmsg_api::types::LastMessageKind::Recalled))
+            },
+            5,
+        )
+        .await;
+        a.wait_event(
+            |e| {
+                matches!(e, Event::ConversationUpdated { summary }
+                    if summary.conv == conv
+                        && summary.last_kind == Some(lanmsg_api::types::LastMessageKind::Text)
+                        && summary.last_text.as_deref() == Some(text))
+            },
+            5,
+        )
+        .await;
+        let msgs = list_texts(&a, &conv).await;
+        assert_eq!(msgs.len(), 1, "{case}: 目标消息应仍可见");
+        assert_ne!(msgs[0].state, MessageState::Recalled, "{case}");
+    }
+}
+
 /// 撤回他人消息被拒绝（InvalidArgument）。
 #[tokio::test]
 async fn recall_others_message_rejected() {
