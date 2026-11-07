@@ -20,9 +20,13 @@ object Routes {
     const val CHAT = "chat/{conv}"
     const val IMAGE = "image/{conv}/{hash}"
     const val CONTACT = "contact/{user}"
+    const val TEXT = "text?path={path}&name={name}&mime={mime}"
 
     fun chat(conv: String) = "chat/${Uri.encode(conv)}"
     fun image(conv: String, hash: String) = "image/${Uri.encode(conv)}/${Uri.encode(hash)}"
+    fun text(path: String, name: String, mime: String) =
+        "text?path=${Uri.encode(path)}&name=${Uri.encode(name)}&mime=${Uri.encode(mime)}"
+
     fun contact(user: String) = "contact/${Uri.encode(user)}"
     fun files(conv: String? = null) = if (conv == null) "files" else "files?conv=${Uri.encode(conv)}"
 

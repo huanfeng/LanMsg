@@ -31,7 +31,8 @@
 | `onboarding` | — | 引导 |
 | `convs` | — | 会话列表（标签 1） |
 | `chat/{conv}` | conv：会话 id | 聊天 |
-| `image/{conv}/{hash}` | — | 图片查看 |
+| `image/{conv}/{hash}` | — | 图片查看（聊天与文件页的图片都进这里） |
+| `text?path={path}&name={name}&mime={mime}` | path：本地路径，name、mime：文件名与类型 | 文本预览（只读、等宽、可选中；最多 1 MiB） |
 | `files?conv={conv}` | conv 可选 | 文件视图（标签 2） |
 | `contacts` | — | 联系人（标签 3） |
 | `requests` | — | 新的请求 |
@@ -299,6 +300,9 @@
 | back | 返回 |
 | retry | 重试 |
 | image_not_found | 找不到这张图片 |
+| preview_open_with | 用其他应用打开 |
+| preview_truncated | 仅显示前 1 MB |
+| preview_failed | 无法预览这个文件 |
 | err_generic | 错误：%1$s |
 | err_peer_offline | 对方不在线 |
 | err_core_outdated | 该功能需要更新核心库 |

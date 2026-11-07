@@ -234,7 +234,7 @@ fun ImageViewerContent(
                     AsyncImage(
                         model = File(image),
                         contentDescription = item.name,
-                        contentScale = ContentScale.Fit,
+                        contentScale = ContentScale.Inside,
                         modifier = Modifier.weight(1f).fillMaxWidth(),
                     )
                 } else {

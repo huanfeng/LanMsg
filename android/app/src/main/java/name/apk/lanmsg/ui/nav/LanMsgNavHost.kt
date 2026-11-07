@@ -46,6 +46,7 @@ import name.apk.lanmsg.ui.me.MeScreen
 import name.apk.lanmsg.ui.onboarding.OnboardingScreen
 import name.apk.lanmsg.ui.onboarding.OnboardingViewModel
 import name.apk.lanmsg.ui.search.SearchScreen
+import name.apk.lanmsg.ui.preview.TextPreviewScreen
 import name.apk.lanmsg.ui.settings.SettingsScreen
 import name.apk.lanmsg.ui.share.SharePickScreen
 import name.apk.lanmsg.ui.share.SharePickViewModel
@@ -150,6 +151,8 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                     initialConv = entry.arguments?.getString("conv"),
                     onOpenChat = { nav.navigate(Routes.chat(it)) },
                     onForward = { nav.navigate(Routes.forward(it)) },
+                    onOpenImage = { c, hash -> nav.navigate(Routes.image(c, hash)) },
+                    onOpenText = { path, name, mime -> nav.navigate(Routes.text(path, name, mime)) },
                 )
             }
             composable(Routes.CONTACTS) {
@@ -221,8 +224,22 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                     conv = conv,
                     onBack = { nav.popBackStack() },
                     onOpenImage = { c, hash -> nav.navigate(Routes.image(c, hash)) },
+                    onOpenText = { path, name, mime -> nav.navigate(Routes.text(path, name, mime)) },
                     onForward = { nav.navigate(Routes.forward(it)) },
                 )
+            }
+            composable(
+                Routes.TEXT,
+                arguments = listOf(
+                    navArgument("path") { type = NavType.StringType },
+                    navArgument("name") { type = NavType.StringType },
+                    navArgument("mime") { type = NavType.StringType },
+                ),
+            ) { entry ->
+                val path = entry.arguments?.getString("path") ?: return@composable
+                val name = entry.arguments?.getString("name").orEmpty()
+                val mime = entry.arguments?.getString("mime").orEmpty()
+                TextPreviewScreen(path, name, mime, onBack = { nav.popBackStack() })
             }
             composable(
                 Routes.IMAGE,

@@ -64,6 +64,8 @@ import coil.compose.AsyncImage
 import name.apk.lanmsg.R
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.files.FileOpener
+import name.apk.lanmsg.files.FilePreview
+import name.apk.lanmsg.files.PreviewKind
 import name.apk.lanmsg.ui.chat.FileStateMark
 import name.apk.lanmsg.ui.chat.fileKindIcon
 import name.apk.lanmsg.ui.chat.fileKindOf
@@ -79,7 +81,13 @@ import uniffi.lanmsg_api.FileView
 import java.io.File
 
 @Composable
-fun FilesScreen(initialConv: String?, onOpenChat: (String) -> Unit, onForward: (List<String>) -> Unit) {
+fun FilesScreen(
+    initialConv: String?,
+    onOpenChat: (String) -> Unit,
+    onForward: (List<String>) -> Unit,
+    onOpenImage: (conv: String, hash: String) -> Unit,
+    onOpenText: (path: String, name: String, mime: String) -> Unit,
+) {
     val vm: FilesViewModel = viewModel(
         key = "files-$initialConv",
         factory = viewModelFactory { initializer { FilesViewModel(ServiceLocator.coreHolder.api, initialConv) } },
@@ -97,7 +105,14 @@ fun FilesScreen(initialConv: String?, onOpenChat: (String) -> Unit, onForward: (
         onClick = { v ->
             when (v.item.state) {
                 BlobState.REMOTE -> vm.download(v.item.hash)
-                BlobState.LOCAL -> v.item.localPath?.let { FileOpener.open(ctx, it, v.item.mime) }
+                BlobState.LOCAL -> v.item.localPath?.let {
+                    // 图片进入图片查看页，文本进入文本预览页，其余交给系统程序
+                    when (FilePreview.kind(v.item.mime, v.item.name)) {
+                        PreviewKind.IMAGE -> onOpenImage(v.conv, v.item.hash)
+                        PreviewKind.TEXT -> onOpenText(it, v.item.name, v.item.mime)
+                        null -> FileOpener.open(ctx, it, v.item.mime)
+                    }
+                }
                 else -> Unit
             }
         },

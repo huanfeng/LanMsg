@@ -12,6 +12,7 @@ class RoutesTest {
         assertEquals("files?conv=c1", Routes.files("c1"))
         assertEquals("image/c%2F1/h", Routes.image("c/1", "h"))
         assertEquals("contact/u%201", Routes.contact("u 1"))
+        assertEquals("text?path=%2Fa%20b%2Fx.txt&name=x.txt&mime=text%2Fplain", Routes.text("/a b/x.txt", "x.txt", "text/plain"))
         assertEquals("forward/aa,bb", Routes.forward(listOf("aa", "bb")))
     }
 }

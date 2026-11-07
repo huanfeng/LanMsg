@@ -54,6 +54,8 @@ import kotlinx.coroutines.flow.filter
 import name.apk.lanmsg.R
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.files.FileOpener
+import name.apk.lanmsg.files.FilePreview
+import name.apk.lanmsg.files.PreviewKind
 import name.apk.lanmsg.notify.VisibleConversation
 import name.apk.lanmsg.ui.common.formatTime
 import name.apk.lanmsg.ui.theme.LanMsgColors
@@ -79,6 +81,7 @@ fun ChatScreen(
     conv: String,
     onBack: () -> Unit,
     onOpenImage: (conv: String, hash: String) -> Unit,
+    onOpenText: (path: String, name: String, mime: String) -> Unit,
     onForward: (List<String>) -> Unit,
 ) {
     val vm: ChatViewModel = viewModel(
@@ -110,7 +113,16 @@ fun ChatScreen(
             onDownload = vm::download,
             onCancel = vm::cancel,
             onOpenImage = { onOpenImage(conv, it) },
-            onOpenFile = { item -> item.localPath?.let { FileOpener.open(ctx, it, item.mime) } },
+            onOpenFile = { item ->
+                item.localPath?.let {
+                    // 能预览的文本进入应用内预览，其余交给系统程序
+                    if (FilePreview.kind(item.mime, item.name) == PreviewKind.TEXT) {
+                        onOpenText(it, item.name, item.mime)
+                    } else {
+                        FileOpener.open(ctx, it, item.mime)
+                    }
+                }
+            },
             onRecall = vm::recall,
             onDelete = vm::deleteLocal,
             onForward = onForward,
