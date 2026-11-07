@@ -27,7 +27,7 @@ class ChatScreenTest {
                 ChatContent(
                     state = ChatViewModel.UiState(title = "对端", kind = ConvKind.DM, peerOnline = true, messages = listOf(recalled)),
                     canRecall = { false },
-                    actions = ChatActions(),
+                    actions = ChatActions(onAttachMedia = {}, onAttachFile = {}),
                 )
             }
         }
@@ -41,7 +41,7 @@ class ChatScreenTest {
                 ChatContent(
                     state = ChatViewModel.UiState(title = "对端", kind = ConvKind.DM, peerOnline = true, messages = listOf(recalled)),
                     canRecall = { false },
-                    actions = ChatActions(),
+                    actions = ChatActions(onAttachMedia = {}, onAttachFile = {}),
                 )
             }
         }
@@ -54,7 +54,7 @@ class ChatScreenTest {
                 ChatContent(
                     state = ChatViewModel.UiState(kind = ConvKind.SELF_DEVICES, messages = listOf(Fixtures.textMsg("m1", text = "你好"))),
                     canRecall = { false },
-                    actions = ChatActions(),
+                    actions = ChatActions(onAttachMedia = {}, onAttachFile = {}),
                 )
             }
         }

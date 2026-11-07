@@ -132,12 +132,15 @@ class MainActivity : ComponentActivity() {
     companion object {
         /** 通知点击携带的目标路由（Routes 中的值）。 */
         const val EXTRA_ROUTE = "route"
+        private const val MAX_ROUTE_LENGTH = 256
+        private const val MAX_LOGGED_ROUTE_LENGTH = 64
 
         /**
          * 外部 intent 可设置 route extra（Activity 是 exported 的），只放行通知会发出的两种：
-         * requests 与 chat/<非空会话>（解码后非空、不含 '/'）。其余一律拒绝。
+         * requests 与 chat/<非空会话>（解码后非空、不含 '/'）。其余一律拒绝；长度超过 [MAX_ROUTE_LENGTH] 也拒绝。
          */
         fun isAllowedDeepLink(route: String): Boolean {
+            if (route.length > MAX_ROUTE_LENGTH) return false
             if (route == Routes.REQUESTS) return true
             val prefix = "chat/"
             if (!route.startsWith(prefix)) return false
@@ -147,7 +150,7 @@ class MainActivity : ComponentActivity() {
 
         private fun acceptRoute(route: String): String? {
             if (isAllowedDeepLink(route)) return route
-            Log.w("MainActivity", "Rejected non-whitelisted deep link route: $route")
+            Log.w("MainActivity", "Rejected non-whitelisted deep link route: ${route.take(MAX_LOGGED_ROUTE_LENGTH)}")
             return null
         }
     }

@@ -127,4 +127,24 @@ class SearchViewModelTest {
         advanceUntilIdle()
         assertEquals("boom", vm.state.value.error)
     }
+
+    @Test fun permanently_missing_conversation_is_refetched_only_once() = runTest {
+        val fake = fake().apply {
+            val inner = handler
+            handler = { req ->
+                if (req is Request.SearchMessages) {
+                    Response.Messages(listOf(Fixtures.textMsg("m1", conv = "gone", text = req.query)))
+                } else {
+                    inner(req)
+                }
+            }
+        }
+        val vm = SearchViewModel(fake)
+        vm.setQuery("a"); advanceUntilIdle()
+        vm.setQuery("ab"); advanceUntilIdle()
+        vm.setQuery("abc"); advanceUntilIdle()
+        // 首次拉取 1 次 + 发现缺失后重拉 1 次；之后同一缺失会话不再重拉
+        assertEquals(2, fake.requests.count { it == Request.ListConversations })
+        assertEquals("", vm.state.value.rows.single().convTitle)
+    }
 }

@@ -12,6 +12,9 @@ class MainActivityDeepLinkTest {
         assertTrue(MainActivity.isAllowedDeepLink("requests"))
         assertTrue(MainActivity.isAllowedDeepLink("chat/c1"))
         assertTrue(MainActivity.isAllowedDeepLink("chat/a%20b"))
+        // %252F 单次解码后是字面量 "%2F"（不含 '/'），按现有语义放行；此行固定该行为，防止改成多次解码
+        assertTrue(MainActivity.isAllowedDeepLink("chat/a%252Fb"))
+        assertTrue(MainActivity.isAllowedDeepLink("chat/" + "a".repeat(251)))
     }
 
     @Test fun rejects_other_pages_and_malformed_chat() {
@@ -22,5 +25,7 @@ class MainActivityDeepLinkTest {
         assertFalse(MainActivity.isAllowedDeepLink("chat/a/b"))
         assertFalse(MainActivity.isAllowedDeepLink("chat/a%2Fb"))
         assertFalse(MainActivity.isAllowedDeepLink(""))
+        // 超长输入被拒（上限 256）
+        assertFalse(MainActivity.isAllowedDeepLink("chat/" + "a".repeat(300)))
     }
 }

@@ -68,8 +68,8 @@ class ChatActions(
     val onSend: () -> Unit = {},
     val onLoadMore: () -> Unit = {},
     val onDismissError: () -> Unit = {},
-    val onAttachMedia: () -> Unit = {},
-    val onAttachFile: () -> Unit = {},
+    val onAttachMedia: () -> Unit,
+    val onAttachFile: () -> Unit,
     val bubble: BubbleActions = BubbleActions(),
 )
 

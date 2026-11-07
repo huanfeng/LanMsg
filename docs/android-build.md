@@ -36,9 +36,25 @@ bash scripts/build-android.sh release   # 默认 release；也可传 debug
 
 ## 常见问题
 
-### aws-lc-rs 编译失败
+### 如遇 aws-lc-rs 编译失败的排查方向
 
-部分 NDK 或 target 组合下，依赖 `rustls` 的 `aws-lc-rs` 后端（需要 C 编译器与 CMake）可能编译失败。切换办法：让 `rustls` 使用纯 Rust 的 `ring` 后端（在对应 crate 的 `Cargo.toml` 中关闭默认特性，启用 `ring`），然后重新构建。先确认 `ANDROID_NDK_HOME` 指向 r26 及以上的 NDK、`cargo-ndk` 版本较新，再考虑切换。
+仅在某些 NDK 或 target 组合下 `rustls` 的默认后端 `aws-lc-rs`（需要 C 编译器与 CMake）编译失败时才需处理。先确认 `ANDROID_NDK_HOME` 指向 r26 及以上的 NDK、`cargo-ndk` 版本较新，仍失败再切换到纯 Rust 的 `ring` 后端：
+
+在 `crates/lanmsg-core/Cargo.toml` 中把
+
+```toml
+rustls = "0.23"
+tokio-rustls = "0.26"
+```
+
+改为关闭默认特性并启用 `ring`（特性名已按 rustls 0.23.46 / tokio-rustls 0.26.6 的 `Cargo.toml` 核对；默认特性需手动补回 `std`、`logging`、`tls12`，以 crate 文档为准）：
+
+```toml
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+```
+
+注意：这是 workspace 共用的依赖，改动会同时影响桌面版（TLS 后端变化），需自行验证 `cargo test --workspace` 与桌面端配对、传输；`rcgen 0.13` 默认已用 `ring`，无需改。改完后重新运行 `scripts/build-android-core.sh`。
 
 ### UnsatisfiedLinkError
 

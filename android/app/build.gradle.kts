@@ -25,6 +25,11 @@ android {
     }
     signingConfigs {
         if (keystoreFile.exists()) {
+            val required = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+            val missing = required.filter { keystoreProps.getProperty(it).isNullOrBlank() }
+            if (missing.isNotEmpty()) {
+                throw GradleException("keystore.properties is missing keys: ${missing.joinToString(", ")}")
+            }
             create("release") {
                 storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
                 storePassword = keystoreProps.getProperty("storePassword")

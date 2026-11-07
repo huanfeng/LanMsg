@@ -39,9 +39,17 @@ class SearchViewModel(private val core: CoreApi) : ViewModel() {
     private var convs: MutableMap<String, ConversationSummary>? = null
     private var job: Job? = null
 
+    /** 重拉后仍不在会话列表里的 conv（如已删除的会话）：视为已确认缺失，不再每次搜索都重拉。 */
+    private val missing = mutableSetOf<String>()
+
     init {
         viewModelScope.launch {
-            core.events.collect { e -> if (e is Event.ConversationUpdated) convs?.put(e.summary.conv, e.summary) }
+            core.events.collect { e ->
+                if (e is Event.ConversationUpdated) {
+                    missing -= e.summary.conv
+                    convs?.put(e.summary.conv, e.summary)
+                }
+            }
         }
     }
 
@@ -64,7 +72,10 @@ class SearchViewModel(private val core: CoreApi) : ViewModel() {
             try {
                 val found = core.call<Response.Messages>(Request.SearchMessages(text, null, LIMIT)).value
                 var map = convs ?: loadConvs()
-                if (found.any { it.conv !in map }) map = loadConvs()
+                if (found.any { it.conv !in map && it.conv !in missing }) {
+                    map = loadConvs()
+                    missing += found.map { it.conv }.filter { it !in map }
+                }
                 val rows = found.map { m ->
                     val summary = map[m.conv]
                     Row(m, summary?.title.orEmpty(), summary?.kind == ConvKind.SELF_DEVICES)
