@@ -11,8 +11,8 @@ use clap::{Parser, Subcommand};
 use lanmsg_api::ipc::{endpoint_name, IpcClient};
 use lanmsg_api::types::{
     BlobState, ConvKind, ConversationSummary, Event, InitMode, MessageBodyView, PairMethod,
-    PairStateDto, PairTarget, Request, RequestAction, RequestKind, Response, SettingsDto,
-    StatusDto, SystemEventView,
+    PairStateDto, PairTarget, Request, RequestAction, RequestKind, RequestPreviewView, Response,
+    SettingsDto, StatusDto, SystemEventView,
 };
 
 /// IpcClient::events() 返回的事件接收端。
@@ -492,7 +492,7 @@ async fn main() -> Result<()> {
                             r.request,
                             kind_str(&r.kind),
                             r.from_name,
-                            r.preview
+                            preview_line(&r.preview)
                         );
                     }
                 }
@@ -633,6 +633,20 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 请求预览的英文单行描述（无内容时为 "-"）。
+fn preview_line(p: &RequestPreviewView) -> String {
+    match p {
+        RequestPreviewView::None => "-".to_string(),
+        RequestPreviewView::Text { text } => text.clone(),
+        RequestPreviewView::Files {
+            first_name,
+            count,
+            total_size,
+        } => format!("{first_name} ({count} files, {})", human_size(*total_size)),
+        RequestPreviewView::Folder { name, count } => format!("folder {name} ({count} files)"),
+    }
 }
 
 /// 系统事件的英文单行描述（CLI 是开发测试工具，输出英文）。

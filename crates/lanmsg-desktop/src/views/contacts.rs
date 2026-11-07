@@ -6,6 +6,7 @@ use lanmsg_api::types::{
 };
 use windui::prelude::*;
 
+use crate::event_text::request_preview_text;
 use crate::model::{normalize_peer_addr, parse_ask_mb, CONTACTS_TABS};
 use crate::strings;
 use crate::style;
@@ -400,9 +401,9 @@ fn request_card(ui: &UiState, r: &RequestView, confirm: ConfirmState) -> Element
             strings::CONTACT_FINGERPRINT,
             r.from_short
         )));
-    if !r.preview.is_empty() {
+    if let Some(text) = request_preview_text(&r.preview) {
         info = info.child(
-            Element::label(r.preview.clone())
+            Element::label(text)
                 .font_size(style::FONT_BODY)
                 .fg_role(Role::Text)
                 .max_lines(2)

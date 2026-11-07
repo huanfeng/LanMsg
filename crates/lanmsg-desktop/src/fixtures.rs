@@ -613,7 +613,8 @@ pub fn demo_model(p: DemoPage) -> Model {
         from_user: "u-chen".into(),
         from_name: "陈同学".into(),
         from_short: "G7H8".into(),
-        preview: "你好，我是隔壁组的".into(),
+        // 联系人请求没有内容预览
+        preview: RequestPreviewView::None,
         created_at: NOW - 5 * MIN,
     }];
     m.peers = vec![

@@ -3,6 +3,7 @@ package name.apk.lanmsg.testutil
 import uniffi.lanmsg_api.BlobState
 import uniffi.lanmsg_api.ContactView
 import uniffi.lanmsg_api.ConvKind
+import uniffi.lanmsg_api.RequestPreviewView
 import uniffi.lanmsg_api.ConversationSummary
 import uniffi.lanmsg_api.DeviceView
 import uniffi.lanmsg_api.FileItemView
@@ -81,6 +82,6 @@ object Fixtures {
     fun request(id: String = "r1", kind: RequestKind = RequestKind.CONTACT, fromUser: String = "u2", fromName: String = "对端"): RequestView =
         RequestView(
             request = id, kind = kind, fromUser = fromUser, fromName = fromName,
-            fromShort = fromUser.uppercase(), preview = "", createdAt = 1000,
+            fromShort = fromUser.uppercase(), preview = RequestPreviewView.None, createdAt = 1000,
         )
 }

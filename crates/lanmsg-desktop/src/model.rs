@@ -1533,7 +1533,7 @@ mod tests {
             from_user: "u".into(),
             from_name: "张三".into(),
             from_short: "ab".into(),
-            preview: String::new(),
+            preview: RequestPreviewView::None,
             created_at: 1,
         }
     }

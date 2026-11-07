@@ -12,7 +12,8 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use lanmsg_api::types::{
-    ErrorCode, Event, MessageState, Request, RequestAction, RequestKind, Response,
+    ErrorCode, Event, MessageState, Request, RequestAction, RequestKind, RequestPreviewView,
+    Response,
 };
 use lanmsg_core::hlc::HlcClock;
 use lanmsg_core::identity::Identity;
@@ -451,14 +452,14 @@ async fn contact_request_preview_is_empty() {
         .await
     {
         Event::IncomingRequest { request } => {
-            assert_eq!(request.preview, "", "事件里的 preview 应为空");
+            assert_eq!(request.preview, RequestPreviewView::None, "事件里的 preview 应为 None");
         }
         other => panic!("期望 IncomingRequest，实际 {other:?}"),
     }
     match b.call(Request::ListRequests).await {
         Response::Requests { value } => {
             assert_eq!(value.len(), 1);
-            assert_eq!(value[0].preview, "");
+            assert_eq!(value[0].preview, RequestPreviewView::None);
         }
         other => panic!("期望 Requests，实际 {other:?}"),
     }
@@ -679,7 +680,8 @@ async fn stranger_text_creates_single_request_and_hidden_conv() {
             matches!(
                 b.try_call(Request::ListRequests).await,
                 Ok(Response::Requests { ref value })
-                    if value.len() == 1 && value[0].preview == "测".repeat(50)
+                    if value.len() == 1 && value[0].preview
+                        == (RequestPreviewView::Text { text: "测".repeat(50) })
             )
         },
         5,
@@ -1012,11 +1014,15 @@ async fn stranger_file_request_kind_is_file() {
     let reqs = b.store.list_open_requests().unwrap();
     assert_eq!(reqs.len(), 1, "应恰有 1 条 open 请求: {reqs:?}");
     assert_eq!(reqs[0].kind, RequestKindRow::File);
-    assert!(
-        reqs[0].preview.contains("机密.pdf"),
-        "preview 应含文件名: {}",
-        reqs[0].preview
-    );
+    match &reqs[0].preview {
+        RequestPreviewView::Files {
+            first_name, count, ..
+        } => {
+            assert_eq!(first_name, "机密.pdf");
+            assert_eq!(*count, 1);
+        }
+        other => panic!("期望 Files 预览，实际 {other:?}"),
+    }
     // 消息已入库但隐藏。
     assert!(b.store.get_message(&env.id).unwrap().is_some());
     assert!(
@@ -1232,7 +1238,13 @@ async fn gate_rules_table() {
         .filter(|r| r.from_user == s7.user_id())
         .collect();
     assert_eq!(reqs.len(), 1);
-    assert_eq!(reqs[0].preview, "规则七第二条", "折叠只更新 preview");
+    assert_eq!(
+        reqs[0].preview,
+        RequestPreviewView::Text {
+            text: "规则七第二条".into()
+        },
+        "折叠只更新 preview"
+    );
 }
 
 /// P2 Task 8：联系人伪造的吊销记录被拒——验签失败返回 Err，设备未吊销。

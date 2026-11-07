@@ -66,6 +66,10 @@
     <string name="files_archive">压缩包</string>
     <string name="files_other">其他</string>
     <string name="files_state_downloaded">已下载</string>
+    <string name="req_preview_text">%1$s</string>
+    <string name="req_preview_file">%1$s（%2$s）</string>
+    <string name="req_preview_files">%1$s 等 %2$d 个文件（%3$s）</string>
+    <string name="req_preview_folder">文件夹 %1$s（%2$d 个文件）</string>
     <string name="file_status_stored">存于 %1$s</string>
     <string name="file_source_me">来自我</string>
     <string name="file_source_me_downloaded">来自我 · 已下载</string>

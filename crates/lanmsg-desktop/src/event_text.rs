@@ -2,8 +2,11 @@
 // core 只给结构（SystemEventView、ConvKind），文案只在 strings.rs。
 
 use lanmsg_api::types::{
-    BlobState, ConvKind, ConversationSummary, FileItemView, FileView, SystemEventView,
+    BlobState, ConvKind, ConversationSummary, FileItemView, FileView, RequestPreviewView,
+    SystemEventView,
 };
+
+use crate::views::message_row::human_size;
 
 use crate::strings;
 
@@ -35,6 +38,35 @@ pub fn system_event_text(event: &SystemEventView) -> String {
         } => {
             format!("{author_name}{}", strings::SYS_RECALLED_BY_PEER)
         }
+    }
+}
+
+/// 请求内容预览文案；没有内容可预览时为 None（界面只显示请求类型）。
+pub fn request_preview_text(p: &RequestPreviewView) -> Option<String> {
+    match p {
+        RequestPreviewView::None => None,
+        RequestPreviewView::Text { text } => Some(text.clone()),
+        RequestPreviewView::Files {
+            first_name,
+            count,
+            total_size,
+        } => {
+            let size = human_size(*total_size);
+            Some(if *count <= 1 {
+                format!("{first_name}（{size}）")
+            } else {
+                format!(
+                    "{first_name}{}{count}{}（{size}）",
+                    strings::REQ_PREVIEW_FILES_ETC_MID,
+                    strings::REQ_PREVIEW_FILES_UNIT
+                )
+            })
+        }
+        RequestPreviewView::Folder { name, count } => Some(format!(
+            "{}{name}（{count}{}）",
+            strings::REQ_PREVIEW_FOLDER_PREFIX,
+            strings::REQ_PREVIEW_FILES_UNIT
+        )),
     }
 }
 
@@ -148,6 +180,40 @@ mod tests {
             unread: 0,
             peer_online: false,
         }
+    }
+
+    #[test]
+    fn request_preview_texts_per_variant() {
+        assert_eq!(request_preview_text(&RequestPreviewView::None), None);
+        assert_eq!(
+            request_preview_text(&RequestPreviewView::Text {
+                text: "你好".into()
+            }),
+            Some("你好".to_string())
+        );
+        assert_eq!(
+            request_preview_text(&RequestPreviewView::Files {
+                first_name: "a.pdf".into(),
+                count: 1,
+                total_size: 2048
+            }),
+            Some("a.pdf（2.0 KB）".to_string())
+        );
+        assert_eq!(
+            request_preview_text(&RequestPreviewView::Files {
+                first_name: "a.pdf".into(),
+                count: 3,
+                total_size: 3 * 1024 * 1024
+            }),
+            Some("a.pdf 等 3 个文件（3.0 MB）".to_string())
+        );
+        assert_eq!(
+            request_preview_text(&RequestPreviewView::Folder {
+                name: "docs".into(),
+                count: 4
+            }),
+            Some("文件夹 docs（4 个文件）".to_string())
+        );
     }
 
     #[test]

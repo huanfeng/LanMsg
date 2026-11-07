@@ -102,6 +102,10 @@ pub const SOURCE_FROM_ME: &str = "来自我";
 pub const SOURCE_FROM_PREFIX: &str = "来自 ";
 pub const SOURCE_DOWNLOADED: &str = "已下载";
 pub const SOURCE_STORED_PREFIX: &str = "存于 ";
+/// 请求预览文案（按 RequestPreviewView）。
+pub const REQ_PREVIEW_FOLDER_PREFIX: &str = "文件夹 ";
+pub const REQ_PREVIEW_FILES_ETC_MID: &str = " 等 ";
+pub const REQ_PREVIEW_FILES_UNIT: &str = " 个文件";
 /// 自设备会话的标题（core 给空串，界面按 kind 显示）。
 pub const SELF_DEVICES_TITLE: &str = "我的设备";
 pub const MSG_UNSUPPORTED: &str = "不支持的消息类型，请升级";

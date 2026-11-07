@@ -40,6 +40,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.requestPreviewText
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.ui.common.Avatar
 import name.apk.lanmsg.ui.common.EmptyState
@@ -110,8 +111,8 @@ private fun RequestItem(item: RequestView, onRespond: (String, RequestAction) ->
             Column(Modifier.weight(1f).padding(start = 12.dp)) {
                 Text(item.fromName, color = c.ink, style = MaterialTheme.typography.bodyLarge)
                 Text(stringResource(kind), color = c.inkMuted, style = MaterialTheme.typography.bodyMedium)
-                if (item.preview.isNotBlank()) {
-                    Text(item.preview, color = c.inkSubtle, style = MaterialTheme.typography.bodySmall, maxLines = 2)
+                requestPreviewText(item.preview)?.let {
+                    Text(it, color = c.inkSubtle, style = MaterialTheme.typography.bodySmall, maxLines = 2)
                 }
             }
         }

@@ -140,7 +140,10 @@ pub fn notice_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lanmsg_api::{BlobState, ConversationSummary, MessageState, RequestView, SystemEventView};
+    use lanmsg_api::{
+        BlobState, ConversationSummary, MessageState, RequestPreviewView, RequestView,
+        SystemEventView,
+    };
 
     fn msg(conv: &str, body: MessageBodyView) -> MessageView {
         MessageView {
@@ -205,7 +208,7 @@ mod tests {
                 from_user: "u".into(),
                 from_name: "张三".into(),
                 from_short: "abcd".into(),
-                preview: String::new(),
+                preview: RequestPreviewView::None,
                 created_at: 0,
             },
         }

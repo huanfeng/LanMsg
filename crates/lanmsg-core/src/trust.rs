@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use rand::RngCore;
 use tokio::sync::broadcast;
 
-use lanmsg_api::types::Event;
+use lanmsg_api::types::{Event, RequestPreviewView};
 use lanmsg_proto::consts::STRANGER_GATE_WINDOW;
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{ConvId, DeviceId, UserId};
@@ -472,7 +472,7 @@ impl Trust {
             from_user: user,
             conv: None,
             // 联系人请求没有内容预览，界面按 kind 显示本地化文案。
-            preview: String::new(),
+            preview: RequestPreviewView::None,
             created_at: now_millis(),
         };
         self.store.upsert_open_request(&row)?;
@@ -1008,45 +1008,24 @@ pub(crate) fn gate_request_kind(body: &MsgBody) -> RequestKindRow {
     }
 }
 
-/// 请求预览文案：Text 取前 50 字符；Files 为「{首个文件名} 等 {n} 个文件
-/// （{总大小}）」（n=1 省略「等 n 个文件」）；Folder 为「文件夹 {name}（{n}
-/// 个文件）」。
-fn request_preview(body: &MsgBody) -> String {
+/// 请求预览（结构化）：Text 取前 50 字符；Files 带首个文件名、个数与总大小；
+/// Folder 带文件夹名与文件个数；其余无可预览内容。文案由各端按本地语言拼。
+fn request_preview(body: &MsgBody) -> RequestPreviewView {
     match body {
-        MsgBody::Text { text } => text.chars().take(50).collect(),
-        MsgBody::Files { items } => {
-            let n = items.len();
-            let total: u64 = items.iter().map(|b| b.size).sum();
-            let name = items.first().map(|b| b.name.as_str()).unwrap_or_default();
-            let size = human_size(total);
-            if n == 1 {
-                format!("{name}（{size}）")
-            } else {
-                format!("{name} 等 {n} 个文件（{size}）")
-            }
-        }
-        MsgBody::Folder { name, entries } => {
-            format!("文件夹 {name}（{} 个文件）", entries.len())
-        }
-        _ => "收到一条消息".into(),
+        MsgBody::Text { text } => RequestPreviewView::Text {
+            text: text.chars().take(50).collect(),
+        },
+        MsgBody::Files { items } => RequestPreviewView::Files {
+            first_name: items.first().map(|b| b.name.clone()).unwrap_or_default(),
+            count: items.len() as u32,
+            total_size: items.iter().map(|b| b.size).sum(),
+        },
+        MsgBody::Folder { name, entries } => RequestPreviewView::Folder {
+            name: name.clone(),
+            count: entries.len() as u32,
+        },
+        _ => RequestPreviewView::None,
     }
-}
-
-/// 字节数的人类可读表示（1024 进制，一位小数并去尾零）。
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut v = bytes as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < UNITS.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 {
-        return format!("{bytes} B");
-    }
-    let s = format!("{v:.1}");
-    let s = s.strip_suffix(".0").unwrap_or(&s);
-    format!("{s} {}", UNITS[i])
 }
 
 /// 校验入站 ContactRequest/ContactResponse：发送方必须带证书，且随附设备
@@ -1099,4 +1078,79 @@ fn request_id_bytes(hex: &str) -> [u8; 16] {
         out[i] = *b;
     }
     out
+}
+
+#[cfg(test)]
+mod request_preview_tests {
+    use super::*;
+    use lanmsg_proto::ids::BlobHash;
+    use lanmsg_proto::types::{BlobMeta, FolderEntry};
+
+    fn blob(name: &str, size: u64) -> BlobMeta {
+        BlobMeta {
+            hash: BlobHash([1u8; 32]),
+            size,
+            name: name.into(),
+            mime: "application/octet-stream".into(),
+            media: None,
+            thumb: None,
+        }
+    }
+
+    #[test]
+    fn text_is_truncated_to_50_chars() {
+        let p = request_preview(&MsgBody::Text {
+            text: "测".repeat(80),
+        });
+        assert_eq!(
+            p,
+            RequestPreviewView::Text {
+                text: "测".repeat(50)
+            }
+        );
+    }
+
+    #[test]
+    fn files_carry_first_name_count_and_total() {
+        let p = request_preview(&MsgBody::Files {
+            items: vec![blob("a.bin", 10), blob("b.bin", 32)],
+        });
+        assert_eq!(
+            p,
+            RequestPreviewView::Files {
+                first_name: "a.bin".into(),
+                count: 2,
+                total_size: 42
+            }
+        );
+    }
+
+    #[test]
+    fn folder_carries_name_and_count() {
+        let p = request_preview(&MsgBody::Folder {
+            name: "docs".into(),
+            entries: vec![FolderEntry {
+                rel_path: "x.md".into(),
+                blob: blob("x.md", 1),
+            }],
+        });
+        assert_eq!(
+            p,
+            RequestPreviewView::Folder {
+                name: "docs".into(),
+                count: 1
+            }
+        );
+    }
+
+    #[test]
+    fn other_bodies_have_no_preview() {
+        let p = request_preview(&MsgBody::Read {
+            upto: lanmsg_proto::types::Hlc {
+                millis: 0,
+                counter: 0,
+            },
+        });
+        assert_eq!(p, RequestPreviewView::None);
+    }
 }

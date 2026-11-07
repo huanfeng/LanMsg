@@ -560,8 +560,27 @@ pub struct RequestView {
     pub from_user: String,
     pub from_name: String,
     pub from_short: String,
-    pub preview: String,
+    pub preview: RequestPreviewView,
     pub created_at: i64,
+}
+
+/// 请求内容预览（结构化；界面按 kind 与变体自行拼本地化文案）。
+/// `Text` 的内容是用户消息原文，原样保留。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum RequestPreviewView {
+    /// 无内容可预览（联系人请求，或无法归类的消息）。
+    None,
+    /// 文字消息的前若干字符。
+    Text { text: String },
+    /// 文件消息：首个文件名、文件个数、总字节数。
+    Files {
+        first_name: String,
+        count: u32,
+        total_size: u64,
+    },
+    /// 文件夹消息：文件夹名、文件个数。
+    Folder { name: String, count: u32 },
 }
 
 /// 请求动作。

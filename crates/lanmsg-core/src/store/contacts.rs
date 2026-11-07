@@ -6,6 +6,7 @@ use lanmsg_proto::ids::{DeviceId, UserId};
 use lanmsg_proto::types::{Hlc, Revocation};
 
 use crate::store::Store;
+use lanmsg_api::types::RequestPreviewView;
 
 /// 联系人状态，DB 中存为小写字符串。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,8 +89,29 @@ pub struct RequestRow {
     pub kind: RequestKindRow,
     pub from_user: UserId,
     pub conv: Option<lanmsg_proto::ids::ConvId>,
-    pub preview: String,
+    pub preview: RequestPreviewView,
     pub created_at: i64,
+}
+
+/// 预览写库：CBOR 的十六进制文本（列类型保持 TEXT）。
+fn preview_to_db(p: &RequestPreviewView) -> String {
+    crate::identity::hex_encode(&lanmsg_proto::sign::to_cbor(p))
+}
+
+/// 预览读库。旧版本存的是纯文本：空串视为无预览，其余当作文字预览。
+fn preview_from_db(s: &str) -> RequestPreviewView {
+    crate::identity::hex_decode(s)
+        .ok()
+        .and_then(|b| lanmsg_proto::sign::from_cbor::<RequestPreviewView>(&b).ok())
+        .unwrap_or_else(|| {
+            if s.is_empty() {
+                RequestPreviewView::None
+            } else {
+                RequestPreviewView::Text {
+                    text: s.to_string(),
+                }
+            }
+        })
 }
 
 /// 查询请求行的原始元组。
@@ -220,7 +242,7 @@ impl Store {
                 row.kind.as_str(),
                 &row.from_user.0[..],
                 row.conv.as_ref().map(|c| &c.0[..]),
-                row.preview,
+                preview_to_db(&row.preview),
                 row.created_at,
             ],
         )?;
@@ -279,7 +301,7 @@ impl Store {
                         })
                 })
                 .transpose()?,
-            preview,
+            preview: preview_from_db(&preview),
             created_at,
         }))
     }
@@ -340,7 +362,7 @@ impl Store {
                             })
                     })
                     .transpose()?,
-                preview,
+                preview: preview_from_db(&preview),
                 created_at,
             });
         }
@@ -451,7 +473,9 @@ mod tests {
             kind: RequestKindRow::Message,
             from_user: user(2),
             conv: None,
-            preview: "第一条".into(),
+            preview: RequestPreviewView::Text {
+                text: "第一条".into(),
+            },
             created_at: 1,
         };
         let id1 = s.upsert_open_request(&r1).unwrap();
@@ -460,7 +484,9 @@ mod tests {
             kind: RequestKindRow::Message,
             from_user: user(2),
             conv: None,
-            preview: "第二条".into(),
+            preview: RequestPreviewView::Text {
+                text: "第二条".into(),
+            },
             created_at: 2,
         };
         let id2 = s.upsert_open_request(&r2).unwrap();
@@ -469,6 +495,48 @@ mod tests {
         let open = s.list_open_requests().unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].request_id, "r2");
-        assert_eq!(open[0].preview, "第二条");
+        assert_eq!(
+            open[0].preview,
+            RequestPreviewView::Text {
+                text: "第二条".into()
+            }
+        );
+    }
+}
+
+#[cfg(test)]
+mod preview_codec_tests {
+    use super::*;
+
+    #[test]
+    fn preview_round_trips_through_db_text() {
+        for p in [
+            RequestPreviewView::None,
+            RequestPreviewView::Text {
+                text: "你好".into(),
+            },
+            RequestPreviewView::Files {
+                first_name: "a.bin".into(),
+                count: 3,
+                total_size: 99,
+            },
+            RequestPreviewView::Folder {
+                name: "docs".into(),
+                count: 2,
+            },
+        ] {
+            assert_eq!(preview_from_db(&preview_to_db(&p)), p);
+        }
+    }
+
+    #[test]
+    fn legacy_plain_text_rows_are_tolerated() {
+        assert_eq!(preview_from_db(""), RequestPreviewView::None);
+        assert_eq!(
+            preview_from_db("第一条"),
+            RequestPreviewView::Text {
+                text: "第一条".into()
+            }
+        );
     }
 }

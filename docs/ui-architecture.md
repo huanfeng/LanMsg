@@ -194,6 +194,10 @@
 | files_archive | 压缩包 |
 | files_other | 其他 |
 | files_state_downloaded | 已下载 |
+| req_preview_text | %1$s |
+| req_preview_file | %1$s（%2$s） |
+| req_preview_files | %1$s 等 %2$d 个文件（%3$s） |
+| req_preview_folder | 文件夹 %1$s（%2$d 个文件） |
 | file_status_stored | 存于 %1$s |
 | file_source_me | 来自我 |
 | file_source_me_downloaded | 来自我 · 已下载 |
