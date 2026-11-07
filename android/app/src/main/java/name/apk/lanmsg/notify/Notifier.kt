@@ -11,7 +11,12 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import name.apk.lanmsg.MainActivity
 import name.apk.lanmsg.R
@@ -46,6 +51,10 @@ class Notifier(
     private val appVisible: () -> Boolean = {
         ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
     },
+    /** App 前后台变化流；回到前台时据此取消“后台期间被 pin 的会话”弹出的通知。测试注入。 */
+    private val appForeground: Flow<Boolean> = flow {
+        emitAll(ProcessLifecycleOwner.get().lifecycle.currentStateFlow.map { it.isAtLeast(Lifecycle.State.STARTED) })
+    },
 ) {
     private val ctx = ctx.applicationContext
     private val nm = this.ctx.getSystemService(NotificationManager::class.java)
@@ -64,7 +73,7 @@ class Notifier(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedFile>) = size > FILE_CACHE_SIZE
     }
 
-    private class Line(val text: String, val millis: Long, val sender: String)
+    private class Line(val id: String, val text: String, val millis: Long, val sender: String)
 
     private class CachedFile(val conv: String, val item: FileItemView)
 
@@ -82,9 +91,10 @@ class Notifier(
                 }
             }
         }
-        // 打开某会话（或图片查看页盖在其上）时取消它的通知
+        // 打开某会话（或图片查看页盖在其上）时取消它的通知；App 在后台时不算可见，回到前台再取消
         scope.launch {
-            VisibleConversation.visible.collect { convs -> convs.forEach { cancelConversation(it) } }
+            combine(VisibleConversation.visible, appForeground) { convs, fg -> if (fg) convs else emptySet() }
+                .collect { convs -> convs.forEach { cancelConversation(it) } }
         }
     }
 
@@ -107,12 +117,14 @@ class Notifier(
         if (!canNotify()) return
         if (msg.conv in prefs.mutedConversations.first()) return
         if (appVisible() && VisibleConversation.isVisible(msg.conv)) return
-        val body = bodyText(msg.body) ?: return
-        val title = conversationTitle(msg.conv) ?: msg.authorDeviceName
+        val body = truncate(bodyText(msg.body) ?: return, MAX_BODY_CODE_POINTS)
+        val title = truncate(conversationTitle(msg.conv) ?: msg.authorDeviceName, MAX_TITLE_CODE_POINTS)
         val id = msg.conv.hashCode()
+        // 用户划掉通知不会通知我们：通知已不在栏里时，累积的旧消息要丢弃
+        if (nm.activeNotifications.none { it.id == id }) synchronized(lock) { history.remove(msg.conv) }
         val lines = synchronized(lock) {
             val q = history.getOrPut(msg.conv) { ArrayDeque() }
-            q.addLast(Line(body, msg.hlcMillis, msg.authorDeviceName))
+            if (q.none { it.id == msg.id }) q.addLast(Line(msg.id, body, msg.hlcMillis, msg.authorDeviceName))
             while (q.size > HISTORY_SIZE) q.removeFirst()
             q.toList()
         }
@@ -236,11 +248,17 @@ class Notifier(
         return PendingIntent.getActivity(ctx, requestCode, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
 
-    private companion object {
+    internal companion object {
+        /** 按码点截断（不拆代理对），超长时末尾加省略号。 */
+        fun truncate(s: String, maxCodePoints: Int): String =
+            if (s.codePointCount(0, s.length) <= maxCodePoints) s else s.substring(0, s.offsetByCodePoints(0, maxCodePoints)) + "…"
+
         const val TAG = "Notifier"
         const val STATUS_TTL_MS = 5_000L
         const val FILE_CACHE_SIZE = 500
         const val HISTORY_SIZE = 5
+        const val MAX_BODY_CODE_POINTS = 500
+        const val MAX_TITLE_CODE_POINTS = 100
         const val LOOKUP_LIMIT = 50u
     }
 }

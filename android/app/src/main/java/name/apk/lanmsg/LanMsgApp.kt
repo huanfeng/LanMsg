@@ -1,13 +1,7 @@
 package name.apk.lanmsg
 
-import android.Manifest
 import android.app.Application
-import android.app.NotificationManager
-import android.content.pm.PackageManager
-import android.os.Build
-import androidx.core.content.ContextCompat
 import name.apk.lanmsg.notify.NotificationChannels
-import name.apk.lanmsg.notify.Notifier
 
 class LanMsgApp : Application() {
     override fun onCreate() {

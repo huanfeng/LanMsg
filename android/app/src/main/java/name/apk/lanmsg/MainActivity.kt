@@ -83,7 +83,7 @@ class MainActivity : ComponentActivity() {
         // 旋转等重建时不重复处理同一个分享 intent
         if (savedInstanceState == null) {
             handleShare(intent)
-            pendingRoute = intent.getStringExtra(EXTRA_ROUTE)
+            pendingRoute = intent.getStringExtra(EXTRA_ROUTE)?.let(::acceptRoute)
         }
         setContent {
             LanMsgTheme {
@@ -120,7 +120,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleShare(intent)
-        intent.getStringExtra(EXTRA_ROUTE)?.let { pendingRoute = it }
+        intent.getStringExtra(EXTRA_ROUTE)?.let(::acceptRoute)?.let { pendingRoute = it }
     }
 
     private fun handleShare(intent: Intent) {
@@ -132,6 +132,24 @@ class MainActivity : ComponentActivity() {
     companion object {
         /** 通知点击携带的目标路由（Routes 中的值）。 */
         const val EXTRA_ROUTE = "route"
+
+        /**
+         * 外部 intent 可设置 route extra（Activity 是 exported 的），只放行通知会发出的两种：
+         * requests 与 chat/<非空会话>（解码后非空、不含 '/'）。其余一律拒绝。
+         */
+        fun isAllowedDeepLink(route: String): Boolean {
+            if (route == Routes.REQUESTS) return true
+            val prefix = "chat/"
+            if (!route.startsWith(prefix)) return false
+            val conv = Uri.decode(route.removePrefix(prefix))
+            return conv.isNotEmpty() && '/' !in conv && '/' !in route.removePrefix(prefix)
+        }
+
+        private fun acceptRoute(route: String): String? {
+            if (isAllowedDeepLink(route)) return route
+            Log.w("MainActivity", "Rejected non-whitelisted deep link route: $route")
+            return null
+        }
     }
 }
 

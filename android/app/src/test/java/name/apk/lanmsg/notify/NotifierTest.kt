@@ -77,11 +77,14 @@ class NotifierTest {
     private val saver = RecordingSaver(ctx)
     private var permission = true
     private var foreground = true
+    private val foregroundFlow = MutableStateFlow(true)
     private var now = 1_000_000L
     private var selfStatus = StatusDto.ONLINE
 
     @Before fun setUp() {
         nm.cancelAll()
+        foreground = true
+        foregroundFlow.value = true
         VisibleConversation.current.value = null
         fake.handler = { req ->
             when (req) {
@@ -99,7 +102,7 @@ class NotifierTest {
     private suspend fun TestScope.notifier(): Notifier {
         val holder = CoreHolder({ fake }, backgroundScope, StandardTestDispatcher(testScheduler))
         holder.acquire(CoreHolder.UI)
-        return Notifier(ctx, holder, prefs, saver, { permission }, backgroundScope, { now }, { foreground })
+        return Notifier(ctx, holder, prefs, saver, { permission }, backgroundScope, { now }, { foreground }, foregroundFlow)
     }
 
     private fun other(id: String, conv: String = "c1", text: String = "hi"): Event = Event.MessageAdded(Fixtures.textMsg(id, conv, text))
@@ -230,6 +233,71 @@ class NotifierTest {
         VisibleConversation.current.value = "c1"
         runCurrent()
         assertEquals(listOf("c2".hashCode()), active().map { it.id })
+    }
+
+    @Test fun two_conversations_have_independent_route_intents() = runTest {
+        val n = notifier()
+        n.handle(other("m1", "c1"))
+        n.handle(other("m2", "c2"))
+        val routes = active().associate { it.id to shadowOf(it.notification.contentIntent).savedIntent.getStringExtra("route") }
+        assertEquals("chat/c1", routes["c1".hashCode()])
+        assertEquals("chat/c2", routes["c2".hashCode()])
+    }
+
+    @Test fun duplicate_message_id_is_shown_once() = runTest {
+        val n = notifier()
+        n.handle(other("m1", text = "a"))
+        n.handle(other("m1", text = "a"))
+        n.handle(other("m2", text = "b"))
+        assertEquals(2, active().single().notification.extras.getParcelableArray(Notification.EXTRA_MESSAGES)?.size)
+    }
+
+    @Test fun dismissed_notification_does_not_resurface_old_messages() = runTest {
+        val n = notifier()
+        n.handle(other("m1", text = "old"))
+        nm.cancel("c1".hashCode()) // 用户划掉
+        n.handle(other("m2", text = "new"))
+        assertEquals(1, active().single().notification.extras.getParcelableArray(Notification.EXTRA_MESSAGES)?.size)
+    }
+
+    @Test fun long_body_and_title_are_truncated_by_code_point() = runTest {
+        val n = notifier()
+        n.handle(other("m1", text = "a".repeat(600)))
+        val a = active().single().notification
+        assertEquals("a".repeat(500) + "…", a.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
+        fake.handler = { req ->
+            if (req is Request.ListConversations) Response.Conversations(listOf(Fixtures.conv("c2", "t".repeat(150)))) else Response.SelfInfo(Fixtures.selfInfo())
+        }
+        n.handle(other("m2", "c2"))
+        val title = titleOf(active().first { it.id == "c2".hashCode() }.notification).toString()
+        assertEquals("t".repeat(100) + "…", title)
+    }
+
+    @Test fun truncate_does_not_split_surrogate_pairs() {
+        val s = "😀".repeat(5)
+        assertEquals("😀😀😀…", Notifier.truncate(s, 3))
+        assertEquals(s, Notifier.truncate(s, 5))
+    }
+
+    @Test fun returning_to_foreground_cancels_notification_of_pinned_conversation() = runTest {
+        val n = notifier()
+        n.start()
+        runCurrent()
+        foreground = false
+        foregroundFlow.value = false
+        runCurrent()
+        VisibleConversation.pin("c1")
+        try {
+            n.handle(other("m1", "c1"))
+            runCurrent()
+            assertEquals(1, active().size) // 后台期间照常通知
+            foreground = true
+            foregroundFlow.value = true
+            runCurrent()
+            assertEquals(0, active().size)
+        } finally {
+            VisibleConversation.unpin("c1")
+        }
     }
 
     @Test fun notifier_survives_failing_internal_requests() = runTest {
