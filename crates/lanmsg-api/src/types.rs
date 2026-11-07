@@ -171,6 +171,11 @@ pub enum Request {
     QueryFiles {
         filter: FileFilter,
     },
+    /// 本机 `blob_local` 中路径位于 `under` 之下、且已被会话里每个其他成员的
+    /// 每台未吊销设备持有（即已全部送达）的本地路径。
+    DeliveredLocalPaths {
+        under: String,
+    },
     SearchMessages {
         query: String,
         conv: Option<String>,
@@ -234,23 +239,61 @@ pub enum Request {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum Response {
     Ok,
-    SelfInfo { value: SelfInfo },
-    MsgId { value: String },
-    Peers { value: Vec<PeerView> },
-    Conversations { value: Vec<ConversationSummary> },
-    Messages { value: Vec<MessageView> },
-    ConvId { value: String },
-    TransferId { value: String },
-    Contacts { value: Vec<ContactView> },
-    Requests { value: Vec<RequestView> },
-    Devices { value: Vec<DeviceView> },
-    PairSession { value: PairSessionInfo },
-    Files { value: Vec<FileView> },
-    Settings { value: SettingsDto },
-    Interfaces { value: Vec<InterfaceView> },
-    Stations { value: Vec<StationView> },
-    StationItems { value: Vec<StationItemView> },
-    WebSession { value: WebSessionInfo },
+    SelfInfo {
+        value: SelfInfo,
+    },
+    MsgId {
+        value: String,
+    },
+    Peers {
+        value: Vec<PeerView>,
+    },
+    Conversations {
+        value: Vec<ConversationSummary>,
+    },
+    Messages {
+        value: Vec<MessageView>,
+    },
+    ConvId {
+        value: String,
+    },
+    TransferId {
+        value: String,
+    },
+    Contacts {
+        value: Vec<ContactView>,
+    },
+    Requests {
+        value: Vec<RequestView>,
+    },
+    Devices {
+        value: Vec<DeviceView>,
+    },
+    PairSession {
+        value: PairSessionInfo,
+    },
+    Files {
+        value: Vec<FileView>,
+    },
+    /// 路径列表（如 DeliveredLocalPaths 的结果）。
+    Paths {
+        value: Vec<String>,
+    },
+    Settings {
+        value: SettingsDto,
+    },
+    Interfaces {
+        value: Vec<InterfaceView>,
+    },
+    Stations {
+        value: Vec<StationView>,
+    },
+    StationItems {
+        value: Vec<StationItemView>,
+    },
+    WebSession {
+        value: WebSessionInfo,
+    },
 }
 
 // ===== Event =====

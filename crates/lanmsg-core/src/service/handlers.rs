@@ -87,6 +87,9 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
         Request::QueryFiles { filter } => Ok(Response::Files {
             value: crate::service::files::query_files(inner, &filter).await?,
         }),
+        Request::DeliveredLocalPaths { under } => Ok(Response::Paths {
+            value: crate::service::files::delivered_local_paths(inner, under).await?,
+        }),
         Request::SearchMessages { query, conv, limit } => {
             let conv = conv.as_deref().map(parse_conv).transpose()?;
             Ok(Response::Messages {
@@ -1006,6 +1009,7 @@ fn variant_name(req: &Request) -> &'static str {
         Request::PairConfirm { .. } => "PairConfirm",
         Request::PairCancel { .. } => "PairCancel",
         Request::QueryFiles { .. } => "QueryFiles",
+        Request::DeliveredLocalPaths { .. } => "DeliveredLocalPaths",
         Request::SearchMessages { .. } => "SearchMessages",
         Request::ForwardFiles { .. } => "ForwardFiles",
         Request::GetSettings => "GetSettings",

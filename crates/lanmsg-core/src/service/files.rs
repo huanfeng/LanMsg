@@ -12,7 +12,7 @@ use crate::net::PeerInfo;
 use crate::service::views::{conv_summary, file_item_view_with, message_view};
 use crate::service::Inner;
 use crate::store::file_index::kind_str;
-use crate::store::{FileQuery, Store};
+use crate::store::{ConvKindRow, FileQuery, Store};
 
 /// 文件页单次查询条数上限。
 const MAX_FILE_LIMIT: u32 = 500;
@@ -54,6 +54,100 @@ pub(crate) async fn query_files(
                 "file query task failed: {e}"
             )))
         })?
+}
+
+/// 本机路径位于 `under` 之下、且已“全部送达”的本地副本路径。
+pub(crate) async fn delivered_local_paths(
+    svc: &Inner,
+    under: String,
+) -> Result<Vec<String>, CoreError> {
+    let store = svc.store.clone();
+    let self_user = svc.state.read().unwrap().self_user;
+    let self_device = svc.identity.read().unwrap().device_id();
+    tokio::task::spawn_blocking(move || {
+        delivered_paths(&store, self_user.as_ref(), &self_device, &under)
+    })
+    .await
+    .map_err(|e| {
+        CoreError::Io(std::io::Error::other(format!(
+            "delivered paths task failed: {e}"
+        )))
+    })?
+}
+
+/// “已全部送达”判定（保守）：路径在 `under` 之下的本地 Blob，其引用消息里至少有一条
+/// 是本机用户发出的，且这些消息所在会话的**每个其他成员的每台未吊销设备**都已在
+/// `blob_holders` 里。
+/// - DM：对端用户的全部设备；自设备会话：本人用户除本机外的全部设备；其他类型会话
+///   （访客、LocalSend、中转站）无法判定成员，一律不算送达。
+/// - 没有任何接收设备（如只有本机的自设备会话）不算送达：之后加入的设备还需要这份文件。
+/// - 成员的某台设备从未下载（含从未上线）就会一直挡住，直到它下载或被吊销；
+///   这是有意的保守取舍——绝不把对端尚未取走的文件判为可删。
+fn delivered_paths(
+    store: &Store,
+    self_user: Option<&UserId>,
+    self_device: &DeviceId,
+    under: &str,
+) -> Result<Vec<String>, CoreError> {
+    let Some(self_user) = self_user else {
+        return Ok(Vec::new());
+    };
+    let under_path = std::path::Path::new(under);
+    let mut out = Vec::new();
+    for (hash, path) in store.local_paths_with_prefix(under)? {
+        if !std::path::Path::new(&path).starts_with(under_path) {
+            continue;
+        }
+        if blob_delivered(store, self_user, self_device, &hash)? {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn blob_delivered(
+    store: &Store,
+    self_user: &UserId,
+    self_device: &DeviceId,
+    hash: &BlobHash,
+) -> Result<bool, CoreError> {
+    let holders: std::collections::HashSet<DeviceId> = store.holders(hash)?.into_iter().collect();
+    let mut any_own = false;
+    for mb in store.message_blobs_by_hash(hash)? {
+        let own = store
+            .get_device(&mb.msg.author)?
+            .is_some_and(|d| d.user == *self_user);
+        if !own {
+            continue;
+        }
+        any_own = true;
+        let Some(conv) = store.get_conversation(&mb.conv)? else {
+            return Ok(false);
+        };
+        let recipients: Vec<DeviceId> = match conv.kind {
+            ConvKindRow::Dm => match conv.peer_user {
+                Some(u) => store
+                    .devices_of_user(&u)?
+                    .into_iter()
+                    .filter(|d| !d.revoked)
+                    .map(|d| d.device)
+                    .collect(),
+                None => return Ok(false),
+            },
+            ConvKindRow::SelfDevices => store
+                .devices_of_user(self_user)?
+                .into_iter()
+                .filter(|d| !d.revoked && d.device != *self_device)
+                .map(|d| d.device)
+                .collect(),
+            _ => return Ok(false),
+        };
+        if recipients.is_empty() || !recipients.iter().all(|d| holders.contains(d)) {
+            return Ok(false);
+        }
+    }
+    Ok(any_own)
 }
 
 /// 阻塞扫描：无状态筛选时一轮；有状态筛选时持续翻页直到凑满 limit 或数据耗尽。
@@ -220,7 +314,10 @@ fn is_own_device(store: &Store, self_user: Option<&UserId>, device: &DeviceId) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{ConvKindRow, ConvRow};
+    use crate::store::{BlobLocalKind, BlobLocalRow, ConvKindRow, ConvRow, DeviceRow, UserRow};
+    use lanmsg_proto::ids::MsgId;
+    use lanmsg_proto::sign::UserKey;
+    use lanmsg_proto::types::{DeviceCert, DeviceType, Envelope, Hlc, Signature64};
 
     fn put_conv(s: &Store, kind: ConvKindRow, title: Option<&str>) -> ConvId {
         let conv = ConvId([5u8; 32]);
@@ -254,5 +351,219 @@ mod tests {
             conv_title_kind(&s, None, &conv),
             ("web guest".to_string(), ConvKind::Guest)
         );
+    }
+
+    // ---- “已全部送达”判定 ----
+
+    /// 一个用户及其若干设备（设备已入库）。
+    struct Party {
+        user: UserId,
+        devices: Vec<DeviceId>,
+    }
+
+    fn party(s: &Store, tag: u8, n_devices: usize, is_self: bool) -> Party {
+        let key = UserKey::generate();
+        let user = key.user_id();
+        s.upsert_user(&UserRow {
+            user,
+            display_name: format!("u{tag}"),
+            is_self,
+            updated_at: 0,
+        })
+        .unwrap();
+        let mut devices = Vec::new();
+        for i in 0..n_devices {
+            let device = DeviceId([tag * 16 + i as u8 + 1; 32]);
+            s.upsert_device(&DeviceRow {
+                device,
+                user,
+                cert: DeviceCert::issue(&key, device, format!("d{tag}{i}"), DeviceType::Desktop, 1),
+                name: format!("d{tag}{i}"),
+                device_type: DeviceType::Desktop,
+                last_addr: None,
+                last_path: None,
+                last_seen: None,
+                revoked: false,
+            })
+            .unwrap();
+            devices.push(device);
+        }
+        Party { user, devices }
+    }
+
+    fn revoke(s: &Store, p: &Party, i: usize) {
+        let mut row = s.get_device(&p.devices[i]).unwrap().unwrap();
+        row.revoked = true;
+        s.upsert_device(&row).unwrap();
+    }
+
+    fn new_conv(s: &Store, tag: u8, kind: ConvKindRow, peer: Option<UserId>) -> ConvId {
+        let conv = ConvId([tag; 32]);
+        s.ensure_conversation(&ConvRow {
+            conv,
+            kind,
+            peer_user: peer,
+            title: None,
+            created_at: 0,
+        })
+        .unwrap();
+        conv
+    }
+
+    /// `author` 在 `conv` 发一条含单个文件的消息，本机该文件位于 `path`。
+    fn send_file(
+        s: &Store,
+        author: DeviceId,
+        seq: u64,
+        conv: ConvId,
+        tag: u8,
+        path: &str,
+    ) -> BlobHash {
+        let hash = BlobHash([tag; 32]);
+        let env = Envelope {
+            conv,
+            id: MsgId { author, seq },
+            conv_seq: seq,
+            hlc: Hlc {
+                millis: 100 + seq as i64,
+                counter: 0,
+            },
+            body: MsgBody::Files {
+                items: vec![BlobMeta {
+                    hash,
+                    size: 1,
+                    name: "f.bin".into(),
+                    mime: "application/octet-stream".into(),
+                    media: None,
+                    thumb: None,
+                }],
+            },
+            enc: None,
+            sig: Signature64([0u8; 64]),
+        };
+        s.finish_preparing(
+            &author,
+            seq,
+            &env,
+            &[],
+            &[BlobLocalRow {
+                hash,
+                path: path.into(),
+                kind: BlobLocalKind::Source,
+                size: 1,
+                mtime: 0,
+            }],
+            1,
+        )
+        .unwrap();
+        hash
+    }
+
+    fn delivered(s: &Store, me: &Party, under: &str) -> Vec<String> {
+        delivered_paths(s, Some(&me.user), &me.devices[0], under).unwrap()
+    }
+
+    #[test]
+    fn dm_delivered_once_every_peer_device_holds() {
+        let s = Store::open_in_memory().unwrap();
+        let me = party(&s, 1, 1, true);
+        let peer = party(&s, 2, 2, false);
+        let conv = new_conv(&s, 9, ConvKindRow::Dm, Some(peer.user));
+        let h = send_file(&s, me.devices[0], 1, conv, 7, "/out/a.bin");
+        assert!(delivered(&s, &me, "/out").is_empty());
+        s.add_holder(&h, &peer.devices[0], 1).unwrap();
+        assert!(
+            delivered(&s, &me, "/out").is_empty(),
+            "对方还有一台设备没下载"
+        );
+        s.add_holder(&h, &peer.devices[1], 1).unwrap();
+        assert_eq!(delivered(&s, &me, "/out"), vec!["/out/a.bin".to_string()]);
+    }
+
+    #[test]
+    fn revoked_device_does_not_block_delivery() {
+        let s = Store::open_in_memory().unwrap();
+        let me = party(&s, 1, 1, true);
+        let peer = party(&s, 2, 2, false);
+        let conv = new_conv(&s, 9, ConvKindRow::Dm, Some(peer.user));
+        let h = send_file(&s, me.devices[0], 1, conv, 7, "/out/a.bin");
+        s.add_holder(&h, &peer.devices[0], 1).unwrap();
+        assert!(delivered(&s, &me, "/out").is_empty());
+        revoke(&s, &peer, 1);
+        assert_eq!(delivered(&s, &me, "/out").len(), 1);
+    }
+
+    /// 从未上线、从未下载的设备（未吊销）会一直挡住——有意的保守取舍。
+    #[test]
+    fn never_seen_device_keeps_blocking_until_revoked() {
+        let s = Store::open_in_memory().unwrap();
+        let me = party(&s, 1, 1, true);
+        let peer = party(&s, 2, 2, false);
+        let conv = new_conv(&s, 9, ConvKindRow::Dm, Some(peer.user));
+        let h = send_file(&s, me.devices[0], 1, conv, 7, "/out/a.bin");
+        s.add_holder(&h, &peer.devices[0], 1).unwrap();
+        for _ in 0..2 {
+            assert!(delivered(&s, &me, "/out").is_empty());
+        }
+    }
+
+    #[test]
+    fn self_devices_conv_requires_all_own_other_devices() {
+        let s = Store::open_in_memory().unwrap();
+        let me = party(&s, 1, 3, true);
+        let conv = new_conv(&s, 9, ConvKindRow::SelfDevices, None);
+        let h = send_file(&s, me.devices[0], 1, conv, 7, "/out/a.bin");
+        s.add_holder(&h, &me.devices[0], 1).unwrap();
+        assert!(delivered(&s, &me, "/out").is_empty());
+        s.add_holder(&h, &me.devices[1], 1).unwrap();
+        assert!(delivered(&s, &me, "/out").is_empty(), "第三台设备还没下载");
+        s.add_holder(&h, &me.devices[2], 1).unwrap();
+        assert_eq!(delivered(&s, &me, "/out").len(), 1);
+    }
+
+    #[test]
+    fn self_devices_conv_with_only_this_device_is_not_delivered() {
+        let s = Store::open_in_memory().unwrap();
+        let me = party(&s, 1, 1, true);
+        let conv = new_conv(&s, 9, ConvKindRow::SelfDevices, None);
+        send_file(&s, me.devices[0], 1, conv, 7, "/out/a.bin");
+        assert!(delivered(&s, &me, "/out").is_empty());
+    }
+
+    #[test]
+    fn paths_outside_prefix_are_excluded() {
+        let s = Store::open_in_memory().unwrap();
+        let me = party(&s, 1, 1, true);
+        let peer = party(&s, 2, 1, false);
+        let conv = new_conv(&s, 9, ConvKindRow::Dm, Some(peer.user));
+        for (seq, tag, path) in [
+            (1, 7, "/out/a.bin"),
+            (2, 8, "/outside/b.bin"),
+            (3, 9, "/elsewhere/c.bin"),
+        ] {
+            let h = send_file(&s, me.devices[0], seq, conv, tag, path);
+            s.add_holder(&h, &peer.devices[0], 1).unwrap();
+        }
+        assert_eq!(delivered(&s, &me, "/out"), vec!["/out/a.bin".to_string()]);
+    }
+
+    #[test]
+    fn blob_only_referenced_by_peer_message_is_not_delivered() {
+        let s = Store::open_in_memory().unwrap();
+        let me = party(&s, 1, 1, true);
+        let peer = party(&s, 2, 1, false);
+        let conv = new_conv(&s, 9, ConvKindRow::Dm, Some(peer.user));
+        let h = send_file(&s, peer.devices[0], 1, conv, 7, "/out/a.bin");
+        s.add_holder(&h, &peer.devices[0], 1).unwrap();
+        assert!(delivered(&s, &me, "/out").is_empty());
+    }
+
+    #[test]
+    fn unsupported_conv_kinds_are_not_delivered() {
+        let s = Store::open_in_memory().unwrap();
+        let me = party(&s, 1, 1, true);
+        let conv = new_conv(&s, 9, ConvKindRow::Guest, None);
+        send_file(&s, me.devices[0], 1, conv, 7, "/out/a.bin");
+        assert!(delivered(&s, &me, "/out").is_empty());
     }
 }

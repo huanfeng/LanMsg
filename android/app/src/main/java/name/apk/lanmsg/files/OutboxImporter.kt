@@ -23,8 +23,14 @@ interface Importer {
 interface OutboxStore {
     fun outboxSizeBytes(): Long
 
-    /** 删除整天都早于 [cutoffMillis] 的日期子目录，返回释放的字节数。 */
-    fun clearOlderThan(cutoffMillis: Long): Long
+    /** 发件箱根目录的绝对路径，供向 core 查询“哪些副本已全部送达”。 */
+    fun rootPath(): String
+
+    /**
+     * 清理副本：[deliveredPaths]（core 判定已全部送达）里位于发件箱内的普通文件，
+     * 以及整天都早于 [olderThanMillis] 的日期子目录。返回释放的字节数。
+     */
+    fun clear(deliveredPaths: Set<String>, olderThanMillis: Long): Long
 }
 
 /**
@@ -95,11 +101,39 @@ class OutboxImporter(
 
     override fun outboxSizeBytes(): Long = outboxRoot.walkTopDown().filter { it.isFile }.sumOf { it.length() }
 
+    override fun rootPath(): String = outboxRoot.path
+
     /**
      * 设置页「清理已分享文件的副本」。core 发送文件只记录副本路径，对端之后下载仍读该路径，
-     * 所以只清理早于 cutoff 的日期目录（yyyyMMdd，该日结束时刻 <= cutoff）；非日期命名或解析失败的条目不动。
+     * 所以只清理两类：core 判定已全部送达的文件；早于 cutoff 的日期目录（yyyyMMdd，该日结束时刻 <= cutoff）。
+     * 非日期命名或解析失败的目录、符号链接、发件箱之外的路径一律不动。
      */
-    override fun clearOlderThan(cutoffMillis: Long): Long {
+    override fun clear(deliveredPaths: Set<String>, olderThanMillis: Long): Long {
+        var freed = clearDelivered(deliveredPaths)
+        freed += clearOlderThan(olderThanMillis)
+        return freed
+    }
+
+    /** 删除已送达的单个文件；删空的日期目录一并移除。 */
+    private fun clearDelivered(paths: Set<String>): Long {
+        val root = outboxRoot.canonicalFile
+        var freed = 0L
+        for (p in paths) {
+            val f = File(p)
+            if (java.nio.file.Files.isSymbolicLink(f.toPath()) || !f.isFile) continue
+            // 路径必须真实位于发件箱内（防 core 之外传入的路径逃逸）
+            if (!f.canonicalPath.startsWith(root.path + File.separator)) continue
+            val size = f.length()
+            val parent = f.parentFile
+            if (f.delete()) {
+                freed += size
+                if (parent != null && parent != root && DATE_DIR.matches(parent.name) && parent.listFiles().isNullOrEmpty()) parent.delete()
+            }
+        }
+        return freed
+    }
+
+    private fun clearOlderThan(cutoffMillis: Long): Long {
         val fmt = SimpleDateFormat("yyyyMMdd", Locale.ROOT).apply { isLenient = false }
         var freed = 0L
         for (dir in outboxRoot.listFiles().orEmpty()) {

@@ -211,6 +211,31 @@ impl Store {
         Ok(())
     }
 
+    /// 列出路径以 `prefix` 开头的本地 Blob（哈希，路径）。前缀按字符比较，
+    /// 调用方再按路径组件精确过滤。
+    pub fn local_paths_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(BlobHash, String)>, crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT hash, path FROM blob_local WHERE substr(path, 1, length(?1)) = ?1")?;
+        let rows = stmt.query_map([prefix], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (hash, path) = r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+            let hash = BlobHash(hash.try_into().map_err(|bytes: Vec<u8>| {
+                crate::store::StoreError::Codec(format!("hash invalid length: {}", bytes.len()))
+            })?);
+            out.push((hash, path));
+        }
+        Ok(out)
+    }
+
     /// 查询本地 Blob 行。
     pub fn get_local(
         &self,

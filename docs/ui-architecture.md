@@ -74,7 +74,7 @@
 | 我的设备 | `devices: [DeviceView]` | `ListMyDevices` | `DevicesChanged` → 重拉 | 「添加我的设备」→ `pair/host`；「加入其他设备」→ `pair/join`；非本机设备长按 → 「移除此设备」→ 确认对话框 → `RemoveDevice` |
 | 配对主持 | `method`(Qr/Sas)、`session`、`qrUri`、`state: PairStateDto` | `PairStart{Qr}` | `PairStatus`(session 相同) → 更新 state | 显示二维码；「改用数字比对」→ `PairCancel` + `PairStart{Sas}`；`ShowSas` 时显示 6 位数字和「一致」「不一致」→ `PairConfirm{matches}`；离开页面 → `PairCancel`；`Done` → 提示 `toast_pair_done` 并返回 |
 | 配对加入 | `mode`(扫码/选设备)、`candidates: [PeerView]`、`session`、`state`、`cameraGranted` | `ListPeers`（选设备模式） | `PairStatus`；`PeerOnline/Offline` → 重拉候选 | 扫到 `lanmsg://pair?…` → `PairJoin{QrUri{uri}}`；选设备 → `PairJoin{Device{device}}`；`ShowSas` → 「一致/不一致」→ `PairConfirm`；无相机权限 → 显示 `pair_need_camera` 与按钮「改用数字比对」（切到选设备模式） |
-| 设置 | `settings: SettingsDto`、本机项（通知开关、保存到相册、信任的 Wi-Fi） | `GetSettings` | — | 设备名、图片/文件自动下载上限（下拉：关闭/5MB/10MB/50MB/100MB/不限）、仅 Wi-Fi 下自动下载文件、LocalSend 兼容、后台模式（实时/省电/关闭）→ `SetSettings`（整体回写）；本机项直接存本地；「允许后台运行」→ 打开系统电池优化设置；「清理已分享文件的副本」→ 确认对话框 → 只删除 7 天前的发件箱日期目录（core 发送文件只记录副本路径，对端之后下载仍读该路径，故不清理近期副本；彻底方案待 core 提供已下载确认接口）；「添加当前 Wi-Fi」运行时申请位置权限，无权限或读取失败显示 `settings_trusted_wifi_need_location`，已授权但未连接 Wi-Fi 显示 `settings_trusted_wifi_not_connected` |
+| 设置 | `settings: SettingsDto`、本机项（通知开关、保存到相册、信任的 Wi-Fi） | `GetSettings` | — | 设备名、图片/文件自动下载上限（下拉：关闭/5MB/10MB/50MB/100MB/不限）、仅 Wi-Fi 下自动下载文件、LocalSend 兼容、后台模式（实时/省电/关闭）→ `SetSettings`（整体回写）；本机项直接存本地；「允许后台运行」→ 打开系统电池优化设置；「清理已分享文件的副本」→ 确认对话框 → 先请求 `DeliveredLocalPaths{under = 发件箱根}`（core 判定：会话里每个其他成员的每台未吊销设备都已下载；有设备从未下载则一直不算，等 7 天），删除这些已送达的文件与 7 天前的发件箱日期目录（core 过旧或出错时只按日期清理），完成后提示 `settings_clear_outbox_done`（释放的空间）；「添加当前 Wi-Fi」运行时申请位置权限，无权限或读取失败显示 `settings_trusted_wifi_need_location`，已授权但未连接 Wi-Fi 显示 `settings_trusted_wifi_not_connected` |
 | 选择会话 | `items: [ConversationSummary]`、`pending: [本地文件路径]` | `ListConversations` | — | 点会话 → `SendFiles{conv, pending}` → `chat/{conv}` |
 | 搜索 | `query`、`results: [MessageView]`、`loading`、`error` | —（输入后 300ms 防抖发 `SearchMessages{query, conv=null, limit=50}`；空白查询清空结果、不发请求） | — | 点结果 → `chat/{conv}`；结果行显示会话标题（来自 `ListConversations` 缓存）、作者设备名、时间、文字片段；无结果 → `search_empty`；core 未实现 → `err_core_outdated` |
 | 转发选择会话 | `items: [ConversationSummary]`、`hashes` | `ListConversations` | — | 点会话 → `ForwardFiles{conv, hashes}` → 提示 `toast_forwarded` → `chat/{conv}`；core 未实现 → `err_core_outdated` |
@@ -303,8 +303,9 @@
 | battery_vendor_action | 打开应用详情 |
 | battery_vendor_recheck | 已设置？重新查看 |
 | settings_clear_outbox | 清理已分享文件的副本 |
-| settings_clear_outbox_desc | 仅清理 7 天前的副本，当前共占用 %1$s |
-| settings_clear_outbox_confirm | 清理 7 天前的副本。尚未下载这些文件的设备将无法再获取它们；你手机里的原文件不受影响。 |
+| settings_clear_outbox_desc | 清理已送达或 7 天前的副本，当前共占用 %1$s |
+| settings_clear_outbox_confirm | 清理已送达或 7 天前的副本。对方的所有设备都已下载才算已送达；对方有设备从未下载时，要等到 7 天后才会清理。尚未下载的设备在副本清理后将无法再获取；你手机里的原文件不受影响。 |
+| settings_clear_outbox_done | 已释放 %1$s |
 | settings_clear_outbox_action | 清理副本 |
 | share_pick_title | 发送到 |
 | share_empty | 没有可用的会话 |

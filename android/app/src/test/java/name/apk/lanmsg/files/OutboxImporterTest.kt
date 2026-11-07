@@ -169,7 +169,7 @@ class OutboxImporterTest {
         val oldToo = outboxFile("20240102", "b.txt", "12")
         val edge = outboxFile("20240110", "c.txt", "123456") // 当天结束时刻晚于 cutoff：保留
         val fresh = outboxFile("20240115", "d.txt", "1")
-        val freed = imp.clearOlderThan(millis(2024, 1, 10))
+        val freed = imp.clear(emptySet(), millis(2024, 1, 10))
         assertEquals(6L, freed)
         assertFalse(old.exists())
         assertFalse(oldToo.exists())
@@ -178,12 +178,41 @@ class OutboxImporterTest {
         assertTrue(fresh.exists())
     }
 
+    @Test fun clear_removes_delivered_and_old_keeps_others() {
+        val imp = importer()
+        val old = outboxFile("20240101", "old.txt", "1234")
+        val delivered = outboxFile("20240115", "delivered.txt", "12")
+        val sibling = outboxFile("20240115", "sibling.txt", "1")
+        val fresh = outboxFile("20240116", "fresh.txt", "123")
+        val lonely = outboxFile("20240117", "lonely.txt", "12345") // 已送达且是该日目录唯一文件：目录一并移除
+        val freed = imp.clear(setOf(delivered.path, lonely.path), millis(2024, 1, 10))
+        assertEquals(4L + 2L + 5L, freed)
+        assertFalse(old.exists())
+        assertFalse(delivered.exists())
+        assertTrue(sibling.exists())
+        assertTrue(fresh.exists())
+        assertFalse(lonely.parentFile!!.exists())
+        assertTrue(sibling.parentFile!!.exists())
+    }
+
+    @Test fun clear_ignores_delivered_paths_outside_outbox_and_symlinks() {
+        val imp = importer()
+        val elsewhere = File(tmp.root, "elsewhere").apply { mkdirs() }
+        val outsider = File(elsewhere, "keep.txt").apply { writeText("keep") }
+        val real = outboxFile("20240115", "real.txt", "x")
+        val link = File(real.parentFile, "link.txt")
+        java.nio.file.Files.createSymbolicLink(link.toPath(), outsider.toPath())
+        assertEquals(0L, imp.clear(setOf(outsider.path, link.path, File(tmp.root, "outbox/../elsewhere/keep.txt").path), millis(2000, 1, 1)))
+        assertTrue(outsider.exists())
+        assertTrue(real.exists())
+    }
+
     @Test fun clear_older_than_keeps_non_date_entries() {
         val imp = importer()
         val misc = outboxFile("misc", "m.txt", "xx")
         val bad = outboxFile("20241399", "n.txt", "xx") // 8 位数字但不是合法日期
         val loose = File(tmp.root, "outbox/20230101").apply { parentFile!!.mkdirs(); writeText("file, not dir") }
-        assertEquals(0L, imp.clearOlderThan(millis(2030, 1, 1)))
+        assertEquals(0L, imp.clear(emptySet(), millis(2030, 1, 1)))
         assertTrue(misc.exists())
         assertTrue(bad.exists())
         assertTrue(loose.exists())
@@ -196,7 +225,7 @@ class OutboxImporterTest {
         val link = File(tmp.root, "outbox/20230101")
         link.parentFile!!.mkdirs()
         java.nio.file.Files.createSymbolicLink(link.toPath(), target.toPath())
-        assertEquals(0L, imp.clearOlderThan(millis(2030, 1, 1)))
+        assertEquals(0L, imp.clear(emptySet(), millis(2030, 1, 1)))
         assertTrue(victim.exists())
     }
 }

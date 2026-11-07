@@ -175,8 +175,9 @@
     <string name="battery_vendor_action">打开应用详情</string>
     <string name="battery_vendor_recheck">已设置？重新查看</string>
     <string name="settings_clear_outbox">清理已分享文件的副本</string>
-    <string name="settings_clear_outbox_desc">仅清理 7 天前的副本，当前共占用 %1$s</string>
-    <string name="settings_clear_outbox_confirm">清理 7 天前的副本。尚未下载这些文件的设备将无法再获取它们；你手机里的原文件不受影响。</string>
+    <string name="settings_clear_outbox_desc">清理已送达或 7 天前的副本，当前共占用 %1$s</string>
+    <string name="settings_clear_outbox_confirm">清理已送达或 7 天前的副本。对方的所有设备都已下载才算已送达；对方有设备从未下载时，要等到 7 天后才会清理。尚未下载的设备在副本清理后将无法再获取；你手机里的原文件不受影响。</string>
+    <string name="settings_clear_outbox_done">已释放 %1$s</string>
     <string name="settings_clear_outbox_action">清理副本</string>
     <string name="share_pick_title">发送到</string>
     <string name="share_empty">没有可用的会话</string>

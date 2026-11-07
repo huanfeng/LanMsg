@@ -40,6 +40,8 @@ class SettingsViewModel(
         val saveToGallery: Boolean = true,
         val trustedWifi: Set<String> = emptySet(),
         val outboxBytes: Long = 0,
+        /** 最近一次清理释放的字节数；界面提示后调用 [clearedShown] 清除。 */
+        val clearedBytes: Long? = null,
         val error: Int? = null,
         /** 每次出错递增：相同错误码连续出现时界面仍会再次提示。 */
         val errorSeq: Int = 0,
@@ -144,12 +146,22 @@ class SettingsViewModel(
         }
     }
 
+    /** 清理“已送达或 7 天前”的副本：已送达由 core 判定（对方所有设备都已下载）。 */
     fun clearOutbox() {
         viewModelScope.launch {
-            withContext(io) { outbox.clearOlderThan(clock() - OUTBOX_KEEP_MILLIS) }
+            // core 过旧或出错时只按日期清理，不阻塞用户操作
+            val delivered = try {
+                core.call<Response.Paths>(Request.DeliveredLocalPaths(outbox.rootPath())).value.toSet()
+            } catch (e: ApiException) {
+                emptySet()
+            }
+            val freed = withContext(io) { outbox.clear(delivered, clock() - OUTBOX_KEEP_MILLIS) }
+            _state.update { it.copy(clearedBytes = freed) }
             refreshOutboxSize()
         }
     }
+
+    fun clearedShown() = _state.update { it.copy(clearedBytes = null) }
 
     private fun refreshOutboxSize() {
         viewModelScope.launch {

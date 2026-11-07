@@ -800,6 +800,55 @@ async fn file_source_is_me_for_own_files() {
     assert_eq!(item.holder_name, None);
 }
 
+/// 查询 `under` 之下已全部送达的本地路径。
+async fn delivered_paths(node: &common::TestNode, under: &std::path::Path) -> Vec<String> {
+    match node
+        .call(Request::DeliveredLocalPaths {
+            under: under.to_string_lossy().into_owned(),
+        })
+        .await
+    {
+        Response::Paths { value } => value,
+        other => panic!("expected Paths, got {other:?}"),
+    }
+}
+
+/// 对端还没下载：不算已送达。
+#[tokio::test]
+async fn not_delivered_while_peer_has_not_downloaded() {
+    let (mut a, mut x) = contact_pair_no_auto().await;
+    let src = tempfile::tempdir().unwrap();
+    let path = make_file(src.path(), "wait.bin", 2048);
+    send_and_wait(&mut a, &mut x, &path, 2048).await;
+    assert!(delivered_paths(&a, src.path()).await.is_empty());
+}
+
+/// 对端下载完成后向作者回报 BlobHave，作者据此判定已送达；前缀之外的路径不返回。
+#[tokio::test]
+async fn delivered_paths_after_peer_downloads() {
+    let (mut a, mut x) = contact_pair_no_auto().await;
+    let src = tempfile::tempdir().unwrap();
+    let path = make_file(src.path(), "done.bin", 2048);
+    let (_, hash) = send_and_wait(&mut a, &mut x, &path, 2048).await;
+    assert!(delivered_paths(&a, src.path()).await.is_empty());
+
+    let dl = tempfile::tempdir().unwrap();
+    set_download_dir(&x, dl.path()).await;
+    x.call(Request::DownloadBlob { hash: hash.clone() }).await;
+    let (ok, _) = wait_finished(&mut x, &hash, 15).await;
+    assert!(ok);
+
+    let expected = path.to_string_lossy().into_owned();
+    wait_until(
+        || async { delivered_paths(&a, src.path()).await == vec![expected.clone()] },
+        10,
+    )
+    .await;
+    // 前缀之外的目录查不到。
+    let other = tempfile::tempdir().unwrap();
+    assert!(delivered_paths(&a, other.path()).await.is_empty());
+}
+
 #[tokio::test]
 async fn file_source_fields_local() {
     let (mut a, mut x) = contact_pair().await;

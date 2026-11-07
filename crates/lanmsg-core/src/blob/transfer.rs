@@ -810,10 +810,17 @@ impl TransferEngine {
         {
             tracing::warn!(error = %e, "failed to record this device as holder");
         }
-        // 向已连接的自己设备发 BlobHave，让其他设备知道本机持有。
+        // 向已连接的自己设备与消息作者的设备发 BlobHave：自己的设备据此知道本机持有，
+        // 作者据此知道“对方已下载”（供“已送达”判定）。
         let self_user = self.identity.read().unwrap().user_id();
+        let authors: Vec<DeviceId> = self
+            .store
+            .message_blobs_by_hash(&row.hash)
+            .map(|v| v.into_iter().map(|mb| mb.msg.author).collect())
+            .unwrap_or_default();
         for p in self.conns.peers() {
-            if p.cert.as_ref().is_some_and(|c| Some(c.user) == self_user) {
+            let is_own = p.cert.as_ref().is_some_and(|c| Some(c.user) == self_user);
+            if is_own || authors.contains(&p.device) {
                 if let Err(e) = self
                     .conns
                     .send(

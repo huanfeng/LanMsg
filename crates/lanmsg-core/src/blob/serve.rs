@@ -224,11 +224,150 @@ impl BlobServer {
             .await;
     }
 
-    /// Frame::BlobHave：把发送方记为各哈希的持有者。
+    /// 发送方是否受信：已知、未吊销，且属于本人或已接受的联系人。
+    fn is_trusted_device(&self, device: &DeviceId) -> bool {
+        let Ok(Some(row)) = self.store.get_device(device) else {
+            return false;
+        };
+        if row.revoked {
+            return false;
+        }
+        if self.identity.read().unwrap().user_id() == Some(row.user) {
+            return true;
+        }
+        matches!(
+            self.store.get_contact(&row.user),
+            Ok(Some(c)) if c.state == crate::store::ContactState::Accepted
+        )
+    }
+
+    /// Frame::BlobHave：把发送方记为各哈希的持有者。只接受受信设备的声明，
+    /// 陌生人不能借此污染 holders（进而影响“已送达”判定与下载源选择）。
     pub(crate) async fn handle_blob_have(&self, from: DeviceId, h: BlobHave) {
+        if !self.is_trusted_device(&from) {
+            tracing::debug!(device = %from.short(), "BlobHave from untrusted device ignored");
+            return;
+        }
         let now = crate::service::now_millis();
         for hash in h.hashes {
             let _ = self.store.add_holder(&hash, &from, now);
         }
+    }
+}
+
+#[cfg(test)]
+mod blob_have_trust_tests {
+    use super::*;
+    use crate::store::{ContactRow, ContactState, DeviceRow};
+    use crate::testutil::pair_of_nodes;
+    use lanmsg_proto::sign::UserKey;
+    use lanmsg_proto::types::{DeviceCert, DeviceType, Hlc};
+
+    const HASH: BlobHash = BlobHash([9u8; 32]);
+
+    fn have() -> BlobHave {
+        BlobHave { hashes: vec![HASH] }
+    }
+
+    fn held_by(server: &BlobServer, dev: &DeviceId) -> bool {
+        server.store.holders(&HASH).unwrap().contains(dev)
+    }
+
+    /// 陌生人（非联系人）的 BlobHave 不得写入 holders。
+    #[tokio::test]
+    async fn stranger_blob_have_is_ignored_then_accepted_after_contact() {
+        let (a, b) = pair_of_nodes().await;
+        let server = BlobServer::new(a.store.clone(), a.identity.clone());
+        server.handle_blob_have(b.device, have()).await;
+        assert!(!held_by(&server, &b.device), "陌生人不应成为持有者");
+
+        a.store
+            .upsert_contact_if_newer(&ContactRow {
+                user: b.user,
+                state: ContactState::Accepted,
+                auto_accept: false,
+                ask_above_bytes: None,
+                updated: Hlc {
+                    millis: 1,
+                    counter: 0,
+                },
+            })
+            .unwrap();
+        server.handle_blob_have(b.device, have()).await;
+        assert!(held_by(&server, &b.device), "已接受的联系人应被记为持有者");
+    }
+
+    #[tokio::test]
+    async fn pending_or_blocked_contacts_are_ignored() {
+        let (a, b) = pair_of_nodes().await;
+        let server = BlobServer::new(a.store.clone(), a.identity.clone());
+        for state in [
+            ContactState::Outgoing,
+            ContactState::Incoming,
+            ContactState::Rejected,
+            ContactState::Blocked,
+        ] {
+            a.store
+                .upsert_contact_if_newer(&ContactRow {
+                    user: b.user,
+                    state,
+                    auto_accept: false,
+                    ask_above_bytes: None,
+                    updated: Hlc {
+                        millis: 1,
+                        counter: 0,
+                    },
+                })
+                .unwrap();
+            server.handle_blob_have(b.device, have()).await;
+            assert!(!held_by(&server, &b.device), "{state:?} 不应被接受");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_and_revoked_devices_are_ignored_but_own_devices_accepted() {
+        let (a, b) = pair_of_nodes().await;
+        let server = BlobServer::new(a.store.clone(), a.identity.clone());
+        // 未知设备。
+        let unknown = DeviceId([0x55; 32]);
+        server.handle_blob_have(unknown, have()).await;
+        assert!(!held_by(&server, &unknown));
+        // 已吊销的联系人设备。
+        a.store
+            .upsert_contact_if_newer(&ContactRow {
+                user: b.user,
+                state: ContactState::Accepted,
+                auto_accept: false,
+                ask_above_bytes: None,
+                updated: Hlc {
+                    millis: 1,
+                    counter: 0,
+                },
+            })
+            .unwrap();
+        let mut row = a.store.get_device(&b.device).unwrap().unwrap();
+        row.revoked = true;
+        a.store.upsert_device(&row).unwrap();
+        server.handle_blob_have(b.device, have()).await;
+        assert!(!held_by(&server, &b.device));
+        // 本人的另一台设备。
+        let key = UserKey::generate();
+        let own_dev = DeviceId([0x66; 32]);
+        let user = a.identity.read().unwrap().user_id().unwrap();
+        a.store
+            .upsert_device(&DeviceRow {
+                device: own_dev,
+                user,
+                cert: DeviceCert::issue(&key, own_dev, "own".into(), DeviceType::Phone, 1),
+                name: "own".into(),
+                device_type: DeviceType::Phone,
+                last_addr: None,
+                last_path: None,
+                last_seen: None,
+                revoked: false,
+            })
+            .unwrap();
+        server.handle_blob_have(own_dev, have()).await;
+        assert!(held_by(&server, &own_dev));
     }
 }

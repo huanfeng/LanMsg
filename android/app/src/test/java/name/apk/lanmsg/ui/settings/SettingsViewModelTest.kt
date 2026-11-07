@@ -152,13 +152,33 @@ class SettingsViewModelTest {
         assertEquals(setOf("office"), vm.state.value.trustedWifi)
     }
 
-    @Test fun clear_outbox_uses_seven_day_cutoff_and_refreshes_size() = runTest {
-        val vm = vm(fake())
+    @Test fun clear_outbox_uses_seven_day_cutoff_and_delivered_paths_and_reports_freed() = runTest {
+        val fake = fake()
+        val ok = fake.handler
+        fake.handler = { req -> if (req is Request.DeliveredLocalPaths) Response.Paths(listOf("/o/a", "/o/b")) else ok(req) }
+        val vm = vm(fake)
         advanceUntilIdle()
         vm.clearOutbox()
         advanceUntilIdle()
         assertEquals(now - 7L * 24 * 3600 * 1000, outbox.cutoff)
+        assertEquals(setOf("/o/a", "/o/b"), outbox.delivered)
+        assertEquals(OUTBOX_ROOT, (fake.requests.last { it is Request.DeliveredLocalPaths } as Request.DeliveredLocalPaths).under)
         assertEquals(0L, vm.state.value.outboxBytes)
+        assertEquals(OUTBOX_BYTES, vm.state.value.clearedBytes)
+        vm.clearedShown()
+        assertNull(vm.state.value.clearedBytes)
+    }
+
+    @Test fun clear_outbox_still_clears_by_date_when_core_cannot_answer() = runTest {
+        val fake = fake()
+        val ok = fake.handler
+        fake.handler = { req -> if (req is Request.DeliveredLocalPaths) throw ApiException(ErrorCode.UNIMPLEMENTED, "x") else ok(req) }
+        val vm = vm(fake)
+        advanceUntilIdle()
+        vm.clearOutbox()
+        advanceUntilIdle()
+        assertEquals(emptySet<String>(), outbox.delivered)
+        assertEquals(OUTBOX_BYTES, vm.state.value.clearedBytes)
     }
 
     @Test fun consecutive_failed_updates_end_with_core_value() = runTest {
@@ -246,8 +266,19 @@ private class MemoryPrefs : SettingsPrefs {
     override suspend fun setTrustedWifi(ssids: Set<String>) { wifi.value = ssids }
 }
 
+private const val OUTBOX_ROOT = "/data/outbox"
+private const val OUTBOX_BYTES = 2048L
+
 private class MemoryOutbox(private var bytes: Long) : OutboxStore {
     var cutoff: Long? = null
+    var delivered: Set<String>? = null
     override fun outboxSizeBytes(): Long = bytes
-    override fun clearOlderThan(cutoffMillis: Long): Long { cutoff = cutoffMillis; val freed = bytes; bytes = 0; return freed }
+    override fun rootPath(): String = OUTBOX_ROOT
+    override fun clear(deliveredPaths: Set<String>, olderThanMillis: Long): Long {
+        cutoff = olderThanMillis
+        delivered = deliveredPaths
+        val freed = bytes
+        bytes = 0
+        return freed
+    }
 }
