@@ -774,13 +774,17 @@ impl Messaging {
                                     state: MsgStateRow::Delivered,
                                     received_at: wall,
                                 };
-                                let msg_view = message_view(
-                                    self.store.as_ref(),
-                                    &self_device,
-                                    &self.conns.peers(),
-                                    &stored,
-                                );
-                                let _ = self.events.send(Event::MessageAdded { msg: msg_view });
+                                // 隐藏消息（已读回执、撤回、资料更新等）只入库不推界面，
+                                // 否则界面会收到无法渲染的 Unsupported 条目。
+                                if !lanmsg_proto::body_is_hidden(&env.body) {
+                                    let msg_view = message_view(
+                                        self.store.as_ref(),
+                                        &self_device,
+                                        &self.conns.peers(),
+                                        &stored,
+                                    );
+                                    let _ = self.events.send(Event::MessageAdded { msg: msg_view });
+                                }
 
                                 let conv_row =
                                     self.store.get_conversation(&env.conv)?.ok_or_else(|| {
@@ -863,13 +867,16 @@ impl Messaging {
                     };
                     if delivered {
                         self.store.set_message_state(&id, MsgStateRow::Delivered)?;
-                        let msg_view = message_view(
-                            self.store.as_ref(),
-                            &self_device,
-                            &self.conns.peers(),
-                            &m,
-                        );
-                        let _ = self.events.send(Event::MessageUpdated { msg: msg_view });
+                        // 自己发出的隐藏消息（已读回执/撤回）被确认时不推界面事件。
+                        if !lanmsg_proto::body_is_hidden(&m.env.body) {
+                            let msg_view = message_view(
+                                self.store.as_ref(),
+                                &self_device,
+                                &self.conns.peers(),
+                                &m,
+                            );
+                            let _ = self.events.send(Event::MessageUpdated { msg: msg_view });
+                        }
                     }
                 }
             }

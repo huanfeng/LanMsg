@@ -584,6 +584,75 @@ async fn recall_within_window_hides_on_all_sides() {
     }
 }
 
+/// 回归：已读回执 / 撤回是隐藏消息，对端入库后不得作为 MessageAdded/MessageUpdated
+/// 推给界面（否则界面渲染出“不支持的消息类型”）。
+#[tokio::test]
+async fn hidden_bodies_never_reach_ui_events() {
+    let mut a = node_offline().await;
+    let a_user = a.init_first("甲").await;
+    let mut x = node_offline().await;
+    let x_user = x.init_first("小张").await;
+    befriend(&mut a, &mut x).await;
+
+    let conv = ConvId::dm(&user(&a_user), &user(&x_user)).to_hex();
+    a.call(Request::OpenDm {
+        user: x_user.clone(),
+    })
+    .await;
+    a.call(Request::SendText {
+        conv: conv.clone(),
+        text: "待撤回".into(),
+    })
+    .await;
+    x.call(Request::SendText {
+        conv: conv.clone(),
+        text: "对方回复".into(),
+    })
+    .await;
+    wait_until(|| async { list_texts(&x, &conv).await.len() == 2 }, 5).await;
+    wait_until(|| async { list_texts(&a, &conv).await.len() == 2 }, 5).await;
+
+    // X 标记已读（向 A 发 Read 回执），A 撤回自己的消息（向 X 发 Recall）。
+    let msgs = list_texts(&x, &conv).await;
+    x.call(Request::MarkRead {
+        conv: conv.clone(),
+        upto: msgs[1].id.clone(),
+    })
+    .await;
+    let mine = list_texts(&a, &conv)
+        .await
+        .into_iter()
+        .find(|m| m.is_mine)
+        .expect("A 的消息");
+    a.call(Request::Recall {
+        msg: mine.id.clone(),
+    })
+    .await;
+    wait_until(
+        || async {
+            list_msgs(&x, &conv)
+                .await
+                .iter()
+                .any(|m| m.id == mine.id && m.state == MessageState::Recalled)
+        },
+        5,
+    )
+    .await;
+    // 再等回执往返完成。
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    for n in [&mut a, &mut x] {
+        while let Ok(ev) = n.events.try_recv() {
+            if let Event::MessageAdded { msg } | Event::MessageUpdated { msg } = ev {
+                assert!(
+                    !matches!(msg.body, MessageBodyView::Unsupported),
+                    "隐藏消息泄漏到界面事件: {msg:?}"
+                );
+            }
+        }
+    }
+}
+
 /// 撤回他人消息被拒绝（InvalidArgument）。
 #[tokio::test]
 async fn recall_others_message_rejected() {
