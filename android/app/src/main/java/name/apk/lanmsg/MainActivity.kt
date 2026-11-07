@@ -55,6 +55,7 @@ import name.apk.lanmsg.core.call
 import name.apk.lanmsg.files.ShareIntentParser
 import name.apk.lanmsg.files.ShareText
 import name.apk.lanmsg.ui.nav.LanMsgNavHost
+import name.apk.lanmsg.ui.nav.hasMainRoot
 import name.apk.lanmsg.ui.nav.Routes
 import name.apk.lanmsg.ui.share.SharePickViewModel
 import name.apk.lanmsg.ui.theme.LanMsgButtons
@@ -239,8 +240,8 @@ private fun Launcher(
             LaunchedEffect(incoming) {
                 val data = incoming ?: return@LaunchedEffect
                 onShareConsumed()
-                if (route == Routes.ONBOARDING) {
-                    // 未初始化：提示后留在引导页
+                if (!nav.hasMainRoot()) {
+                    // 未完成引导：提示后留在引导页（不能看 route：完成引导后图的起点仍是引导页）
                     Toast.makeText(ctx, R.string.share_need_setup, Toast.LENGTH_LONG).show()
                 } else {
                     shareVm().setPending(data.uris, data.text)
@@ -251,7 +252,7 @@ private fun Launcher(
                 val target = deepLink ?: return@LaunchedEffect
                 onRouteConsumed()
                 // 未初始化时没有可去的页面；路由来自外部 intent，无效时不能崩溃
-                if (route != Routes.ONBOARDING) {
+                if (nav.hasMainRoot()) {
                     try {
                         nav.navigate(target) { launchSingleTop = true }
                     } catch (e: IllegalArgumentException) {

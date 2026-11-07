@@ -23,7 +23,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavDestination.Companion.hierarchy
-import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavController
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -61,6 +61,28 @@ private val tabs = listOf(
 )
 
 /**
+ * 切换底部标签。返回栈的根固定是会话列表：首次使用时图的起点是引导页，完成引导后引导页已被弹出，
+ * 不能用 findStartDestination() 作为 popUpTo 目标（目标不在栈里时 popUpTo 不生效，标签页会层层堆叠）。
+ * 效果：任意标签之间切换后，返回键先回到「消息」，再退出应用；各标签内的子页面状态按标签保存与恢复。
+ */
+fun NavController.navigateToTab(route: String) {
+    navigate(route.substringBefore('?')) {
+        popUpTo(Routes.CONVS) { saveState = true }
+        launchSingleTop = true
+        restoreState = true
+    }
+}
+
+/** 主界面已建立（会话列表在返回栈中），即已完成引导；用于判断外部分享与深链能否进入。 */
+fun NavController.hasMainRoot(): Boolean =
+    try {
+        getBackStackEntry(Routes.CONVS)
+        true
+    } catch (e: IllegalArgumentException) {
+        false
+    }
+
+/**
  * 导航骨架。底部导航栏只在四个标签路由显示。
  *
  * 系统栏 insets 约定：外层 Scaffold 不消费状态栏 inset，只把底部导航栏高度（含导航栏 inset）
@@ -85,13 +107,7 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                         for (tab in tabs) {
                             NavigationBarItem(
                                 selected = destination?.hierarchy?.any { it.route == tab.route } == true,
-                                onClick = {
-                                    nav.navigate(tab.route.substringBefore('?')) {
-                                        popUpTo(nav.graph.findStartDestination().id) { saveState = true }
-                                        launchSingleTop = true
-                                        restoreState = true
-                                    }
-                                },
+                                onClick = { nav.navigateToTab(tab.route) },
                                 icon = { Icon(tab.icon, contentDescription = null) },
                                 label = { Text(stringResource(tab.label)) },
                                 colors = NavigationBarItemDefaults.colors(
