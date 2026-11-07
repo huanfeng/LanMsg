@@ -18,9 +18,9 @@ set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 REPO="${REPO:-$(cd "$(dirname "$SELF")/.." && pwd)}"
-BIN_DIR="${LANMSG_BIN_DIR:-$REPO/target/debug}"  # 可用 LANMSG_BIN_DIR 覆盖二进制目录
-BIN_D="$BIN_DIR/lanmsgd"
-BIN_CLI="$BIN_DIR/lanmsg-cli"
+# shellcheck source=lib/e2e-bins.sh
+source "$REPO/scripts/lib/e2e-bins.sh"
+e2e_resolve_bins  # 目录：LANMSG_BIN_DIR > $CARGO_TARGET_DIR/debug > $REPO/target/debug
 
 ALL_SCENARIOS=(text_chat pair_qr pair_profile pair_sas offline_catchup sibling_dm_sync stranger_request file_transfer folder_transfer file_resume revoke recall_read bench_local)
 
@@ -115,8 +115,9 @@ wait_for() {
 uid() { c "$1" self | awk '/^user_id:/{print $2}'; }
 did() { c "$1" self | awk '/^device_id:/{print $2}'; }
 
-# 会话中的文本（每行一条，已去掉 [时间] 作者: 前缀），按 log 顺序。
-texts() { c "$1" log "$2" --limit 500 | grep -v '<不支持的消息类型>' | sed -E 's/^\[[0-9:]+\] [^:]*: //'; }
+# 会话中的文本（每行一条，已去掉 [时间] 作者: 前缀），按 log 顺序；
+# 系统消息（CLI 加 [系统] 前缀，如“已添加联系人：X”）是各设备本地生成的，不属于用户文字，滤掉。
+texts() { c "$1" log "$2" --limit 500 | grep -v '<不支持的消息类型>' | sed -E 's/^\[[0-9:]+\] [^:]*: //' | awk '!/^\[系统\] /'; }
 has_text() { texts "$1" "$2" | grep -qxF -- "$3"; }
 
 # 对端在线：peer_seen <节点> <显示名>
@@ -637,10 +638,7 @@ for s in "${SELECTED[@]}"; do
     }
 done
 
-if [ ! -x "$BIN_D" ] || [ ! -x "$BIN_CLI" ]; then
-    echo "缺少二进制，请先 cargo build -p lanmsgd -p lanmsg-cli" >&2
-    exit 2
-fi
+e2e_check_bins
 
 TMP="$(mktemp -d /tmp/lanmsg-acc.XXXXXX)"
 cleanup() {

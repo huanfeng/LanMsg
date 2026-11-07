@@ -10,9 +10,12 @@ DIR_B="$ROOT/b"
 PORT_A=53330
 PORT_B=53331
 
-BIN_DIR="${LANMSG_BIN_DIR:-$(dirname "$0")/../target/debug}"  # 可用 LANMSG_BIN_DIR 覆盖二进制目录
-BIN_A="$BIN_DIR/lanmsgd"
-BIN_CLI="$BIN_DIR/lanmsg-cli"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# shellcheck source=lib/e2e-bins.sh
+source "$REPO/scripts/lib/e2e-bins.sh"
+e2e_resolve_bins  # 目录：LANMSG_BIN_DIR > $CARGO_TARGET_DIR/debug > $REPO/target/debug
+BIN_A="$BIN_D"
+e2e_check_bins
 
 cleanup() {
     cli_a shutdown >/dev/null 2>&1 || true

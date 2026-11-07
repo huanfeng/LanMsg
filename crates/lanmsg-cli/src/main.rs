@@ -626,7 +626,9 @@ fn body_line(body: &MessageBodyView) -> String {
             .join(", ")
     };
     match body {
-        MessageBodyView::Text { text } | MessageBodyView::System { text } => text.clone(),
+        MessageBodyView::Text { text } => text.clone(),
+        // 系统消息加可识别前缀，脚本据此与用户文字区分
+        MessageBodyView::System { text } => format!("[系统] {text}"),
         MessageBodyView::Files { items } => format!("[文件] {}", list(items)),
         MessageBodyView::Folder { name, items } => format!("[文件夹] {name}: {}", list(items)),
         MessageBodyView::Unsupported => "<不支持的消息类型>".to_string(),
@@ -868,6 +870,6 @@ mod tests {
         let sys = MessageBodyView::System {
             text: "已添加设备：手机".into(),
         };
-        assert_eq!(body_line(&sys), "已添加设备：手机");
+        assert_eq!(body_line(&sys), "[系统] 已添加设备：手机");
     }
 }
