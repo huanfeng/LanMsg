@@ -184,6 +184,22 @@ class FilesViewModelTest {
         assertTrue(fake.requests.contains(Request.CancelTransfer("t1")))
     }
 
+    @Test fun failed_transfer_sets_error_but_user_cancel_does_not() = runTest {
+        val fake = fake()
+        val vm = FilesViewModel(fake, null)
+        advanceUntilIdle()
+        fake.emit(Event.TransferProgress("t1", "h1", 1uL, 10uL, 0uL)); advanceUntilIdle()
+        // 页面收到错误后立即显示并 clearError；500ms 后的重查成功会重置 error，这里只看事件当下
+        fake.emit(Event.TransferFinished("t1", "h1", false, "connection reset")); runCurrent()
+        assertEquals("connection reset", vm.state.value.error)
+        assertTrue(vm.state.value.progress.isEmpty())
+        vm.clearError()
+        fake.emit(Event.TransferProgress("t2", "h2", 1uL, 10uL, 0uL)); advanceUntilIdle()
+        vm.cancel("h2"); advanceUntilIdle()
+        fake.emit(Event.TransferFinished("t2", "h2", false, "cancelled")); runCurrent()
+        assertNull(vm.state.value.error)
+    }
+
     @Test fun source_devices_list_own_devices_first_then_other_peers() = runTest {
         val fake = fake().apply {
             val inner = handler

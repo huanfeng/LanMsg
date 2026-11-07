@@ -48,6 +48,7 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
 
     /** hash -> transfer id，CancelTransfer 用。 */
     private val transfers = mutableMapOf<String, String>()
+    private val cancelled = mutableSetOf<String>()
 
     init {
         viewModelScope.launch { core.events.collect(::onEvent) }
@@ -85,6 +86,7 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
 
     fun cancel(hash: String) {
         val transfer = transfers[hash] ?: return
+        cancelled += hash
         viewModelScope.launch {
             try {
                 core.request(Request.CancelTransfer(transfer))
@@ -110,7 +112,12 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
             }
             is Event.TransferFinished -> {
                 transfers.remove(e.hash)
-                _state.update { it.copy(progress = it.progress - e.hash) }
+                // 用户主动取消也会以 ok=false 结束，不当作错误提示
+                val userCancelled = cancelled.remove(e.hash)
+                _state.update { s ->
+                    val cleared = s.copy(progress = s.progress - e.hash)
+                    if (e.ok || userCancelled) cleared else cleared.copy(error = e.error ?: DOWNLOAD_FAILED)
+                }
                 scheduleRefresh()
             }
             else -> Unit
@@ -167,6 +174,7 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
 
     companion object {
         private const val TAG = "FilesViewModel"
+        private const val DOWNLOAD_FAILED = "Download failed"
         private val LIMIT = 200u
         private const val QUERY_DEBOUNCE_MS = 300L
         private const val REFRESH_DEBOUNCE_MS = 500L

@@ -49,6 +49,7 @@ class ChatViewModel(
 
     /** hash -> transfer id，CancelTransfer 用。 */
     private val transfers = mutableMapOf<String, String>()
+    private val cancelled = mutableSetOf<String>()
     private var isVisible = false
     private var hiddenBefore = false
     private var lastMarked: String? = null
@@ -113,6 +114,7 @@ class ChatViewModel(
 
     fun cancel(hash: String) {
         val transfer = transfers[hash] ?: return
+        cancelled += hash
         viewModelScope.launch { guarded { core.request(Request.CancelTransfer(transfer)) } }
     }
 
@@ -234,7 +236,12 @@ class ChatViewModel(
             }
             is Event.TransferFinished -> {
                 transfers.remove(e.hash)
-                _state.update { it.copy(progress = it.progress - e.hash) }
+                // 用户主动取消也会以 ok=false 结束，不当作错误提示
+                val userCancelled = cancelled.remove(e.hash)
+                _state.update { s ->
+                    val cleared = s.copy(progress = s.progress - e.hash)
+                    if (e.ok || userCancelled) cleared else cleared.copy(error = e.error ?: DOWNLOAD_FAILED)
+                }
                 loadLatest()
             }
             else -> Unit
@@ -272,6 +279,7 @@ class ChatViewModel(
     companion object {
         const val ERROR_PEER_OFFLINE = "peer_offline"
         const val ERROR_IMPORT_FAILED = "import_failed"
+        private const val DOWNLOAD_FAILED = "Download failed"
         private const val TAG = "ChatViewModel"
         private const val PAGE = 50u
         private const val RECALL_WINDOW_MS = 120_000L

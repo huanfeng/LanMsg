@@ -237,6 +237,36 @@ class ChatViewModelTest {
         assertEquals(before + 1, fake.requests.count { it is Request.ListMessages })
     }
 
+    @Test fun failed_transfer_sets_error_and_clears_progress() = runTest {
+        val fake = fakeWith { listOf(m("m1")) }
+        val vm = ChatViewModel(fake, "c1", VisibleConversation)
+        advanceUntilIdle()
+        fake.emit(Event.TransferProgress("t1", "h", 5uL, 10uL, 0uL)); advanceUntilIdle()
+        fake.emit(Event.TransferFinished("t1", "h", false, "connection reset")); advanceUntilIdle()
+        assertEquals("connection reset", vm.state.value.error)
+        assertTrue(vm.state.value.progress.isEmpty())
+    }
+
+    @Test fun user_cancelled_transfer_does_not_set_error() = runTest {
+        val fake = fakeWith { listOf(m("m1")) }
+        val vm = ChatViewModel(fake, "c1", VisibleConversation)
+        advanceUntilIdle()
+        fake.emit(Event.TransferProgress("t1", "h", 5uL, 10uL, 0uL)); advanceUntilIdle()
+        vm.cancel("h"); advanceUntilIdle()
+        fake.emit(Event.TransferFinished("t1", "h", false, "cancelled")); advanceUntilIdle()
+        assertNull(vm.state.value.error)
+    }
+
+    @Test fun download_request_failure_sets_error() = runTest {
+        val fake = fakeWith { listOf(m("m1")) }
+        val ok = fake.handler
+        fake.handler = { r -> if (r is Request.DownloadBlob) throw ApiException(ErrorCode.PEER_OFFLINE, "offline") else ok(r) }
+        val vm = ChatViewModel(fake, "c1", VisibleConversation)
+        advanceUntilIdle()
+        vm.download("h"); advanceUntilIdle()
+        assertEquals(ChatViewModel.ERROR_PEER_OFFLINE, vm.state.value.error)
+    }
+
     @Test fun cancel_uses_transfer_id_from_progress() = runTest {
         val fake = fakeWith { emptyList() }
         val vm = ChatViewModel(fake, "c1", VisibleConversation)
