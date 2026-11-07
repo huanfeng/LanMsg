@@ -4,7 +4,7 @@
 // 发 Begin（+Qr 的 Proof），收 Proof/Bundle 后采纳身份。所有失败路径在
 // B 第 5 步之前不写任何 store/keystore。注释中文，标识符英文。
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
@@ -1254,17 +1254,39 @@ impl Pairing {
         let port = self.inner.local_addr.port();
         let mut out = Vec::new();
         if let Ok(ifaces) = if_addrs::get_if_addrs() {
-            for i in ifaces {
-                if i.is_loopback() {
-                    continue;
-                }
-                out.push(SocketAddr::new(i.ip(), port));
-            }
+            let ips = ifaces
+                .into_iter()
+                .filter(|i| !i.is_loopback())
+                .map(|i| i.ip())
+                .collect();
+            out.extend(
+                filter_pair_addrs(ips)
+                    .into_iter()
+                    .map(|ip| SocketAddr::new(ip, port)),
+            );
         }
         if out.is_empty() {
             out.push(self.inner.local_addr);
         }
         out
+    }
+}
+
+/// 去掉链路本地地址（fe80::/10、169.254.0.0/16）以缩短二维码；
+/// 过滤后为空（如无 DHCP 的机器）则原样返回，保证仍可配对。
+fn filter_pair_addrs(addrs: Vec<IpAddr>) -> Vec<IpAddr> {
+    let kept: Vec<IpAddr> = addrs
+        .iter()
+        .copied()
+        .filter(|ip| match ip {
+            IpAddr::V4(v4) => !v4.is_link_local(),
+            IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
+        })
+        .collect();
+    if kept.is_empty() {
+        addrs
+    } else {
+        kept
     }
 }
 
@@ -1304,6 +1326,51 @@ mod tests {
         assert_eq!(parsed.addrs, addrs);
         assert_eq!(parsed.session, "aabbccddeeff0011");
         assert_eq!(parsed.secret, secret);
+    }
+
+    fn ips(list: &[&str]) -> Vec<IpAddr> {
+        list.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn link_local_addresses_are_dropped() {
+        let input = ips(&["192.168.1.5", "fe80::1", "169.254.3.4", "2001:db8::5"]);
+        assert_eq!(
+            filter_pair_addrs(input),
+            ips(&["192.168.1.5", "2001:db8::5"])
+        );
+    }
+
+    #[test]
+    fn unique_local_and_global_ipv6_are_kept() {
+        let input = ips(&["fd00::1", "fc00::2", "2001:db8::5", "fe80::1"]);
+        assert_eq!(
+            filter_pair_addrs(input),
+            ips(&["fd00::1", "fc00::2", "2001:db8::5"])
+        );
+    }
+
+    #[test]
+    fn only_link_local_keeps_original() {
+        let input = ips(&["fe80::1"]);
+        assert_eq!(filter_pair_addrs(input.clone()), input);
+    }
+
+    #[test]
+    fn filtering_shortens_pair_uri() {
+        let device = DeviceId([0xab; 32]);
+        let secret = [7u8; 16];
+        let input = ips(&["192.168.1.5", "fe80::1", "169.254.3.4", "2001:db8::5"]);
+        let uri_of = |ips: Vec<IpAddr>| {
+            let addrs: Vec<SocketAddr> = ips
+                .into_iter()
+                .map(|ip| SocketAddr::new(ip, 53320))
+                .collect();
+            pair_uri(&device, &addrs, "aabbccddeeff0011", &secret)
+        };
+        let before = uri_of(input.clone());
+        let after = uri_of(filter_pair_addrs(input));
+        assert!(after.len() < before.len());
     }
 
     #[test]
