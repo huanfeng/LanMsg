@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -16,9 +18,32 @@ android {
         versionName = "0.1.0"
     }
 
+    // release 签名读取 android/keystore.properties；缺失时回退 debug 签名，便于 CI 出包测试
+    val keystoreFile = rootProject.file("keystore.properties")
+    val keystoreProps = Properties().apply {
+        if (keystoreFile.exists()) keystoreFile.inputStream().use { load(it) }
+    }
+    signingConfigs {
+        if (keystoreFile.exists()) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            signingConfig = if (keystoreFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                logger.warn("WARNING: keystore.properties not found; release build is signed with the debug key")
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
