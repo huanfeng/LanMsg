@@ -236,6 +236,32 @@ impl Store {
         Ok(out)
     }
 
+    /// 本机持有、且被 `user` 的任一设备发出的消息引用的 Blob 哈希（去重）。
+    /// 连接建立时据此向对端补发 BlobHave。
+    pub fn held_blobs_authored_by_user(
+        &self,
+        user: &lanmsg_proto::ids::UserId,
+    ) -> Result<Vec<BlobHash>, crate::store::StoreError> {
+        let conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT b.hash FROM message_blobs b
+             JOIN blob_local l ON l.hash = b.hash
+             JOIN devices d ON d.device_id = b.author
+             WHERE d.user_id = ?1",
+        )?;
+        let rows = stmt.query_map([&user.0[..]], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            let hash = r.map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+            out.push(BlobHash(hash.try_into().map_err(|bytes: Vec<u8>| {
+                crate::store::StoreError::Codec(format!("hash invalid length: {}", bytes.len()))
+            })?));
+        }
+        Ok(out)
+    }
+
     /// 查询本地 Blob 行。
     pub fn get_local(
         &self,

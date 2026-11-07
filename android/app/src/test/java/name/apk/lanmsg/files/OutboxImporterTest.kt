@@ -195,6 +195,38 @@ class OutboxImporterTest {
         assertTrue(sibling.parentFile!!.exists())
     }
 
+    @Test fun root_path_is_canonical_and_prefixes_imported_paths_when_root_is_a_symlink() = runTest {
+        Robolectric.setupContentProvider(FakeSharedProvider::class.java, "share.test")
+        val real = File(tmp.root, "real-outbox").apply { mkdirs() }
+        val link = File(tmp.root, "link-outbox")
+        java.nio.file.Files.createSymbolicLink(link.toPath(), real.toPath())
+        val imp = OutboxImporter(ApplicationProvider.getApplicationContext(), link)
+        val paths = imp.import(listOf(uri("hello", "a.txt")))
+        assertEquals(1, paths.size)
+        assertEquals(real.canonicalPath, imp.rootPath())
+        assertTrue("导入路径 ${paths[0]} 应以 rootPath ${imp.rootPath()} 开头", paths[0].startsWith(imp.rootPath() + File.separator))
+    }
+
+    @Test fun clear_rejects_sibling_directory_sharing_the_name_prefix() {
+        val imp = importer()
+        val inside = outboxFile("20240115", "in.txt", "1")
+        val sibling = File(tmp.root, "outbox2/20240115/out.txt").apply { parentFile!!.mkdirs(); writeText("keep") }
+        assertEquals(1L, imp.clear(setOf(inside.path, sibling.path), millis(2000, 1, 1)))
+        assertFalse(inside.exists())
+        assertTrue(sibling.exists())
+    }
+
+    @Test fun clear_rejects_paths_through_an_intermediate_symlink_directory() {
+        val imp = importer()
+        val elsewhere = File(tmp.root, "elsewhere").apply { mkdirs() }
+        val victim = File(elsewhere, "victim.txt").apply { writeText("keep") }
+        val viaLink = File(tmp.root, "outbox/20240115")
+        viaLink.parentFile!!.mkdirs()
+        java.nio.file.Files.createSymbolicLink(viaLink.toPath(), elsewhere.toPath())
+        assertEquals(0L, imp.clear(setOf(File(viaLink, "victim.txt").path), millis(2000, 1, 1)))
+        assertTrue(victim.exists())
+    }
+
     @Test fun clear_ignores_delivered_paths_outside_outbox_and_symlinks() {
         val imp = importer()
         val elsewhere = File(tmp.root, "elsewhere").apply { mkdirs() }

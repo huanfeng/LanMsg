@@ -101,7 +101,8 @@ class OutboxImporter(
 
     override fun outboxSizeBytes(): Long = outboxRoot.walkTopDown().filter { it.isFile }.sumOf { it.length() }
 
-    override fun rootPath(): String = outboxRoot.path
+    /** 规范化路径：与 [import] 交给 core 的路径同一形态（经过符号链接时前缀才对得上）。 */
+    override fun rootPath(): String = outboxRoot.canonicalPath
 
     /**
      * 设置页「清理已分享文件的副本」。core 发送文件只记录副本路径，对端之后下载仍读该路径，

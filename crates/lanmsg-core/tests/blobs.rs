@@ -849,6 +849,62 @@ async fn delivered_paths_after_peer_downloads() {
     assert!(delivered_paths(&a, other.path()).await.is_empty());
 }
 
+/// 作者没收到某台设备的 BlobHave（当时离线）：重新连上后，下载方补发，作者即可判为已送达。
+#[tokio::test]
+async fn blob_have_is_pushed_on_reconnect_so_author_sees_delivery() {
+    let bus = lanmsg_core::discovery::MemoryBus::new();
+    let mut x = node(&bus).await;
+    x.init_first("X").await;
+    let (mut a, mut b) = self_device_pair(&bus).await;
+    befriend(&mut x, &mut a).await;
+
+    let size = 2048;
+    let src = tempfile::tempdir().unwrap();
+    let path = make_file(src.path(), "push.bin", size);
+    let (_, hash_hex) = send_and_wait(&mut x, &mut a, &path, size).await;
+    let _ = wait_file_item(
+        &mut b,
+        |it| !it.hash.is_empty() && it.size == size as u64,
+        5,
+    )
+    .await;
+
+    // A 与 B（同一用户的两台设备）都下载；X 要两台都持有才算送达。
+    for node in [&mut a, &mut b] {
+        let dl = tempfile::tempdir().unwrap();
+        set_download_dir(node, dl.path()).await;
+        node.call(Request::DownloadBlob {
+            hash: hash_hex.clone(),
+        })
+        .await;
+        let (ok, error) = wait_finished(node, &hash_hex, 30).await;
+        assert!(ok, "下载应成功，实际错误 {error:?}");
+    }
+    let expected = path.to_string_lossy().into_owned();
+    wait_until(
+        || async { delivered_paths(&x, src.path()).await == vec![expected.clone()] },
+        10,
+    )
+    .await;
+
+    // 模拟 B 的回报丢失（作者当时离线）：抹掉 X 记录的 B 持有。
+    let hash = BlobHash::from_hex(&hash_hex).unwrap();
+    let b_dev = b.device_id().await;
+    let x_store = x.svc.store_for_test();
+    let b_device = lanmsg_proto::ids::DeviceId::from_hex(&b_dev).unwrap();
+    x_store.remove_holder(&hash, &b_device).unwrap();
+    assert!(delivered_paths(&x, src.path()).await.is_empty());
+
+    // 重新连上：B 在连接建立后补发 BlobHave。
+    x.svc.disconnect_for_test(&b_device).await;
+    link(&x, &b).await;
+    wait_until(
+        || async { delivered_paths(&x, src.path()).await == vec![expected.clone()] },
+        15,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn file_source_fields_local() {
     let (mut a, mut x) = contact_pair().await;

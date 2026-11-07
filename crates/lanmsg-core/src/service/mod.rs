@@ -492,7 +492,7 @@ async fn routing_task(
             evt = conn_rx.recv() => match evt {
                 Some(ConnEvent::Up(peer)) => {
                     let (tx, rx) = mpsc::channel(SYNC_JOB_QUEUE);
-                    tokio::spawn(sync_worker(inner.sync.clone(), rx));
+                    tokio::spawn(sync_worker(inner.clone(), rx));
                     sync_workers.insert(peer.device, tx.clone());
                     on_up(&inner, peer, &tx).await;
                 }
@@ -656,7 +656,10 @@ async fn on_up(inner: &Arc<Inner>, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJo
     // 多设备同步：对端上线即互发证书与 SyncOffer（陌生人同样调用，以投递
     // 离线消息）；发送在该对端的后台任务中进行。
     let device = peer.device;
-    try_enqueue(sync_tx, SyncJob::Up(peer), &device);
+    try_enqueue(sync_tx, SyncJob::Up(peer.clone()), &device);
+    // 补发 BlobHave：对方作者在我下载时可能不在线（回报丢失），重新连上后补报，
+    // 作者据此判定“已送达”。排在 SyncOffer 之后，同一连接只发这一次。
+    try_enqueue(sync_tx, SyncJob::HaveBlobs(peer), &device);
 }
 
 /// 非阻塞入队：队列满（对端不读我方数据）则丢弃并告警。丢弃安全：
@@ -674,13 +677,17 @@ fn try_enqueue<T>(tx: &mpsc::Sender<T>, job: T, peer: &DeviceId) -> bool {
 /// 交给对端后台同步任务的作业。
 enum SyncJob {
     Up(PeerInfo),
+    /// 向对端补发“本机已持有、且由其用户发出的消息引用”的 BlobHave。
+    HaveBlobs(PeerInfo),
     Offer(PeerInfo, crate::sync::OfferPlan),
 }
 
 /// 单个对端的出站同步任务：按入队顺序串行执行，发送端被丢弃后退出。
-async fn sync_worker(sync: crate::sync::SyncEngine, mut rx: mpsc::Receiver<SyncJob>) {
+async fn sync_worker(inner: Arc<Inner>, mut rx: mpsc::Receiver<SyncJob>) {
+    let sync = inner.sync.clone();
     while let Some(job) = rx.recv().await {
         match job {
+            SyncJob::HaveBlobs(peer) => push_blob_have(&inner, &peer).await,
             SyncJob::Up(peer) => {
                 if let Err(e) = sync.on_peer_up(&peer).await {
                     tracing::warn!(peer = %peer.device, error = %e, "SyncOffer generation failed");
@@ -691,6 +698,32 @@ async fn sync_worker(sync: crate::sync::SyncEngine, mut rx: mpsc::Receiver<SyncJ
                     tracing::warn!(peer = %peer.device, error = %e, "SyncOffer handling failed");
                 }
             }
+        }
+    }
+}
+
+/// 每个 BlobHave 帧最多携带的哈希数（每个约 40 字节，远小于帧上限）。
+const BLOB_HAVE_BATCH: usize = 256;
+
+/// 向对端补发 BlobHave：本机已持有、且被该对端用户的设备发出的消息引用的哈希，分批发送。
+/// 对端只接受受信设备的声明，对陌生人发了也会被忽略，所以只对已有证书的对端发。
+async fn push_blob_have(inner: &Arc<Inner>, peer: &PeerInfo) {
+    let Some(cert) = &peer.cert else {
+        return;
+    };
+    let hashes = match inner.store.held_blobs_authored_by_user(&cert.user) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(peer = %peer.device, error = %e, "failed to list held blobs for BlobHave push");
+            return;
+        }
+    };
+    for chunk in hashes.chunks(BLOB_HAVE_BATCH) {
+        let frame = Frame::BlobHave(lanmsg_proto::types::BlobHave {
+            hashes: chunk.to_vec(),
+        });
+        if inner.conns.send(&peer.device, frame).await.is_err() {
+            return;
         }
     }
 }

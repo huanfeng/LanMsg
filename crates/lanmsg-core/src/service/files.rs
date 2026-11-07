@@ -80,6 +80,7 @@ pub(crate) async fn delivered_local_paths(
 /// `blob_holders` 里。
 /// - DM：对端用户的全部设备；自设备会话：本人用户除本机外的全部设备；其他类型会话
 ///   （访客、LocalSend、中转站）无法判定成员，一律不算送达。
+/// - 同一哈希只要还被别人发出的消息引用就不算送达（本地只有一个副本）。
 /// - 没有任何接收设备（如只有本机的自设备会话）不算送达：之后加入的设备还需要这份文件。
 /// - 成员的某台设备从未下载（含从未上线）就会一直挡住，直到它下载或被吊销；
 ///   这是有意的保守取舍——绝不把对端尚未取走的文件判为可删。
@@ -119,7 +120,9 @@ fn blob_delivered(
             .get_device(&mb.msg.author)?
             .is_some_and(|d| d.user == *self_user);
         if !own {
-            continue;
+            // 同一哈希也被别人的消息引用：本地只有这一个副本，删了对方消息里的
+            // 同一个文件也打不开，保守地不算送达。
+            return Ok(false);
         }
         any_own = true;
         let Some(conv) = store.get_conversation(&mb.conv)? else {
@@ -556,6 +559,39 @@ mod tests {
         let h = send_file(&s, peer.devices[0], 1, conv, 7, "/out/a.bin");
         s.add_holder(&h, &peer.devices[0], 1).unwrap();
         assert!(delivered(&s, &me, "/out").is_empty());
+    }
+
+    /// 同一哈希也被对端自己的消息引用（本地只有一个副本）：不算送达。
+    #[test]
+    fn blob_also_referenced_by_peer_message_is_not_delivered() {
+        let s = Store::open_in_memory().unwrap();
+        let me = party(&s, 1, 1, true);
+        let peer = party(&s, 2, 1, false);
+        let conv = new_conv(&s, 9, ConvKindRow::Dm, Some(peer.user));
+        let h = send_file(&s, me.devices[0], 1, conv, 7, "/out/a.bin");
+        s.add_holder(&h, &peer.devices[0], 1).unwrap();
+        assert_eq!(delivered(&s, &me, "/out").len(), 1);
+        // 对端后来在同一会话发了同一个文件（摄取时其设备也会被记为持有者）。
+        send_file(&s, peer.devices[0], 1, conv, 7, "/out/a.bin");
+        assert!(delivered(&s, &me, "/out").is_empty());
+    }
+
+    /// 同一哈希发给两个会话，一个满足、一个不满足：不送达。
+    #[test]
+    fn same_blob_in_two_convs_needs_both_satisfied() {
+        let s = Store::open_in_memory().unwrap();
+        let me = party(&s, 1, 1, true);
+        let p = party(&s, 2, 1, false);
+        let q = party(&s, 3, 1, false);
+        let conv_p = new_conv(&s, 9, ConvKindRow::Dm, Some(p.user));
+        let conv_q = new_conv(&s, 10, ConvKindRow::Dm, Some(q.user));
+        let h = send_file(&s, me.devices[0], 1, conv_p, 7, "/out/a.bin");
+        send_file(&s, me.devices[0], 2, conv_q, 7, "/out/a.bin");
+        // 只有 P 的设备持有：Q 会话不满足，且 P 持有不能替 Q 作数。
+        s.add_holder(&h, &p.devices[0], 1).unwrap();
+        assert!(delivered(&s, &me, "/out").is_empty());
+        s.add_holder(&h, &q.devices[0], 1).unwrap();
+        assert_eq!(delivered(&s, &me, "/out").len(), 1);
     }
 
     #[test]
