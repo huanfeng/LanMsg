@@ -31,7 +31,7 @@ use rustls::pki_types::ServerName;
 
 use crate::error::CoreError;
 use crate::net::timing::{self, NetTiming};
-use crate::net::tls::{make_tls_configs, peer_device_id, TLS_SNI};
+use crate::net::tls::{make_tls_configs, make_tls_configs_expecting, peer_device_id, TLS_SNI};
 
 /// 对端连接信息。
 #[derive(Clone, Debug)]
@@ -151,7 +151,8 @@ impl Connection {
     ) -> Result<(PeerInfo, Arc<Connection>), CoreError> {
         let stream = TcpStream::connect(addr).await.map_err(CoreError::Io)?;
         let peer_addr = stream.peer_addr().map_err(CoreError::Io)?;
-        let (_server_config, client_config) = make_tls_configs(device_key)?;
+        // 带期望设备时，握手内（客户端证书发出前）就校验服务端身份。
+        let (_server_config, client_config) = make_tls_configs_expecting(device_key, expect)?;
         let domain = ServerName::try_from(TLS_SNI.as_bytes())
             .map_err(|e| CoreError::Tls(format!("非法 SNI: {e}")))?;
         let connector = TlsConnector::from(client_config);
@@ -161,8 +162,7 @@ impl Connection {
             .map_err(|e| CoreError::Tls(e.to_string()))?;
         let (_io, session) = tls_stream.get_ref();
         let peer_device = peer_device_id(session).map_err(|e| CoreError::Tls(e.to_string()))?;
-        // 按已知地址重连时，对端必须就是期望的设备：地址可能已被别的主机占用。
-        // 在发送通道字节与 Hello（含本机证书、显示名）之前就断开，不泄露本机身份。
+        // 第二道防线：TLS 层已按 expect 校验过；这里再核对一次。
         if expect.is_some_and(|e| e != peer_device) {
             return Err(CoreError::Rejected(
                 "peer device does not match the expected device".into(),

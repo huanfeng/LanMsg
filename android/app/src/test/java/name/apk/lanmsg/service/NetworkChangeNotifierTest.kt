@@ -56,4 +56,18 @@ class NetworkChangeNotifierTest {
         notifier.stop()
         assertEquals(0, shadowOf(cm).networkCallbacks.size)
     }
+
+    @Test fun ipv6_privacy_address_rotation_is_not_a_change() {
+        val before = LinkSnapshot.fromStrings(
+            listOf("192.168.1.2/24", "2409:8a00::1111/64"),
+            listOf("192.168.1.0/24 -> 0.0.0.0 wlan0", "::/0 -> fe80::1 wlan0"),
+        )
+        val after = LinkSnapshot.fromStrings(
+            listOf("192.168.1.2/24", "2409:8a00::2222/64"),
+            listOf("192.168.1.0/24 -> 0.0.0.0 wlan0", "::/0 -> fe80::1 wlan0"),
+        )
+        assertFalse(LinkSnapshot.changed(before, after))
+        val moved = LinkSnapshot.fromStrings(listOf("10.0.0.5/24", "2409:8a00::2222/64"), emptyList())
+        assertTrue(LinkSnapshot.changed(before, moved))
+    }
 }

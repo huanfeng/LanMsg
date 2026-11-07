@@ -10,4 +10,4 @@ pub mod tls;
 pub use conn::{ConnEvent, DataHandler, DataStream, HelloInfo, PeerInfo};
 pub use manager::ConnManager;
 pub use path::{classify, local_ifaces, LocalIface};
-pub use tls::{make_tls_configs, peer_device_id, TLS_SNI};
+pub use tls::{make_tls_configs, make_tls_configs_expecting, peer_device_id, TLS_SNI};

@@ -20,6 +20,7 @@ use lanmsg_core::discovery::{DiscoveryMode, MemoryBus};
 use lanmsg_core::keystore::FileKeyStore;
 use lanmsg_core::platform::PlatformHooks;
 use lanmsg_core::{Service, ServiceConfig};
+use lanmsg_proto::ids::DeviceId;
 
 /// 测试节点：Service + 数据目录 + 事件接收端 + user_id 缓存。
 pub struct TestNode {
@@ -325,4 +326,60 @@ pub async fn pair(a: &mut TestNode, b: &mut TestNode) {
         5,
     )
     .await;
+}
+
+// ---- 受信重连测试共用 ----
+
+pub async fn sees_peer(n: &TestNode, device: &str) -> bool {
+    matches!(
+        n.call(Request::ListPeers).await,
+        Response::Peers { value } if value.iter().any(|p| p.device_id == device)
+    )
+}
+
+pub async fn sees_no_peer(n: &TestNode, device: &str) -> bool {
+    !sees_peer(n, device).await
+}
+
+pub fn dev(id: &str) -> DeviceId {
+    DeviceId::from_hex(id).expect("非法 device_id")
+}
+
+/// 两个已初始化节点：A 拨 B（不登记静态对端），结为联系人，等双方互见。
+pub async fn befriended_pair() -> (TestNode, TestNode, String, String) {
+    let mut a = node_offline().await;
+    let mut b = node_offline().await;
+    a.init_first("甲").await;
+    b.init_first("乙").await;
+    let (a_dev, b_dev) = (a.device_id().await, b.device_id().await);
+    a.svc
+        .connect_for_test(b.svc.local_addr())
+        .await
+        .expect("拨号失败");
+    wait_until(
+        || async { sees_peer(&a, &b_dev).await && sees_peer(&b, &a_dev).await },
+        5,
+    )
+    .await;
+    a.call(Request::RequestContact { user: b.user_id() }).await;
+    let ev = b
+        .wait_event(
+            |e| matches!(e, Event::IncomingRequest { request } if matches!(request.kind, RequestKind::Contact)),
+            5,
+        )
+        .await;
+    let request = match ev {
+        Event::IncomingRequest { request } => request.request,
+        other => panic!("期望 IncomingRequest，实际 {other:?}"),
+    };
+    b.call(Request::RespondRequest {
+        request,
+        action: RequestAction::AddContact,
+    })
+    .await;
+    a.wait_event(|e| matches!(e, Event::ContactsChanged), 5)
+        .await;
+    b.wait_event(|e| matches!(e, Event::ContactsChanged), 5)
+        .await;
+    (a, b, a_dev, b_dev)
 }

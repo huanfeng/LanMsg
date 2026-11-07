@@ -10,9 +10,12 @@ import android.util.Log
 /** 链路的地址与路由快照；用于判断 LinkProperties 回调是否真的带来了变化。 */
 data class LinkSnapshot(val addresses: Set<String>, val routes: Set<String>) {
     companion object {
-        fun of(lp: LinkProperties) = LinkSnapshot(
-            addresses = lp.linkAddresses.map { it.toString() }.toSet(),
-            routes = lp.routes.map { it.toString() }.toSet(),
+        fun of(lp: LinkProperties) = fromStrings(lp.linkAddresses.map { it.toString() }, lp.routes.map { it.toString() })
+
+        /** 只取 IPv4（含 IPv6 冒号的条目丢弃）：IPv6 隐私 / 临时地址会定期轮换，不应反复触发重拨。 */
+        fun fromStrings(addresses: Collection<String>, routes: Collection<String>) = LinkSnapshot(
+            addresses = addresses.filterNot { ':' in it }.toSet(),
+            routes = routes.filterNot { ':' in it }.toSet(),
         )
 
         /** 有基线且与之不同才算变化；第一次见到该网络只记基线（紧随 onAvailable，已通知过）。 */

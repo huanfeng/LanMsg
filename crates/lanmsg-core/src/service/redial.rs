@@ -34,9 +34,49 @@ const NET_DEBOUNCE: Duration = Duration::from_secs(2);
 /// 发现表条目在此窗口内才视为比持久化地址更可信（3 个通告周期）。
 const FRESH_DISCOVERY: Duration = Duration::from_secs(3 * ANNOUNCE_INTERVAL.as_secs());
 
-/// 重连状态：每个受信设备一个任务（带专属唤醒信号），以及网络变化信号与尝试计数。
+/// 每个重连任务的专属信号：唤醒、是否要求清零退避、最近一次发现地址。
+struct TaskSignals {
+    notify: Notify,
+    reset: AtomicBool,
+    /// 自上次消费以来收到过该设备的发现事件（区别于断开事件的唤醒）。
+    discovered: AtomicBool,
+    last_discovered: Mutex<Option<SocketAddr>>,
+}
+
+impl TaskSignals {
+    fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+            reset: AtomicBool::new(false),
+            discovered: AtomicBool::new(false),
+            last_discovered: Mutex::new(None),
+        }
+    }
+
+    /// 收到该设备的发现事件：只唤醒；仅当发现地址相对上次变了才要求清零退避
+    /// （否则每 30 秒一次的通告会让退避上限永远用不上）。返回是否要求清零。
+    fn on_discovered(&self, addr: Option<SocketAddr>) -> bool {
+        let changed = {
+            let mut last = self.last_discovered.lock().unwrap();
+            let changed = addr.is_some() && *last != addr;
+            if changed {
+                *last = addr;
+            }
+            changed
+        };
+        if changed {
+            self.reset.store(true, Ordering::SeqCst);
+        }
+        self.discovered.store(true, Ordering::SeqCst);
+        self.notify.notify_one();
+        changed
+    }
+}
+
+/// 重连状态：每个受信设备一个任务（带专属信号），以及网络变化信号与计数。
 pub(crate) struct RedialState {
-    tasks: Mutex<HashMap<DeviceId, Arc<Notify>>>,
+    tasks: Mutex<HashMap<DeviceId, Arc<TaskSignals>>>,
+    loops: AtomicU64,
     /// 网络变化（已去抖）：清零所有退避，立即重拨。
     net: watch::Sender<u64>,
     net_pending: AtomicBool,
@@ -47,6 +87,7 @@ impl RedialState {
     pub(crate) fn new() -> Self {
         Self {
             tasks: Mutex::new(HashMap::new()),
+            loops: AtomicU64::new(0),
             net: watch::channel(0).0,
             net_pending: AtomicBool::new(false),
             attempts: AtomicU64::new(0),
@@ -55,6 +96,11 @@ impl RedialState {
 
     pub(crate) fn attempts(&self) -> u64 {
         self.attempts.load(Ordering::SeqCst)
+    }
+
+    /// 重连任务循环迭代总数（测试用：检测空转）。
+    pub(crate) fn loop_iterations(&self) -> u64 {
+        self.loops.load(Ordering::SeqCst)
     }
 
     /// 已触发的（去抖后）网络变化次数。
@@ -89,14 +135,18 @@ pub(crate) fn pick_addr(
 
 /// 连接断开：只唤醒该设备自己的任务（不存在则忽略，随后 ensure_task 会补建）。
 pub(crate) fn wake(inner: &Inner, device: &DeviceId) {
-    if let Some(n) = inner.redial.tasks.lock().unwrap().get(device) {
-        n.notify_one();
+    if let Some(sig) = inner.redial.tasks.lock().unwrap().get(device) {
+        sig.notify.notify_one();
     }
 }
 
-/// 发现事件：该设备的任务若在退避，立即重试。
+/// 发现事件（须在写入发现表之后调用）：唤醒该设备的任务；地址变了才清零退避。
 pub(crate) fn kick_device(inner: &Inner, device: &DeviceId) {
-    wake(inner, device);
+    let sig = inner.redial.tasks.lock().unwrap().get(device).cloned();
+    if let Some(sig) = sig {
+        let addr = inner.discovered.addr_with_age(device).map(|(a, _)| a);
+        sig.on_discovered(addr);
+    }
 }
 
 /// 平台通知网络变化：2 秒去抖后清零退避立即重拨，并重新通告一次。
@@ -153,16 +203,16 @@ pub(crate) fn ensure_task(inner: &Arc<Inner>, device: DeviceId) {
     if !is_trusted(inner, &device) {
         return;
     }
-    let notify = {
+    let signals = {
         let mut tasks = inner.redial.tasks.lock().unwrap();
         if tasks.contains_key(&device) {
             return;
         }
-        let n = Arc::new(Notify::new());
+        let n = Arc::new(TaskSignals::new());
         tasks.insert(device, n.clone());
         n
     };
-    tokio::spawn(redial_task(inner.clone(), device, notify));
+    tokio::spawn(redial_task(inner.clone(), device, signals));
 }
 
 /// 启动时为库里所有已知地址的受信设备恢复重连任务。
@@ -204,67 +254,135 @@ fn may_dial(inner: &Inner, device: &DeviceId) -> bool {
         .is_some_and(|r| r.user == self_user)
 }
 
-/// 目标地址是否与本机某网卡同网段（含回环）。不同网段（换了 Wi-Fi）不拨，
-/// 以免向旧地址上碰巧在监听的陌生主机发起 TLS。
+/// 目标地址是否与本机某网卡同网段（含回环）。只用来调节节奏：不同网段（可能已换网络）
+/// 不主动高频拨号，等网络变化或该设备的发现事件再试一次；身份由 TLS 握手内的
+/// 期望设备校验保证，不依赖网段。
 fn on_local_subnet(addr: &SocketAddr) -> bool {
+    #[cfg(feature = "test-hooks")]
+    if FORCE_OFF_SUBNET.load(Ordering::SeqCst) {
+        return false;
+    }
     classify(addr.ip(), &local_ifaces(), false) == PathClass::Lan
 }
 
-async fn redial_task(inner: Arc<Inner>, device: DeviceId, wake_me: Arc<Notify>) {
+/// 测试钩子：让所有地址都被视为不在本机网段。
+#[cfg(feature = "test-hooks")]
+static FORCE_OFF_SUBNET: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "test-hooks")]
+pub(crate) fn force_off_subnet_for_tests(on: bool) {
+    FORCE_OFF_SUBNET.store(on, Ordering::SeqCst);
+}
+
+/// 注意这里用 `is_connected`（连接表里有）而不是 `is_connected_alive`：静默失效但仍登记的连接
+/// 交给既有机制处理（对端拨入时按空闲阈值替换、空闲超时后自清理发 Down），重连任务只在
+/// 连接真正消失（Down）或从未连上时介入，避免与静态对端 / 发现拨号抢着替换同一条连接。
+async fn redial_task(inner: Arc<Inner>, device: DeviceId, signals: Arc<TaskSignals>) {
     let mut net = inner.redial.net.subscribe();
-    // 已连续失败（或抖动）的次数，决定下一次等待时长。
-    let mut attempt: u32 = 0;
+    // 已连续失败（或抖动）的次数，决定下一次等待时长。任务常在连接刚断开时才创建，
+    // 从 1 开始：首次拨号前先退避 0.5–1s，让正在进行的替换 / 对端拨入 / 静态对端重拨先落地。
+    let mut attempt: u32 = 1;
     let mut alive_since: Option<Instant> = None;
+    // 不在同网段的地址：先等到网络变化 / 发现事件（或最长退避）再拨一次。
+    let mut off_subnet_released = false;
     while !inner.conns.is_shut_down() {
+        inner.redial.loops.fetch_add(1, Ordering::SeqCst);
         if !is_trusted(&inner, &device) {
             break;
         }
-        if inner.conns.is_connected_alive(&device) {
+        if inner.conns.is_connected(&device) {
             alive_since.get_or_insert_with(Instant::now);
             tokio::select! {
                 _ = tokio::time::sleep(IDLE_POLL) => {}
-                _ = wake_me.notified() => {}
+                _ = signals.notify.notified() => {}
                 _ = net.changed() => attempt = 0,
                 _ = inner.conns.wait_shutdown() => break,
             }
             continue;
         }
-        if alive_since
-            .take()
-            .is_some_and(|t| t.elapsed() >= STABLE_AFTER)
-        {
-            attempt = 0;
+        if let Some(t) = alive_since.take() {
+            // 刚丢了连接：先退避一小段（0.5–1s）再拨，让正在进行的替换 / 对端拨入 / 静态
+            // 对端重拨先落地，避免我们和它们同时拨号造成重复的 Down / Up。
+            attempt = if t.elapsed() >= STABLE_AFTER {
+                1
+            } else {
+                attempt.max(1)
+            };
         }
         if attempt > 0 {
             let wait = backoff(attempt - 1, rand::random::<f64>());
             tracing::debug!(peer = %device, attempt, wait_ms = wait.as_millis() as u64, "redial backing off");
-            tokio::select! {
-                _ = tokio::time::sleep(wait) => {}
-                _ = wake_me.notified() => attempt = 0,
-                _ = net.changed() => attempt = 0,
-                _ = inner.conns.wait_shutdown() => break,
+            let sleep = tokio::time::sleep(wait);
+            tokio::pin!(sleep);
+            loop {
+                tokio::select! {
+                    _ = &mut sleep => break,
+                    // 断开事件的唤醒不算；该设备再次被发现才提前再拨一次（地址没变不改退避，变了才清零）。
+                    _ = signals.notify.notified() => {
+                        if signals.discovered.swap(false, Ordering::SeqCst) {
+                            if signals.reset.swap(false, Ordering::SeqCst) {
+                                attempt = 0;
+                            }
+                            break;
+                        }
+                    }
+                    _ = net.changed() => {
+                        attempt = 0;
+                        break;
+                    }
+                    _ = inner.conns.wait_shutdown() => break,
+                }
             }
             // 退避期间设备可能被吊销 / 删除、连接可能已恢复：拨号前重新判断。
             if inner.conns.is_shut_down() || !is_trusted(&inner, &device) {
                 break;
             }
-            if inner.conns.is_connected_alive(&device) {
+            if inner.conns.is_connected(&device) {
                 continue;
             }
         }
-        let addr = known_addr(&inner, &device);
-        let dialable = addr.is_some_and(|a| on_local_subnet(&a)) && may_dial(&inner, &device);
-        let Some(addr) = addr.filter(|_| dialable) else {
-            // 没有地址、不在同一网段或暂不允许外联：不算失败，长间隔等待状态变化。
+        // 暂不允许外联（隐身 / 未初始化）：长间隔等待，状态变化时由网络 / 发现事件唤醒。
+        if !may_dial(&inner, &device) {
             attempt = 0;
             tokio::select! {
                 _ = tokio::time::sleep(IDLE_POLL) => {}
-                _ = wake_me.notified() => {}
+                _ = signals.notify.notified() => {}
+                _ = net.changed() => {}
+                _ = inner.conns.wait_shutdown() => break,
+            }
+            continue;
+        }
+        let Some(addr) = known_addr(&inner, &device) else {
+            // 还没有任何地址：只等发现事件或网络变化，不轮询。
+            attempt = 0;
+            tokio::select! {
+                _ = signals.notify.notified() => {}
                 _ = net.changed() => {}
                 _ = inner.conns.wait_shutdown() => break,
             }
             continue;
         };
+        if !on_local_subnet(&addr) && !off_subnet_released {
+            // 不在同网段：用最长退避间隔，网络变化或该设备的发现事件到来时立即试一次。
+            let sleep = tokio::time::sleep(REDIAL_MAX);
+            tokio::pin!(sleep);
+            loop {
+                tokio::select! {
+                    _ = &mut sleep => break,
+                    // 断开事件的唤醒不算：只有该设备再次被发现才提前试一次。
+                    _ = signals.notify.notified() => {
+                        if signals.discovered.swap(false, Ordering::SeqCst) {
+                            break;
+                        }
+                    }
+                    _ = net.changed() => break,
+                    _ = inner.conns.wait_shutdown() => break,
+                }
+            }
+            off_subnet_released = true;
+            continue;
+        }
+        off_subnet_released = false;
         // 与发现触发的拨号共用在途登记：同一地址不并发两次 TLS。
         if !inner.dialing.lock().unwrap().insert(addr) {
             attempt = attempt.saturating_add(1);
@@ -319,6 +437,19 @@ mod tests {
         assert_eq!(backoff(3, 1.0), Duration::from_secs(8));
         // 越界的抖动值被夹紧
         assert_eq!(backoff(3, 5.0), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn unchanged_discovery_address_does_not_reset_backoff() {
+        let sig = TaskSignals::new();
+        let a = Some(addr("10.0.0.2:7000"));
+        assert!(sig.on_discovered(a), "首次见到地址：清零");
+        assert!(!sig.on_discovered(a), "地址不变的通告：只唤醒，不清零");
+        assert!(
+            sig.on_discovered(Some(addr("10.0.0.3:7000"))),
+            "地址变了：清零"
+        );
+        assert!(!sig.on_discovered(None), "没有地址信息：不清零");
     }
 
     #[test]

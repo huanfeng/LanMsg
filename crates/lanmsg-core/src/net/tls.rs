@@ -116,19 +116,34 @@ impl ServerClientCertVerifier for AnyClientCertVerifier {
     }
 }
 
-/// 接受任意服务器证书，但用 verify_tls13_signature 校验握手签名。
+/// 接受任意服务器证书（设备自签、身份即公钥），但用 verify_tls13_signature 校验握手签名。
+/// `expect` 有值时，服务端证书里的设备公钥必须等于它，否则握手失败。
+///
+/// TLS 1.3 里客户端在校验完服务端的证书与签名之后才发送自己的证书，所以这里拒绝时
+/// 客户端证书（即本机设备公钥）一个字节都没有发出去。
 #[derive(Debug)]
-struct AnyServerCertVerifier;
+struct AnyServerCertVerifier {
+    expect: Option<DeviceId>,
+}
 
 impl ClientServerCertVerifier for AnyServerCertVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &CertificateDer<'_>,
+        end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName,
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<RustlsServerCertVerified, TlsError> {
+        if let Some(expect) = self.expect {
+            let actual = device_id_from_cert(end_entity)
+                .map_err(|e| TlsError::General(format!("cannot read server device id: {e}")))?;
+            if actual != expect {
+                return Err(TlsError::General(
+                    "server device does not match the expected device".into(),
+                ));
+            }
+        }
         Ok(RustlsServerCertVerified::assertion())
     }
 
@@ -167,6 +182,14 @@ impl ClientServerCertVerifier for AnyServerCertVerifier {
 pub fn make_tls_configs(
     device: &DeviceKey,
 ) -> Result<(Arc<rustls::ServerConfig>, Arc<rustls::ClientConfig>), CoreError> {
+    make_tls_configs_expecting(device, None)
+}
+
+/// 同 [`make_tls_configs`]，但客户端配置要求服务端设备为 `expect`（在客户端证书发出前校验）。
+pub fn make_tls_configs_expecting(
+    device: &DeviceKey,
+    expect: Option<DeviceId>,
+) -> Result<(Arc<rustls::ServerConfig>, Arc<rustls::ClientConfig>), CoreError> {
     let (cert_der, key_der) = build_self_signed_cert(device)?;
 
     let server_config =
@@ -182,7 +205,7 @@ pub fn make_tls_configs(
     let client_config =
         rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AnyServerCertVerifier))
+            .with_custom_certificate_verifier(Arc::new(AnyServerCertVerifier { expect }))
             .with_client_auth_cert(
                 vec![CertificateDer::from(cert_der)],
                 PrivateKeyDer::try_from(key_der)
@@ -199,7 +222,11 @@ pub fn peer_device_id(conn: &rustls::CommonState) -> Result<DeviceId, CoreError>
         .peer_certificates()
         .ok_or_else(|| CoreError::Tls("对端未提供证书".into()))?;
 
-    let end_entity = &certs[0];
+    device_id_from_cert(&certs[0])
+}
+
+/// 从设备自签证书（DER）中取 Ed25519 公钥，即设备 ID。
+fn device_id_from_cert(end_entity: &[u8]) -> Result<DeviceId, CoreError> {
     let (_remain, x509_cert) = parse_x509_certificate(end_entity)
         .map_err(|e| CoreError::Tls(format!("解析对端证书失败: {e}")))?;
 
@@ -261,5 +288,107 @@ mod tests {
         assert_eq!(id, server_device.device_id());
 
         server_handle.await.unwrap();
+    }
+
+    /// 记录是否收到过客户端证书的服务端校验器。
+    #[derive(Debug)]
+    struct RecordingClientVerifier {
+        got_client_cert: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ServerClientCertVerifier for RecordingClientVerifier {
+        fn offer_client_auth(&self) -> bool {
+            true
+        }
+        fn client_auth_mandatory(&self) -> bool {
+            true
+        }
+        fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+            &[]
+        }
+        fn verify_client_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            intermediates: &[CertificateDer<'_>],
+            now: UnixTime,
+        ) -> Result<ServerClientCertVerified, TlsError> {
+            self.got_client_cert
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            AnyClientCertVerifier.verify_client_cert(end_entity, intermediates, now)
+        }
+        fn verify_tls12_signature(
+            &self,
+            m: &[u8],
+            c: &CertificateDer<'_>,
+            d: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, TlsError> {
+            AnyClientCertVerifier.verify_tls12_signature(m, c, d)
+        }
+        fn verify_tls13_signature(
+            &self,
+            m: &[u8],
+            c: &CertificateDer<'_>,
+            d: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, TlsError> {
+            AnyClientCertVerifier.verify_tls13_signature(m, c, d)
+        }
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![SignatureScheme::ED25519]
+        }
+    }
+
+    /// 用记录校验器起一个服务端，客户端以 `expect` 拨号；返回 (客户端握手是否成功, 服务端是否收到过客户端证书)。
+    async fn handshake_with_expectation(
+        server_device: &DeviceKey,
+        client_device: &DeviceKey,
+        expect: Option<DeviceId>,
+    ) -> (bool, bool) {
+        let (cert_der, key_der) = build_self_signed_cert(server_device).unwrap();
+        let got = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_config =
+            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                .with_client_cert_verifier(Arc::new(RecordingClientVerifier {
+                    got_client_cert: got.clone(),
+                }))
+                .with_single_cert(
+                    vec![CertificateDer::from(cert_der)],
+                    PrivateKeyDer::try_from(key_der).unwrap(),
+                )
+                .unwrap();
+        let (_, client_config) = make_tls_configs_expecting(client_device, expect).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = tokio_rustls::TlsAcceptor::from(Arc::new(server_config))
+                .accept(stream)
+                .await;
+        });
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let ok = tokio_rustls::TlsConnector::from(client_config)
+            .connect(ServerName::try_from(TLS_SNI.as_bytes()).unwrap(), stream)
+            .await
+            .is_ok();
+        server.await.unwrap();
+        (ok, got.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn wrong_expected_server_fails_before_the_client_certificate_is_sent() {
+        let (server, client) = (DeviceKey::generate(), DeviceKey::generate());
+        let other = DeviceKey::generate().device_id();
+        let (ok, server_saw_client_cert) =
+            handshake_with_expectation(&server, &client, Some(other)).await;
+        assert!(!ok, "期望设备不符时握手必须失败");
+        assert!(!server_saw_client_cert, "服务端不应收到客户端证书");
+    }
+
+    #[tokio::test]
+    async fn expected_server_completes_the_handshake_and_sends_the_certificate() {
+        let (server, client) = (DeviceKey::generate(), DeviceKey::generate());
+        let (ok, server_saw_client_cert) =
+            handshake_with_expectation(&server, &client, Some(server.device_id())).await;
+        assert!(ok);
+        assert!(server_saw_client_cert);
     }
 }

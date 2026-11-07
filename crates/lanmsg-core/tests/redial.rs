@@ -7,65 +7,13 @@ mod common;
 
 use std::time::Duration;
 
-use lanmsg_api::types::{Event, Request, RequestAction, RequestKind, Response};
+use lanmsg_api::types::{Event, Request};
 use lanmsg_core::platform::PlatformHooks;
-use lanmsg_proto::ids::DeviceId;
 
-use common::{node_offline, node_offline_with, wait_until, TestNode};
-
-async fn sees_peer(n: &TestNode, device: &str) -> bool {
-    matches!(
-        n.call(Request::ListPeers).await,
-        Response::Peers { value } if value.iter().any(|p| p.device_id == device)
-    )
-}
-
-async fn sees_no_peer(n: &TestNode, device: &str) -> bool {
-    !sees_peer(n, device).await
-}
-
-fn dev(id: &str) -> DeviceId {
-    DeviceId::from_hex(id).expect("非法 device_id")
-}
-
-/// 两个已初始化节点：A 拨 B（不登记静态对端），结为联系人，等双方互见。
-async fn befriended_pair() -> (TestNode, TestNode, String, String) {
-    let mut a = node_offline().await;
-    let mut b = node_offline().await;
-    a.init_first("甲").await;
-    b.init_first("乙").await;
-    let (a_dev, b_dev) = (a.device_id().await, b.device_id().await);
-    a.svc
-        .connect_for_test(b.svc.local_addr())
-        .await
-        .expect("拨号失败");
-    wait_until(
-        || async { sees_peer(&a, &b_dev).await && sees_peer(&b, &a_dev).await },
-        5,
-    )
-    .await;
-    a.call(Request::RequestContact { user: b.user_id() }).await;
-    let ev = b
-        .wait_event(
-            |e| matches!(e, Event::IncomingRequest { request } if matches!(request.kind, RequestKind::Contact)),
-            5,
-        )
-        .await;
-    let request = match ev {
-        Event::IncomingRequest { request } => request.request,
-        other => panic!("期望 IncomingRequest，实际 {other:?}"),
-    };
-    b.call(Request::RespondRequest {
-        request,
-        action: RequestAction::AddContact,
-    })
-    .await;
-    a.wait_event(|e| matches!(e, Event::ContactsChanged), 5)
-        .await;
-    b.wait_event(|e| matches!(e, Event::ContactsChanged), 5)
-        .await;
-    (a, b, a_dev, b_dev)
-}
+use common::{
+    befriended_pair, dev, node_offline, node_offline_with, sees_no_peer, sees_peer, wait_until,
+    TestNode,
+};
 
 #[tokio::test]
 async fn trusted_peers_reconnect_after_disconnect_without_discovery() {
@@ -213,22 +161,28 @@ async fn invisible_does_not_dial_non_self_trusted_devices() {
     wait_until(|| async { sees_no_peer(&a, &b_dev).await }, 8).await;
     tokio::time::sleep(Duration::from_millis(3000)).await;
     assert_eq!(a.svc.redial_attempts_for_test(), 0, "隐身时不应外联联系人");
+    // 不能空转：隐身期间任务只按长间隔醒来（旧缺陷是每秒甚至更快地空转）。
+    let spins = a.svc.redial_loop_iterations_for_test();
+    tokio::time::sleep(Duration::from_millis(3000)).await;
+    assert!(
+        a.svc.redial_loop_iterations_for_test() - spins <= 1,
+        "隐身期间重连任务在空转"
+    );
 }
 
 #[tokio::test]
-async fn address_outside_local_subnets_is_not_dialed() {
+async fn fast_path_does_not_accept_a_connection_to_a_different_device() {
     let (a, b, _a_dev, b_dev) = befriended_pair().await;
-    // 把 B 的持久化地址改成不在任何本机网段的地址（模拟换了网络）。
-    let store = a.svc.store_for_test();
-    let mut row = store.get_device(&dev(&b_dev)).unwrap().expect("B 应已入库");
-    row.last_addr = Some("203.0.113.9:7000".to_string());
-    store.upsert_device(&row).unwrap();
-    b.svc.shutdown().await;
-    wait_until(|| async { sees_no_peer(&a, &b_dev).await }, 8).await;
-    tokio::time::sleep(Duration::from_millis(3000)).await;
-    assert_eq!(
-        a.svc.redial_attempts_for_test(),
-        0,
-        "不同网段的地址不应被拨号"
+    // A 与 B 已连上；要求同一地址上是另一个设备时，不能走“已连接”快速路径直接成功。
+    // local_addr() 是 0.0.0.0:port；快速路径按连接表里的 127.0.0.1:port 匹配。
+    let b_addr = std::net::SocketAddr::new(
+        std::net::Ipv4Addr::LOCALHOST.into(),
+        b.svc.local_addr().port(),
     );
+    let other = dev(&node_offline().await.device_id().await);
+    let r = a.svc.connect_expecting_for_test(b_addr, other).await;
+    assert!(r.is_err(), "已连接的快速路径也必须核对期望设备");
+    // 期望正确时快速路径照常成功。
+    let ok = a.svc.connect_expecting_for_test(b_addr, dev(&b_dev)).await;
+    assert!(ok.is_ok());
 }

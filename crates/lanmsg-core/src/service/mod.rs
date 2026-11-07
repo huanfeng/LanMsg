@@ -386,6 +386,19 @@ impl Service {
         self.inner.redial.attempts()
     }
 
+    /// 测试辅助：让所有地址都被重连任务视为不在本机网段（进程级）。
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn force_off_subnet_for_test(on: bool) {
+        redial::force_off_subnet_for_tests(on);
+    }
+
+    /// 测试辅助：重连任务循环迭代总数（检测空转）。
+    #[doc(hidden)]
+    pub fn redial_loop_iterations_for_test(&self) -> u64 {
+        self.inner.redial.loop_iterations()
+    }
+
     /// 测试辅助：去抖后已触发的网络变化次数。
     #[doc(hidden)]
     pub fn redial_net_signals_for_test(&self) -> u64 {
