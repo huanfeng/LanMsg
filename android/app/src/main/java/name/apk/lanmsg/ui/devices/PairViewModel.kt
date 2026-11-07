@@ -2,7 +2,9 @@ package name.apk.lanmsg.ui.devices
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -43,8 +45,11 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
     /** 已发出 PairStart / PairJoin 但响应未回：期间同步拦截重复调用（扫码会连续回调）。仅主线程访问。 */
     private var requesting = false
 
-    /** 响应未回时先到的状态事件，拿到 session 后若匹配则补用。 */
-    private var early: Event.PairStatus? = null
+    /** 响应未回时先到的状态事件（按 session 保存最新一条），拿到 session 后取用匹配的，其余丢弃。仅主线程访问。 */
+    private val early = mutableMapOf<String, Event.PairStatus>()
+
+    /** PICK 模式下轮询候选设备的任务；离开 PICK（发起加入 / 重试 / 离开页面）时取消。 */
+    private var pollJob: Job? = null
 
     init {
         viewModelScope.launch { core.events.collect(::onEvent) }
@@ -60,7 +65,8 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
     /** 配对失败后重试：丢弃旧会话状态，重新开始。 */
     fun retry() {
         requesting = false
-        early = null
+        early.clear()
+        pollJob?.cancel()
         _state.update {
             it.copy(
                 method = PairMethod.QR, joinMode = JoinMode.SCAN, session = null, qrUri = null,
@@ -78,7 +84,7 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
             begin(PairMethod.SAS)
         } else {
             _state.update { it.copy(joinMode = JoinMode.PICK) }
-            loadCandidates()
+            startPolling()
         }
     }
 
@@ -111,11 +117,20 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
 
     fun setCameraGranted(v: Boolean) = _state.update { it.copy(cameraGranted = v) }
 
-    /** 离开页面：会话未结束则取消。可重复调用。 */
-    fun leave() {
-        cancelCurrent()
-        _state.update { it.copy(session = null) }
+    /** 手动刷新候选设备列表。 */
+    fun refreshCandidates() {
+        viewModelScope.launch { loadCandidates() }
     }
+
+    /** 离开页面：会话未结束则取消，并清掉会话状态。可重复调用。 */
+    fun leave() {
+        pollJob?.cancel()
+        cancelCurrent()
+        _state.update { it.copy(session = null, pairState = null) }
+    }
+
+    /** 页面真正离开（导航出栈）才会走到这里；配置变更（旋转、深色、语言）不会清理 ViewModel。 */
+    override fun onCleared() = leave()
 
     private fun cancelCurrent() {
         val s = _state.value
@@ -147,6 +162,7 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
     }
 
     private fun join(target: PairTarget) {
+        pollJob?.cancel()
         requesting = true
         _state.update { it.copy(error = null) }
         viewModelScope.launch {
@@ -162,8 +178,8 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
     }
 
     private fun onSession(session: String, qrUri: String?) {
-        val pending = early?.takeIf { it.session == session }
-        early = null
+        val pending = early[session]
+        early.clear()
         _state.update { it.copy(session = session, qrUri = qrUri, pairState = pending?.state, confirmSent = false) }
     }
 
@@ -173,27 +189,39 @@ class PairViewModel(private val core: CoreApi, val role: Role) : ViewModel() {
                 val cur = _state.value.session
                 when {
                     cur == e.session -> _state.update { it.copy(pairState = e.state) }
-                    cur == null && requesting -> early = e
+                    cur == null && requesting -> early[e.session] = e
                 }
             }
             is Event.PeerOnline, is Event.PeerOffline ->
-                if (role == Role.JOIN && _state.value.joinMode == JoinMode.PICK) loadCandidates()
+                if (role == Role.JOIN && _state.value.joinMode == JoinMode.PICK) viewModelScope.launch { loadCandidates() }
             else -> Unit
         }
     }
 
-    private fun loadCandidates() {
-        viewModelScope.launch {
-            try {
-                val peers = core.call<Response.Peers>(Request.ListPeers).value
-                _state.update { it.copy(candidates = peers.filter { p -> !p.isContact }.distinctBy { p -> p.deviceId }) }
-            } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+    private fun startPolling() {
+        pollJob?.cancel()
+        pollJob = viewModelScope.launch {
+            while (true) {
+                loadCandidates()
+                delay(POLL_MILLIS)
             }
+        }
+    }
+
+    /** 候选 = 已初始化（userId 非空）的其他设备；未初始化设备的 isMine/isContact 恒为 false，不能靠它们过滤。 */
+    private suspend fun loadCandidates() {
+        try {
+            val peers = core.call<Response.Peers>(Request.ListPeers).value
+            _state.update {
+                it.copy(candidates = peers.filter { p -> p.userId.isNotEmpty() && !p.isMine }.distinctBy { p -> p.deviceId })
+            }
+        } catch (e: ApiException) {
+            _state.update { it.copy(error = e.message ?: e.code.name) }
         }
     }
 
     companion object {
         const val QR_PREFIX = "lanmsg://pair?"
+        const val POLL_MILLIS = 3000L
     }
 }

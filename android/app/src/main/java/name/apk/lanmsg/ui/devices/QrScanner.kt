@@ -31,8 +31,11 @@ fun QrScanner(onResult: (String) -> Unit, modifier: Modifier = Modifier) {
     DisposableEffect(lifecycleOwner) {
         val executor = Executors.newSingleThreadExecutor()
         val future = ProcessCameraProvider.getInstance(context)
+        val mainExecutor = ContextCompat.getMainExecutor(context)
         var provider: ProcessCameraProvider? = null
+        var disposed = false // 仅主线程访问
         future.addListener({
+            if (disposed) return@addListener // 页面已离开：不再绑定，否则无人解绑
             val p = future.get()
             provider = p
             val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
@@ -46,11 +49,12 @@ fun QrScanner(onResult: (String) -> Unit, modifier: Modifier = Modifier) {
                 )
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
-                .also { it.setAnalyzer(executor, QrAnalyzer(onResult = { text -> latest.value(text) })) }
+                .also { it.setAnalyzer(executor, QrAnalyzer(onResult = { text -> mainExecutor.execute { if (!disposed) latest.value(text) } })) }
             p.unbindAll()
             p.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
-        }, ContextCompat.getMainExecutor(context))
+        }, mainExecutor)
         onDispose {
+            disposed = true
             provider?.unbindAll()
             executor.shutdown()
         }

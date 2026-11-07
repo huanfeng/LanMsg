@@ -125,7 +125,7 @@ fun DevicesContent(
                             )
                         }
                         if (!d.isSelf) PathBadge(d.path)
-                        StatusDot(d.online, Modifier.padding(start = 12.dp))
+                        StatusDot(isDeviceOnline(d), Modifier.padding(start = 12.dp))
                     }
                     HorizontalDivider(color = c.line)
                 }
@@ -141,3 +141,6 @@ fun DevicesContent(
         }
     }
 }
+
+/** core 按 peers 判断 online，本机不在 peers 中，恒为 false；本机视为在线。 */
+internal fun isDeviceOnline(d: DeviceView) = d.isSelf || d.online

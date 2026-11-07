@@ -22,4 +22,19 @@ class QrImageTest {
         val decoded = MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)))
         assertEquals(text, decoded.text)
     }
+
+    @Test fun long_text_still_decodes_and_has_white_quiet_zone() {
+        val text = "lanmsg://pair?" + "a=192.168.100.200:12345&".repeat(8) + "k=" + "Z".repeat(60)
+        val size = 600
+        val bmp = QrEncoder.encode(text, size)
+        val pixels = IntArray(size * size).also { bmp.getPixels(it, 0, size, 0, 0, size, size) }
+        // 最外圈（≥ 4 个模块宽的白边内）全白
+        val edge = size / 20
+        for (i in 0 until size) for (d in 0 until edge) {
+            assertEquals(0xFFFFFFFF.toInt(), pixels[d * size + i])
+            assertEquals(0xFFFFFFFF.toInt(), pixels[i * size + d])
+        }
+        val decoded = MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(RGBLuminanceSource(size, size, pixels))))
+        assertEquals(text, decoded.text)
+    }
 }

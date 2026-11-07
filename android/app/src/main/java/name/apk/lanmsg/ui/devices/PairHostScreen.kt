@@ -27,7 +27,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -60,7 +59,6 @@ fun PairHostScreen(onBack: () -> Unit, onDone: () -> Unit) {
     )
     val state by vm.state.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { vm.start() }
-    DisposableEffect(Unit) { onDispose { vm.leave() } }
     PairDoneEffect(state.pairState, onDone)
     PairHostContent(state, onBack, vm::switchToSas, vm::confirm, vm::retry)
 }
@@ -98,7 +96,7 @@ fun PairHostContent(
             val showQr = state.method == PairMethod.QR && state.qrUri != null &&
                 (state.pairState == null || state.pairState is PairStateDto.WaitingPeer)
             if (showQr) {
-                QrImage(state.qrUri.orEmpty(), size = 240.dp)
+                QrImage(state.qrUri.orEmpty())
                 Spacer(Modifier.height(16.dp))
                 Text(
                     stringResource(R.string.pair_host_hint),
@@ -169,6 +167,10 @@ internal fun PairProgress(state: PairViewModel.UiState, onConfirm: (Boolean) -> 
                 Button(onClick = { onConfirm(true) }, enabled = !state.confirmSent, modifier = Modifier.weight(1f)) {
                     Text(stringResource(R.string.pair_match))
                 }
+            }
+            if (state.confirmSent) {
+                Spacer(Modifier.height(16.dp))
+                Text(stringResource(R.string.pair_waiting), color = c.inkMuted, style = MaterialTheme.typography.bodyMedium)
             }
         }
         PairStateDto.Verifying -> Waiting(R.string.pair_verifying)

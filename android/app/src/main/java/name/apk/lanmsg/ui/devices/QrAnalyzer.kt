@@ -1,5 +1,6 @@
 package name.apk.lanmsg.ui.devices
 
+import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.google.zxing.BinaryBitmap
@@ -29,12 +30,15 @@ class QrAnalyzer(
             lastText = text
             lastAt = now
             onResult(text)
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "QR frame analysis failed", e) // 单帧异常不能让分析器崩溃
         } finally {
             image.close()
         }
     }
 
     companion object {
+        private const val TAG = "QrAnalyzer"
         private const val DEDUP_MILLIS = 2000L
 
         /** [y] 为亮度平面，行距 [rowStride]（>= width，相机帧常有行尾填充）；没有二维码返回 null。 */

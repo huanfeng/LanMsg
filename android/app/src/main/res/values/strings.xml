@@ -98,6 +98,7 @@
     <string name="pair_join_title">加入已有设备</string>
     <string name="pair_join_scan_hint">扫描已有设备上显示的二维码</string>
     <string name="pair_join_pick">选择要加入的设备</string>
+    <string name="pair_join_refresh">刷新</string>
     <string name="pair_need_camera">需要相机权限才能扫码</string>
     <string name="pair_grant_camera">授予权限</string>
     <string name="pair_verifying">正在验证…</string>

@@ -99,4 +99,10 @@ class DevicesViewModelTest {
         assertEquals("disk", vm.state.value.error)
         assertNull(vm.state.value.confirmRemove)
     }
+
+    @Test fun self_is_shown_online_even_though_core_reports_offline() {
+        assertEquals(true, isDeviceOnline(self.copy(online = false)))
+        assertEquals(false, isDeviceOnline(other))
+        assertEquals(true, isDeviceOnline(other.copy(online = true)))
+    }
 }

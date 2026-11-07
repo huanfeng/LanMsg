@@ -225,6 +225,7 @@
 | pair_join_title | 加入已有设备 |
 | pair_join_scan_hint | 扫描已有设备上显示的二维码 |
 | pair_join_pick | 选择要加入的设备 |
+| pair_join_refresh | 刷新 |
 | pair_need_camera | 需要相机权限才能扫码 |
 | pair_grant_camera | 授予权限 |
 | pair_verifying | 正在验证… |

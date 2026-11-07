@@ -1,7 +1,13 @@
 package name.apk.lanmsg.ui.devices
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -20,7 +26,12 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.core.app.ActivityCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -48,7 +59,14 @@ fun PairJoinScreen(onBack: () -> Unit, onDone: () -> Unit) {
         factory = viewModelFactory { initializer { PairViewModel(ServiceLocator.core, PairViewModel.Role.JOIN) } },
     )
     val state by vm.state.collectAsStateWithLifecycle()
-    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { vm.setCameraGranted(it) }
+    // 拒绝后系统不再弹窗（且无需解释）= 永久拒绝，只能去应用设置里开
+    var permanentlyDenied by remember { mutableStateOf(false) }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        vm.setCameraGranted(granted)
+        val activity = ctx.findActivity()
+        permanentlyDenied = !granted && activity != null &&
+            !ActivityCompat.shouldShowRequestPermissionRationale(activity, Manifest.permission.CAMERA)
+    }
     LaunchedEffect(Unit) {
         vm.start()
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -57,15 +75,27 @@ fun PairJoinScreen(onBack: () -> Unit, onDone: () -> Unit) {
             permission.launch(Manifest.permission.CAMERA)
         }
     }
-    DisposableEffect(Unit) { onDispose { vm.leave() } }
+    // 从应用设置回来后重新检查权限
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        vm.setCameraGranted(ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+    }
     PairDoneEffect(state.pairState, onDone)
     PairJoinContent(
         state = state,
         onBack = onBack,
         onSwitchToSas = vm::switchToSas,
-        onGrantCamera = { permission.launch(Manifest.permission.CAMERA) },
+        onGrantCamera = {
+            if (permanentlyDenied) {
+                ctx.startActivity(
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", ctx.packageName, null)),
+                )
+            } else {
+                permission.launch(Manifest.permission.CAMERA)
+            }
+        },
         onScanned = vm::onQrScanned,
         onPick = vm::pick,
+        onRefresh = vm::refreshCandidates,
         onConfirm = vm::confirm,
         onRetry = vm::retry,
     )
@@ -81,6 +111,7 @@ fun PairJoinContent(
     onConfirm: (Boolean) -> Unit,
     onRetry: () -> Unit,
     onBack: () -> Unit = {},
+    onRefresh: () -> Unit = {},
 ) {
     val c = LanMsgColors.current
     Scaffold(
@@ -95,6 +126,7 @@ fun PairJoinContent(
                 }
                 state.joinMode == PairViewModel.JoinMode.PICK -> {
                     SectionHeader(stringResource(R.string.pair_join_pick))
+                    TextButton(onClick = onRefresh, colors = LanMsgButtons.text()) { Text(stringResource(R.string.pair_join_refresh)) }
                     if (state.candidates.isEmpty()) {
                         Spacer(Modifier.height(24.dp))
                         Text(stringResource(R.string.pair_waiting), color = c.inkMuted, style = MaterialTheme.typography.bodyMedium)
@@ -102,8 +134,8 @@ fun PairJoinContent(
                     LazyColumn(Modifier.fillMaxWidth()) {
                         items(state.candidates, key = { it.deviceId }) { p ->
                             Column(Modifier.fillMaxWidth().clickable { onPick(p.deviceId) }.padding(horizontal = 16.dp, vertical = 14.dp)) {
-                                Text(p.deviceName, color = c.ink, style = MaterialTheme.typography.bodyLarge)
-                                Text(p.deviceShort, color = c.inkSubtle, style = MaterialTheme.typography.bodySmall)
+                                Text(p.displayName, color = c.ink, style = MaterialTheme.typography.bodyLarge)
+                                Text(p.deviceName, color = c.inkSubtle, style = MaterialTheme.typography.bodySmall)
                             }
                             HorizontalDivider(color = c.line)
                         }
@@ -142,4 +174,10 @@ fun PairJoinContent(
             }
         }
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
