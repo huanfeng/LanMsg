@@ -6,13 +6,16 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -26,6 +29,7 @@ import kotlinx.coroutines.withContext
 import name.apk.lanmsg.core.call
 import name.apk.lanmsg.ui.nav.LanMsgNavHost
 import name.apk.lanmsg.ui.nav.Routes
+import name.apk.lanmsg.ui.theme.LanMsgButtons
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import name.apk.lanmsg.ui.theme.LanMsgTheme
 import uniffi.lanmsg_api.Request
@@ -44,7 +48,9 @@ class MainActivity : ComponentActivity() {
 private fun Launcher() {
     var start by remember { mutableStateOf<String?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(Unit) {
+    var attempt by remember { mutableIntStateOf(0) }
+    LaunchedEffect(attempt) {
+        failure = null
         try {
             val self = withContext(Dispatchers.IO) {
                 ServiceLocator.core.call<Response.SelfInfo>(Request.GetSelf).value
@@ -61,7 +67,10 @@ private fun Launcher() {
     when {
         route != null -> LanMsgNavHost(rememberNavController(), route)
         failure != null -> Box(Modifier.fillMaxSize().background(c.canvas).safeDrawingPadding().padding(24.dp)) {
-            Text(stringResource(R.string.err_generic, failure.orEmpty()), color = c.danger)
+            Column {
+                Text(stringResource(R.string.err_generic, failure.orEmpty()), color = c.danger)
+                TextButton(onClick = { attempt++ }, colors = LanMsgButtons.text()) { Text(stringResource(R.string.retry)) }
+            }
         }
         else -> Box(Modifier.fillMaxSize().background(c.canvas))
     }

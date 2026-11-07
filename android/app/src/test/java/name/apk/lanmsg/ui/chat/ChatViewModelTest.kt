@@ -2,6 +2,7 @@
 
 package name.apk.lanmsg.ui.chat
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import name.apk.lanmsg.core.ApiException
@@ -83,6 +84,32 @@ class ChatViewModelTest {
         advanceUntilIdle()
         assertEquals(listOf("m1"), vm.ids())
         assertEquals(MessageState.DELIVERED, vm.state.value.messages[0].state)
+    }
+
+    @Test fun reload_in_flight_does_not_overwrite_newer_message_update() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        var calls = 0
+        val fake = FakeCoreApi().apply {
+            handler = { r ->
+                when (r) {
+                    is Request.ListConversations -> Response.Conversations(listOf(Fixtures.conv("c1", "对端")))
+                    is Request.ListMessages -> {
+                        if (calls++ > 0) gate.await()
+                        Response.Messages(listOf(m("m1")))
+                    }
+                    else -> Response.Ok
+                }
+            }
+        }
+        val vm = ChatViewModel(fake, "c1", VisibleConversation)
+        advanceUntilIdle()
+        fake.emitLagged()
+        advanceUntilIdle()
+        fake.emit(Event.MessageUpdated(m("m1").copy(state = MessageState.DELIVERED)))
+        advanceUntilIdle()
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(MessageState.DELIVERED, vm.state.value.messages.single().state)
     }
 
     @Test fun lagged_triggers_full_reload_without_duplicates() = runTest {

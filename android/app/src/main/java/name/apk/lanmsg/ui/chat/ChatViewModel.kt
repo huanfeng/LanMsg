@@ -50,6 +50,10 @@ class ChatViewModel(
     private var hiddenBefore = false
     private var lastMarked: String? = null
 
+    /** 重拉在途期间事件触达过的消息 id：响应合并时跳过，避免旧快照覆盖较新的事件版本。 */
+    private val touched = mutableSetOf<String>()
+    private var inflight = 0
+
     init {
         viewModelScope.launch { core.events.collect(::onEvent) }
         viewModelScope.launch { core.lagged.collect { reloadAll() } }
@@ -123,11 +127,12 @@ class ChatViewModel(
                     cur.copy(
                         messages = older.filter { it.id !in known } + cur.messages,
                         hasMore = older.isNotEmpty(),
-                        loadingMore = false,
                     )
                 }
             } catch (e: ApiException) {
-                _state.update { it.copy(loadingMore = false, error = errorText(e)) }
+                _state.update { it.copy(error = errorText(e)) }
+            } finally {
+                _state.update { it.copy(loadingMore = false) }
             }
         }
     }
@@ -166,10 +171,19 @@ class ChatViewModel(
 
     private fun loadLatest() {
         viewModelScope.launch {
-            guarded {
-                val latest = core.call<Response.Messages>(Request.ListMessages(conv, null, PAGE)).value
-                _state.update { cur -> cur.copy(messages = latest.fold(cur.messages) { acc, m -> upsert(acc, m) }) }
-                markReadIfNeeded()
+            inflight++
+            try {
+                guarded {
+                    val latest = core.call<Response.Messages>(Request.ListMessages(conv, null, PAGE)).value
+                    _state.update { cur ->
+                        val have = cur.messages.mapTo(HashSet()) { it.id }
+                        // 事件已写入列表的版本更新，不被旧响应覆盖
+                        cur.copy(messages = latest.filter { it.id !in touched || it.id !in have }.fold(cur.messages) { acc, m -> upsert(acc, m) })
+                    }
+                    markReadIfNeeded()
+                }
+            } finally {
+                if (--inflight == 0) touched.clear()
             }
         }
     }
@@ -180,10 +194,12 @@ class ChatViewModel(
     private fun onEvent(e: Event) {
         when (e) {
             is Event.MessageAdded -> if (e.msg.conv == conv) {
+                if (inflight > 0) touched += e.msg.id
                 _state.update { it.copy(messages = upsert(it.messages, e.msg)) }
                 markReadIfNeeded()
             }
             is Event.MessageUpdated -> if (e.msg.conv == conv) {
+                if (inflight > 0) touched += e.msg.id
                 _state.update { s ->
                     if (s.messages.any { it.id == e.msg.id }) s.copy(messages = upsert(s.messages, e.msg)) else s
                 }

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.BrokenImage
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -46,6 +47,7 @@ import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.core.ApiException
 import name.apk.lanmsg.core.CoreApi
 import name.apk.lanmsg.core.call
+import name.apk.lanmsg.ui.common.EmptyState
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import name.apk.lanmsg.ui.theme.LanMsgControls
 import uniffi.lanmsg_api.BlobState
@@ -156,7 +158,7 @@ fun ImageViewerContent(
                 title = { Text(item?.name.orEmpty(), maxLines = 1) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = stringResource(R.string.cancel))
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = stringResource(R.string.back))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -170,7 +172,11 @@ fun ImageViewerContent(
     ) { inner ->
         Box(Modifier.padding(inner).fillMaxSize()) {
             if (item == null) {
-                if (state.loading) CircularProgressIndicator(color = LanMsgControls.progress, modifier = Modifier.align(Alignment.Center))
+                if (state.loading) {
+                    CircularProgressIndicator(color = LanMsgControls.progress, modifier = Modifier.align(Alignment.Center))
+                } else {
+                    EmptyState(stringResource(R.string.image_not_found), Icons.Outlined.BrokenImage)
+                }
                 return@Box
             }
             val local = item.localPath

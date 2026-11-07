@@ -132,6 +132,9 @@
     <string name="unmute">取消免打扰</string>
     <string name="cancel">取消</string>
     <string name="confirm">确定</string>
+    <string name="back">返回</string>
+    <string name="retry">重试</string>
+    <string name="image_not_found">找不到这张图片</string>
     <string name="err_generic">错误：%1$s</string>
     <string name="err_peer_offline">对方不在线</string>
     <string name="err_core_outdated">该功能需要更新核心库</string>

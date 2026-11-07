@@ -10,13 +10,20 @@ import kotlinx.coroutines.flow.map
 
 private val Context.dataStore by preferencesDataStore(name = "lanmsg_local")
 
+/** 免打扰集合的窄接口，便于 ViewModel 测试注入内存实现。 */
+interface MutedStore {
+    val mutedConversations: Flow<Set<String>>
+
+    suspend fun setMuted(conv: String, muted: Boolean)
+}
+
 /** 只属于本机、不进 core 的偏好（免打扰、相册保存、可信 Wi-Fi、通知开关）。 */
-class LocalPrefs(ctx: Context) {
+class LocalPrefs(ctx: Context) : MutedStore {
     private val store = ctx.applicationContext.dataStore
 
-    val mutedConversations: Flow<Set<String>> = store.data.map { it[MUTED] ?: emptySet() }
+    override val mutedConversations: Flow<Set<String>> = store.data.map { it[MUTED] ?: emptySet() }
 
-    suspend fun setMuted(conv: String, muted: Boolean) {
+    override suspend fun setMuted(conv: String, muted: Boolean) {
         store.edit { p ->
             val cur = p[MUTED] ?: emptySet()
             p[MUTED] = if (muted) cur + conv else cur - conv

@@ -259,6 +259,9 @@
 | unmute | 取消免打扰 |
 | cancel | 取消 |
 | confirm | 确定 |
+| back | 返回 |
+| retry | 重试 |
+| image_not_found | 找不到这张图片 |
 | err_generic | 错误：%1$s |
 | err_peer_offline | 对方不在线 |
 | err_core_outdated | 该功能需要更新核心库 |

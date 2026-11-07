@@ -156,7 +156,7 @@ fun ChatContent(
                     },
                     navigationIcon = {
                         IconButton(onClick = actions.onBack) {
-                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = stringResource(R.string.cancel))
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = stringResource(R.string.back))
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
