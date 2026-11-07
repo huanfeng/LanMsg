@@ -9,7 +9,7 @@ use lanmsg_api::types::{
     MessageView,
 };
 use lanmsg_proto::ids::{DeviceId, MsgId, UserId};
-use lanmsg_proto::types::{BlobMeta, MsgBody};
+use lanmsg_proto::types::{BlobMeta, MsgBody, SystemEvent};
 
 use crate::settings::SETTING_DATA_DIR;
 use crate::store::{ConvRow, MsgStateRow, PreparingKind, PreparingRow, Store, StoredMessage};
@@ -236,12 +236,40 @@ pub fn preparing_view(
     }
 }
 
+/// 系统事件的展示文本（当前由 core 生成，语言与撤回提示一致）。
+fn system_event_text(store: &Store, event: &SystemEvent) -> String {
+    let device_name = |d: &DeviceId| {
+        store
+            .get_device(d)
+            .ok()
+            .flatten()
+            .map(|r| r.name)
+            .unwrap_or_else(|| d.short())
+    };
+    match event {
+        SystemEvent::DeviceAdded { name, .. } => format!("已添加设备：{name}"),
+        SystemEvent::DeviceRemoved { device } => format!("已移除设备：{}", device_name(device)),
+        SystemEvent::ContactAdded { user } => {
+            let name = store
+                .get_user(user)
+                .ok()
+                .flatten()
+                .map(|u| u.display_name)
+                .unwrap_or_else(|| user.short());
+            format!("已添加联系人：{name}")
+        }
+        SystemEvent::ContactUpdated(rec) => format!("联系人已更新：{}", rec.display_name),
+        SystemEvent::ProfileUpdated { display_name } => format!("昵称已更新：{display_name}"),
+        SystemEvent::LocalDeleted { msgs } => format!("已删除 {} 条消息", msgs.len()),
+    }
+}
+
 /// 将存储消息转换为消息视图。
 ///
 /// - `author_device_name` 取 devices 表 name（无则 device short）。
 /// - `is_mine` = 作者用户为自己（通过 devices 表的 user 字段比较）。
 /// - `body`：Text → `Text`；Files/Folder 经 file_item_view（Task 13 完整
-///   公式）；其余 → `Unsupported`。
+///   公式）；System → `System{text}`；其余 → `Unsupported`。
 /// - `state` 由 `MsgStateRow` 一一映射。
 pub fn message_view(
     store: &Store,
@@ -275,7 +303,7 @@ pub fn message_view(
         .unwrap_or_else(|| author_device_name.clone());
 
     // 撤回的消息正文替换为系统提示（先于 Text 判定）；其余非 Text 体按
-    // Files/Folder 展开，其他暂为 Unsupported。
+    // Files/Folder 展开，System 生成文本，其他为 Unsupported。
     let body = match (&env.body, m.state) {
         (_, MsgStateRow::Recalled) => MessageBodyView::System {
             text: format!("{} 撤回了一条消息", author_display_name),
@@ -295,6 +323,9 @@ pub fn message_view(
                     file_item_view(store, peers, &author_device, &e.blob, &author_display_name)
                 })
                 .collect(),
+        },
+        (MsgBody::System { event }, _) => MessageBodyView::System {
+            text: system_event_text(store, event),
         },
         _ => MessageBodyView::Unsupported,
     };

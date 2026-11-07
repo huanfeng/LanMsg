@@ -8,12 +8,12 @@ mod common;
 use std::time::Duration;
 
 use lanmsg_api::types::{
-    ConvKind, ErrorCode, Event, InitMode, PairMethod, PairStateDto, PairTarget, Request, Response,
-    StatusDto,
+    ConvKind, ErrorCode, Event, InitMode, MessageBodyView, PairMethod, PairStateDto, PairTarget,
+    Request, Response, StatusDto,
 };
 use lanmsg_core::discovery::MemoryBus;
 
-use common::{node, node_offline, pair, wait_until, TestNode};
+use common::{node, node_offline, node_offline_static, pair, wait_until, TestNode};
 
 // ===== 辅助 =====
 
@@ -171,8 +171,15 @@ async fn qr_pairing_shares_identity() {
     }
 
     // A 的 SelfDevices 会话出现 DeviceAdded 系统消息（配对前该会话为空；
-    // message_view 对 System 体暂渲染 Unsupported，故以「出现消息」断言）。
+    // 且视图层渲染为 System 文本）。
     wait_until_conv_has_message(&a).await;
+    assert!(
+        self_devices_messages(&a).await.iter().any(|m| matches!(
+            &m.body,
+            MessageBodyView::System { text } if text.starts_with("已添加设备：")
+        )),
+        "DeviceAdded 应渲染为 System 文本"
+    );
 }
 
 /// 轮询 A 的 SelfDevices 会话，直到出现第一条消息。
@@ -191,6 +198,11 @@ async fn wait_until_conv_has_message(a: &TestNode) {
 }
 
 async fn has_any_message(a: &TestNode) -> bool {
+    !self_devices_messages(a).await.is_empty()
+}
+
+/// A 的 SelfDevices 会话消息（无该会话时为空）。
+async fn self_devices_messages(a: &TestNode) -> Vec<lanmsg_api::types::MessageView> {
     let convs = match a
         .try_call(Request::ListConversations)
         .await
@@ -203,9 +215,9 @@ async fn has_any_message(a: &TestNode) -> bool {
         .iter()
         .find(|c| matches!(c.kind, ConvKind::SelfDevices))
     else {
-        return false;
+        return Vec::new();
     };
-    let msgs = match a
+    match a
         .try_call(Request::ListMessages {
             conv: conv.conv.clone(),
             before: None,
@@ -216,8 +228,56 @@ async fn has_any_message(a: &TestNode) -> bool {
     {
         Response::Messages { value } => value,
         other => panic!("期望 Messages，实际 {other:?}"),
+    }
+}
+
+/// 无组播、仅静态对端连接：未初始化的 B 以 Device 目标 PairJoin 应回退到已连接对端。
+#[tokio::test]
+async fn sas_pairing_via_static_peer_without_discovery() {
+    init_log();
+    let mut a = node_offline().await;
+    a.init_first("甲机").await;
+    let started = match a
+        .try_call(Request::PairStart {
+            method: PairMethod::Sas,
+        })
+        .await
+        .expect("PairStart 失败")
+    {
+        Response::PairSession { value } => value,
+        other => panic!("期望 PairSession，实际 {other:?}"),
     };
-    !msgs.is_empty()
+    let mut b = node_offline_static(vec![a.svc.local_addr()]).await;
+    init_join(&b).await;
+
+    // 等 B 经静态对端连上 A（发现被禁用，只可能来自已连接对端）。
+    let a_dev = a.device_id().await;
+    wait_until(
+        || async {
+            matches!(
+                b.try_call(Request::ListPeers).await,
+                Ok(Response::Peers { value }) if value.iter().any(|p| p.device_id == a_dev)
+            )
+        },
+        10,
+    )
+    .await;
+
+    let session = join_device(&b, &a_dev).await;
+    let session_a = started.session;
+    let code_a = wait_show_sas(&mut a, &session_a).await;
+    let code_b = wait_show_sas(&mut b, &session).await;
+    assert_eq!(code_a, code_b);
+    for (n, s) in [(&a, &session_a), (&b, &session)] {
+        n.try_call(Request::PairConfirm {
+            session: s.clone(),
+            matches: true,
+        })
+        .await
+        .expect("PairConfirm 失败");
+    }
+    a.wait_event(is_done(&session_a), 5).await;
+    b.wait_event(is_done(&session), 5).await;
 }
 
 /// Sas 配对：双方 ShowSas code 相同；只有 A 确认时 2 秒内无 Done；B 确认后 Done。

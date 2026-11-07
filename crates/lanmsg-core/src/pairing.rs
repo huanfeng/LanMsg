@@ -419,17 +419,21 @@ impl Pairing {
             PairTarget::Device { device } => {
                 let d = DeviceId::from_hex(&device)
                     .map_err(|_| CoreError::InvalidArgument(format!("非法设备 ID: {device}")))?;
-                let (ann, addr) = discovered
-                    .get(&d)
-                    .ok_or_else(|| CoreError::NotFound(format!("未发现该设备: {device}")))?;
-                let port = ann.ports.first().copied().unwrap_or(addr.port());
-                (
-                    vec![SocketAddr::new(addr.ip(), port)],
-                    random_session(),
-                    None,
-                    PairMethodWire::Sas,
-                    d,
-                )
+                // 发现表优先；无组播（静态对端、VPN）时回退到已连接对端的拨号地址，
+                // connect 对已上线连接走快速路径直接复用。
+                let addr = match discovered.get(&d) {
+                    Some((ann, addr)) => {
+                        let port = ann.ports.first().copied().unwrap_or(addr.port());
+                        SocketAddr::new(addr.ip(), port)
+                    }
+                    None => self
+                        .inner
+                        .conns
+                        .peer(&d)
+                        .map(|p| p.dial_addr)
+                        .ok_or_else(|| CoreError::NotFound(format!("未发现该设备: {device}")))?,
+                };
+                (vec![addr], random_session(), None, PairMethodWire::Sas, d)
             }
         };
 

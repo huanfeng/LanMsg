@@ -291,7 +291,7 @@ async fn contact_request_accept_makes_both_contacts() {
         );
     }
 
-    // 双方 DM 会话中恰有 1 条可见 System 消息（ContactAdded，视图层为 Unsupported）。
+    // 双方 DM 会话中恰有 1 条可见 System 消息（ContactAdded，视图层为 System 文本）。
     let conv_a = match a.call(Request::OpenDm { user: b.user_id() }).await {
         Response::ConvId { value } => value,
         other => panic!("期望 ConvId，实际 {other:?}"),
@@ -332,9 +332,9 @@ async fn contact_request_accept_makes_both_contacts() {
         assert!(
             matches!(
                 &value[0].body,
-                lanmsg_api::types::MessageBodyView::Unsupported
+                lanmsg_api::types::MessageBodyView::System { text } if text.starts_with("已添加联系人：")
             ),
-            "应为 System(ContactAdded)（视图层 Unsupported）: {:?}",
+            "应为 System(ContactAdded) 文本: {:?}",
             value[0].body
         );
     }
