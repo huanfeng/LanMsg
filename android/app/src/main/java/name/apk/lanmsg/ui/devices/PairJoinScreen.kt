@@ -56,7 +56,7 @@ fun PairJoinScreen(onBack: () -> Unit, onDone: () -> Unit) {
     val ctx = LocalContext.current
     val vm: PairViewModel = viewModel(
         key = "pair-join",
-        factory = viewModelFactory { initializer { PairViewModel(ServiceLocator.core, PairViewModel.Role.JOIN) } },
+        factory = viewModelFactory { initializer { PairViewModel(ServiceLocator.coreHolder.api, PairViewModel.Role.JOIN) } },
     )
     val state by vm.state.collectAsStateWithLifecycle()
     // 拒绝后系统不再弹窗（且无需解释）= 永久拒绝，只能去应用设置里开

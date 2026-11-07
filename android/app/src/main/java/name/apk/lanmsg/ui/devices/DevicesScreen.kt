@@ -52,7 +52,7 @@ import uniffi.lanmsg_api.DeviceView
 
 @Composable
 fun DevicesScreen(onBack: () -> Unit, onAdd: () -> Unit, onJoin: () -> Unit) {
-    val vm: DevicesViewModel = viewModel(factory = viewModelFactory { initializer { DevicesViewModel(ServiceLocator.core) } })
+    val vm: DevicesViewModel = viewModel(factory = viewModelFactory { initializer { DevicesViewModel(ServiceLocator.coreHolder.api) } })
     val state by vm.state.collectAsStateWithLifecycle()
     DevicesContent(state, onBack, onAdd, onJoin, vm::askRemove, vm::confirmRemove, vm::dismiss)
 }

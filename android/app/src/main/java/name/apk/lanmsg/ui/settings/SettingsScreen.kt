@@ -73,7 +73,7 @@ import uniffi.lanmsg_api.BackgroundMode
 fun SettingsScreen(onBack: () -> Unit) {
     val vm: SettingsViewModel = viewModel(
         factory = viewModelFactory {
-            initializer { SettingsViewModel(ServiceLocator.core, ServiceLocator.localPrefs, ServiceLocator.importer) }
+            initializer { SettingsViewModel(ServiceLocator.coreHolder.api, ServiceLocator.localPrefs, ServiceLocator.importer) }
         },
     )
     val state by vm.state.collectAsStateWithLifecycle()

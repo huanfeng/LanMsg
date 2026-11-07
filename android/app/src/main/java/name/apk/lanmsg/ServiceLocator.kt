@@ -2,34 +2,51 @@ package name.apk.lanmsg
 
 import android.app.Application
 import android.content.Context
-import android.util.Log
+import android.os.Environment
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import name.apk.lanmsg.core.CoreApi
+import name.apk.lanmsg.core.CoreHolder
 import name.apk.lanmsg.core.FfiCoreApi
 import name.apk.lanmsg.core.LocalPrefs
 import name.apk.lanmsg.files.MediaStoreSaver
 import name.apk.lanmsg.files.OutboxImporter
-import uniffi.lanmsg_api.BackgroundMode
+import name.apk.lanmsg.service.BackgroundController
+import name.apk.lanmsg.service.DeviceConditions
+import name.apk.lanmsg.service.SystemServiceActions
+import java.io.File
 
 object ServiceLocator {
     lateinit var app: Application
 
-    /** 测试中替换为 FakeCoreApi 工厂，Robolectric 下不得加载本地库；替换时丢弃已缓存的实例。 */
+    /** 进程级协程作用域：CoreHolder 的关闭任务、后台控制器等。 */
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    private var holder: CoreHolder? = null
+
+    /**
+     * 测试中替换为 FakeCoreApi 工厂，Robolectric 下不得加载本地库；
+     * 替换时丢弃已创建的 CoreHolder（下次访问用新工厂重建）。
+     */
     var coreFactory: (Context) -> CoreApi = { FfiCoreApi.create(it) }
         set(value) {
             synchronized(this) {
                 field = value
-                cachedCore = null
+                holder = null
             }
         }
 
-    private var cachedCore: CoreApi? = null
-
-    /**
-     * 过渡用的 core 单例，Task 11 由 coreHolder.api 取代。
-     * 首次访问会创建真实 core（读写磁盘），必须先在 IO 线程访问一次（MainActivity 启动时已做）。
-     */
-    val core: CoreApi
-        get() = synchronized(this) { cachedCore ?: coreFactory(app).also { cachedCore = it } }
+    /** core 的唯一持有者；ViewModel 只用 [CoreHolder.api]。首次创建 core 只发生在 IO 线程。 */
+    val coreHolder: CoreHolder
+        get() = synchronized(this) {
+            holder ?: CoreHolder(
+                factory = { coreFactory(app) },
+                scope = appScope,
+                io = Dispatchers.IO,
+                downloadDir = ::externalDownloadDir,
+            ).also { holder = it }
+        }
 
     val localPrefs: LocalPrefs by lazy { LocalPrefs(app) }
 
@@ -37,9 +54,16 @@ object ServiceLocator {
 
     val mediaSaver: MediaStoreSaver by lazy { MediaStoreSaver(app) }
 
-    /**
-     * 后台模式变化后通知服务重新评估。Task 11 由 CoreHolder.onBackgroundModeChanged 替换，
-     * 在此之前只记日志。
-     */
-    var backgroundModeListener: (BackgroundMode) -> Unit = { Log.i("ServiceLocator", "Background mode changed: $it") }
+    val deviceConditions: DeviceConditions by lazy { DeviceConditions(app, localPrefs, appScope) }
+
+    val backgroundController: BackgroundController by lazy {
+        BackgroundController(coreHolder, deviceConditions.conditions, appScope, SystemServiceActions(app))
+    }
+
+    /** 应用专属外部下载目录下的 LanMsg 子目录（无需存储权限）；外部存储不可用时返回 null。在 IO 线程调用。 */
+    private fun externalDownloadDir(): String? {
+        val base = app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return null
+        val dir = File(base, "LanMsg")
+        return if (dir.isDirectory || dir.mkdirs()) dir.absolutePath else null
+    }
 }

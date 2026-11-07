@@ -131,7 +131,7 @@ class ImageViewerViewModel(private val core: CoreApi, private val conv: String, 
 fun ImageViewerScreen(conv: String, hash: String, onBack: () -> Unit) {
     val vm: ImageViewerViewModel = viewModel(
         key = "image-$conv-$hash",
-        factory = viewModelFactory { initializer { ImageViewerViewModel(ServiceLocator.core, conv, hash) } },
+        factory = viewModelFactory { initializer { ImageViewerViewModel(ServiceLocator.coreHolder.api, conv, hash) } },
     )
     val state by vm.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()

@@ -14,7 +14,12 @@ import uniffi.lanmsg_api.InitMode
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
 
-class OnboardingViewModel(private val core: CoreApi, private val defaultDeviceName: String) : ViewModel() {
+class OnboardingViewModel(
+    private val core: CoreApi,
+    private val defaultDeviceName: String,
+    /** Init 成功后调用（补设下载目录、读取后台档位）；失败由调用方自行容忍。 */
+    private val onInitialized: suspend () -> Unit = {},
+) : ViewModel() {
     enum class Step { WELCOME, NAME, MODE }
     enum class Destination { HOME, PAIR_JOIN }
 
@@ -61,6 +66,7 @@ class OnboardingViewModel(private val core: CoreApi, private val defaultDeviceNa
             try {
                 val device = s.deviceName.trim().ifEmpty { defaultDeviceName }
                 core.call<Response.Ok>(Request.Init(s.displayName.trim(), device, mode))
+                onInitialized()
                 _state.update { it.copy(busy = false, done = destination) }
             } catch (e: ApiException) {
                 _state.update { it.copy(busy = false, error = e.message ?: e.code.name) }

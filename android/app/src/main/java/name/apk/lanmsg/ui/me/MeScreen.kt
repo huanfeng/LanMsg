@@ -55,7 +55,7 @@ import uniffi.lanmsg_api.StatusDto
 
 @Composable
 fun MeScreen(onOpenDevices: () -> Unit, onOpenSettings: () -> Unit) {
-    val vm: MeViewModel = viewModel(factory = viewModelFactory { initializer { MeViewModel(ServiceLocator.core) } })
+    val vm: MeViewModel = viewModel(factory = viewModelFactory { initializer { MeViewModel(ServiceLocator.coreHolder.api) } })
     val state by vm.state.collectAsStateWithLifecycle()
     MeContent(state, vm::rename, vm::setStatus, onOpenDevices, onOpenSettings)
 }

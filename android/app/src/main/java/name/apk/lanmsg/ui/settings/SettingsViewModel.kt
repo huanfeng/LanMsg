@@ -28,8 +28,8 @@ class SettingsViewModel(
     private val core: CoreApi,
     private val prefs: SettingsPrefs,
     private val outbox: OutboxStore,
-    /** 后台模式写入成功后通知服务重新评估；默认在调用时才读 ServiceLocator，Task 11 替换后自动生效。 */
-    private val onBackgroundMode: (BackgroundMode) -> Unit = { ServiceLocator.backgroundModeListener(it) },
+    /** 后台模式写入成功后通知服务重新评估；默认在调用时才读 ServiceLocator（测试里 coreHolder 可被替换）。 */
+    private val onBackgroundMode: (BackgroundMode) -> Unit = { ServiceLocator.coreHolder.onBackgroundModeChanged(it) },
     private val io: CoroutineDispatcher = Dispatchers.IO,
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {

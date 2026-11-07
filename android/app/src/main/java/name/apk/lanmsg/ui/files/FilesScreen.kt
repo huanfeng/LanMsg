@@ -82,7 +82,7 @@ import java.io.File
 fun FilesScreen(initialConv: String?, onOpenChat: (String) -> Unit, onForward: (List<String>) -> Unit) {
     val vm: FilesViewModel = viewModel(
         key = "files-$initialConv",
-        factory = viewModelFactory { initializer { FilesViewModel(ServiceLocator.core, initialConv) } },
+        factory = viewModelFactory { initializer { FilesViewModel(ServiceLocator.coreHolder.api, initialConv) } },
     )
     val state by vm.state.collectAsStateWithLifecycle()
     val ctx = LocalContext.current

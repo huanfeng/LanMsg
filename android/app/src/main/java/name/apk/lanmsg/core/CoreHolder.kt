@@ -1,0 +1,212 @@
+package name.apk.lanmsg.core
+
+import android.util.Log
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.shareIn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.plus
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import uniffi.lanmsg_api.BackgroundMode
+import uniffi.lanmsg_api.Event
+import uniffi.lanmsg_api.Request
+import uniffi.lanmsg_api.Response
+import java.util.concurrent.atomic.AtomicBoolean
+
+/**
+ * core 实例的唯一持有者：按 owner 集合管理生命周期，所有 owner 都放手后才 shutdown。
+ * 同一时刻最多一个活动实例；新实例一定在旧实例完全关闭之后才创建（两个实例会抢同一个数据库与端口）。
+ *
+ * @param factory 创建 core（阻塞、读写磁盘），总在 [io] 上调用。
+ * @param downloadDir 期望的下载目录；每个新实例发布前会据此调用 [ensureDownloadDir]，返回 null 表示不设置。
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+class CoreHolder(
+    private val factory: () -> CoreApi,
+    private val scope: CoroutineScope,
+    private val io: CoroutineDispatcher,
+    private val downloadDir: () -> String? = { null },
+) {
+    /** 保护 [ownerSet] 与 [instance] 的写入；只做内存操作，持锁期间不挂起、不阻塞。 */
+    private val lock = Any()
+
+    /** 串行化「创建」与「关闭」，保证旧实例关闭完成前不会创建新实例。 */
+    private val lifecycle = Mutex()
+    private val ownerSet = mutableSetOf<String>()
+    private val instance = MutableStateFlow<CoreApi?>(null)
+    private val _owners = MutableStateFlow<Set<String>>(emptySet())
+    private val _running = MutableStateFlow(false)
+    private val _mode = MutableStateFlow<BackgroundMode?>(null)
+    private val hasStartedBefore = AtomicBoolean(false)
+
+    /** 当前持有者（只读快照）。 */
+    val owners: StateFlow<Set<String>> = _owners.asStateFlow()
+
+    val running: StateFlow<Boolean> = _running.asStateFlow()
+
+    /** 后台档位；null = 尚未得知（core 未初始化或还没读到），此时不启动服务。 */
+    val backgroundMode: StateFlow<BackgroundMode?> = _mode.asStateFlow()
+
+    /**
+     * 给 ViewModel 用的代理：请求发往当前实例；没有实例时才以 "ui" 身份创建。
+     * events/lagged 随实例切换（flatMapLatest）；订阅用 Unconfined，实例一发布就接上，尽量不丢事件。
+     * 新实例（非首个）出现时额外发一次 lagged，让界面全量重拉。shutdown 对代理是空操作。
+     */
+    val api: CoreApi = object : CoreApi {
+        private val sharing = scope + Dispatchers.Unconfined
+
+        override suspend fun request(req: Request): Response = (instance.value ?: acquire(UI)).request(req)
+
+        override val events: SharedFlow<Event> = instance
+            .flatMapLatest { it?.events ?: emptyFlow() }
+            .buffer(256)
+            .shareIn(sharing, SharingStarted.Eagerly)
+
+        override val lagged: SharedFlow<Unit> = instance
+            .flatMapLatest { api ->
+                api?.lagged?.onStart { if (hasStartedBefore.getAndSet(true)) emit(Unit) } ?: emptyFlow()
+            }
+            .buffer(1)
+            .shareIn(sharing, SharingStarted.Eagerly)
+
+        override fun shutdown() = Unit
+    }
+
+    /**
+     * 登记 [owner] 并返回实例，首次在 [io] 上创建；并发调用只创建一次，同一 owner 重复调用不重复计数。
+     * owner 在创建完成前就被 [release] 掉时，丢弃刚创建的实例并抛 [CancellationException]。
+     */
+    suspend fun acquire(owner: String): CoreApi {
+        synchronized(lock) {
+            ownerSet += owner
+            _owners.value = ownerSet.toSet()
+            instance.value?.let { return it }
+        }
+        return lifecycle.withLock {
+            instance.value?.let { return it }
+            val created = try {
+                // 创建不可中断：半途取消会留下无人关闭的实例
+                withContext(io + NonCancellable) { factory().also { applyDownloadDir(it) } }
+            } catch (e: Throwable) {
+                synchronized(lock) {
+                    ownerSet -= owner
+                    _owners.value = ownerSet.toSet()
+                }
+                throw e
+            }
+            val publish = synchronized(lock) {
+                (ownerSet.isNotEmpty()).also {
+                    if (it) {
+                        instance.value = created
+                        _running.value = true
+                    }
+                }
+            }
+            if (!publish) {
+                withContext(io + NonCancellable) { shutdownQuietly(created) }
+                throw CancellationException("Released before the core finished starting")
+            }
+            created
+        }
+    }
+
+    /** 放手 [owner]；集合归零时丢弃实例并在 [io] 上关闭。关闭完成前，新的 [acquire] 会等待。 */
+    fun release(owner: String) {
+        synchronized(lock) {
+            if (!ownerSet.remove(owner)) return
+            _owners.value = ownerSet.toSet()
+            if (ownerSet.isNotEmpty()) return
+            val old = instance.value ?: return
+            instance.value = null
+            _running.value = false
+            // UNDISPATCHED：在持锁的这一刻就排进 lifecycle 队列，后到的 acquire 一定排在关闭之后
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                lifecycle.withLock { withContext(io + NonCancellable) { shutdownQuietly(old) } }
+            }
+        }
+    }
+
+    /** 把 core 的 download_dir 设为 [dir]（不同才写）。没有实例或 core 未初始化时容忍失败。 */
+    suspend fun ensureDownloadDir(dir: String) {
+        applyDownloadDirTo(instance.value ?: return, dir)
+    }
+
+    /** 设置页写入后台档位后调用，交给 BackgroundController 重新评估。 */
+    fun onBackgroundModeChanged(mode: BackgroundMode) {
+        _mode.value = mode
+    }
+
+    /** 引导完成（Init 成功）后调用：补设下载目录并读取后台档位。 */
+    suspend fun onInitialized() {
+        withContext(io) { downloadDir() }?.let { ensureDownloadDir(it) }
+        refreshBackgroundMode()
+    }
+
+    /** 从 core 读取后台档位；未初始化时保持未知。 */
+    suspend fun refreshBackgroundMode() {
+        val api = instance.value ?: return
+        try {
+            if (!api.call<Response.SelfInfo>(Request.GetSelf).value.initialized) return
+            _mode.value = api.call<Response.Settings>(Request.GetSettings).value.backgroundMode
+        } catch (e: ApiException) {
+            Log.w(TAG, "Failed to read background mode: ${e.message}")
+        }
+    }
+
+    private suspend fun applyDownloadDir(api: CoreApi) {
+        downloadDir()?.let { applyDownloadDirTo(api, it) }
+    }
+
+    private suspend fun applyDownloadDirTo(api: CoreApi, dir: String) {
+        try {
+            val s = api.call<Response.Settings>(Request.GetSettings).value
+            if (s.downloadDir != dir) {
+                s.downloadDir = dir
+                api.call<Response.Ok>(Request.SetSettings(s))
+            }
+        } catch (e: ApiException) {
+            // 未初始化时读写设置会失败；引导完成后 onInitialized 会再设一次
+            Log.i(TAG, "Download dir not applied: ${e.message}")
+        }
+    }
+
+    private fun shutdownQuietly(core: CoreApi) {
+        try {
+            core.shutdown()
+        } catch (e: Exception) {
+            Log.w(TAG, "Core shutdown failed", e)
+        }
+    }
+
+    companion object {
+        private const val TAG = "CoreHolder"
+
+        /** MainActivity 可见期间。 */
+        const val UI = "ui"
+
+        /** LanMsgService 运行期间。 */
+        const val SERVICE = "service"
+
+        /** SyncWorker 执行期间。 */
+        const val WORKER = "worker"
+
+        /** BackgroundController 启动时读取后台档位的短暂持有。 */
+        const val CONTROLLER = "controller"
+    }
+}

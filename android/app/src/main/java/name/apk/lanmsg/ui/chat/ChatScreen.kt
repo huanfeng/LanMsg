@@ -83,7 +83,7 @@ fun ChatScreen(
 ) {
     val vm: ChatViewModel = viewModel(
         key = "chat-$conv",
-        factory = viewModelFactory { initializer { ChatViewModel(ServiceLocator.core, conv, VisibleConversation) } },
+        factory = viewModelFactory { initializer { ChatViewModel(ServiceLocator.coreHolder.api, conv, VisibleConversation) } },
     )
     val state by vm.state.collectAsStateWithLifecycle()
     LifecycleStartEffect(vm) {

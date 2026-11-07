@@ -55,7 +55,7 @@ import uniffi.lanmsg_api.PairStateDto
 fun PairHostScreen(onBack: () -> Unit, onDone: () -> Unit) {
     val vm: PairViewModel = viewModel(
         key = "pair-host",
-        factory = viewModelFactory { initializer { PairViewModel(ServiceLocator.core, PairViewModel.Role.HOST) } },
+        factory = viewModelFactory { initializer { PairViewModel(ServiceLocator.coreHolder.api, PairViewModel.Role.HOST) } },
     )
     val state by vm.state.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { vm.start() }

@@ -53,7 +53,7 @@ import uniffi.lanmsg_api.MessageBodyView
 
 @Composable
 fun SearchScreen(onBack: () -> Unit, onOpenChat: (String) -> Unit) {
-    val vm: SearchViewModel = viewModel(factory = viewModelFactory { initializer { SearchViewModel(ServiceLocator.core) } })
+    val vm: SearchViewModel = viewModel(factory = viewModelFactory { initializer { SearchViewModel(ServiceLocator.coreHolder.api) } })
     val state by vm.state.collectAsStateWithLifecycle()
     SearchContent(state, vm::setQuery, onBack, onOpenChat)
 }

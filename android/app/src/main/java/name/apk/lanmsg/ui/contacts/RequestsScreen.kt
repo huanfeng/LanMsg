@@ -51,7 +51,7 @@ import uniffi.lanmsg_api.RequestView
 
 @Composable
 fun RequestsScreen(onBack: () -> Unit) {
-    val vm: RequestsViewModel = viewModel(factory = viewModelFactory { initializer { RequestsViewModel(ServiceLocator.core) } })
+    val vm: RequestsViewModel = viewModel(factory = viewModelFactory { initializer { RequestsViewModel(ServiceLocator.coreHolder.api) } })
     val state by vm.state.collectAsStateWithLifecycle()
     RequestsContent(state, vm::respond, onBack)
 }

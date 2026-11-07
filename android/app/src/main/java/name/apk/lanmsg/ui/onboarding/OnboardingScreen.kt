@@ -40,7 +40,11 @@ import name.apk.lanmsg.ui.theme.LanMsgControls
 fun OnboardingScreen(onDone: (OnboardingViewModel.Destination) -> Unit) {
     val vm: OnboardingViewModel = viewModel(
         factory = viewModelFactory {
-            initializer { OnboardingViewModel(ServiceLocator.core, Build.MODEL.orEmpty()) }
+            initializer {
+                OnboardingViewModel(ServiceLocator.coreHolder.api, Build.MODEL.orEmpty()) {
+                    ServiceLocator.coreHolder.onInitialized()
+                }
+            }
         },
     )
     val state by vm.state.collectAsStateWithLifecycle()

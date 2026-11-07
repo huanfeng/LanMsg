@@ -49,7 +49,7 @@ import name.apk.lanmsg.ui.theme.LanMsgColors
 
 @Composable
 fun ContactsScreen(onOpenRequests: () -> Unit, onOpenContact: (String) -> Unit, onAddDevice: () -> Unit) {
-    val vm: ContactsViewModel = viewModel(factory = viewModelFactory { initializer { ContactsViewModel(ServiceLocator.core) } })
+    val vm: ContactsViewModel = viewModel(factory = viewModelFactory { initializer { ContactsViewModel(ServiceLocator.coreHolder.api) } })
     val state by vm.state.collectAsStateWithLifecycle()
     ContactsContent(state, vm::add, vm::toastShown, onOpenRequests, onOpenContact, onAddDevice)
 }

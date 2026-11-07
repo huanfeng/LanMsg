@@ -50,7 +50,7 @@ import uniffi.lanmsg_api.ContactView
 fun ContactDetailScreen(user: String, onBack: () -> Unit, onOpenChat: (String) -> Unit) {
     val vm: ContactDetailViewModel = viewModel(
         key = "contact:$user",
-        factory = viewModelFactory { initializer { ContactDetailViewModel(ServiceLocator.core, user) } },
+        factory = viewModelFactory { initializer { ContactDetailViewModel(ServiceLocator.coreHolder.api, user) } },
     )
     val state by vm.state.collectAsStateWithLifecycle()
     LaunchedEffect(state.openConv) {

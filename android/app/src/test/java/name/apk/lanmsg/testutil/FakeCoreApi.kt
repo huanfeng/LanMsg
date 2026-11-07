@@ -14,7 +14,8 @@ class FakeCoreApi : CoreApi {
     var handler: suspend (Request) -> Response = { throw ApiException(ErrorCode.INTERNAL, "fake 未配置") }
     val eventsFlow = MutableSharedFlow<Event>(extraBufferCapacity = 64)
     val laggedFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
-    var shutdownCalled = false
+    var shutdownCount = 0
+    val shutdownCalled: Boolean get() = shutdownCount > 0
 
     override val events: SharedFlow<Event> = eventsFlow
     override val lagged: SharedFlow<Unit> = laggedFlow
@@ -28,6 +29,6 @@ class FakeCoreApi : CoreApi {
     suspend fun emitLagged() = laggedFlow.emit(Unit)
 
     override fun shutdown() {
-        shutdownCalled = true
+        shutdownCount++
     }
 }

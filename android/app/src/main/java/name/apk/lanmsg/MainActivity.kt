@@ -3,6 +3,7 @@ package name.apk.lanmsg
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -27,12 +28,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import name.apk.lanmsg.core.CoreHolder
 import name.apk.lanmsg.core.call
 import name.apk.lanmsg.files.ShareIntentParser
 import name.apk.lanmsg.files.ShareText
@@ -51,7 +56,7 @@ private class ShareData(val uris: List<Uri>, val text: String?)
 class MainActivity : ComponentActivity() {
     /** Activity 级：分享内容经它传给选择页。首次访问才创建，须在 core 就绪后。 */
     private val shareVm: SharePickViewModel by viewModels {
-        viewModelFactory { initializer { SharePickViewModel(ServiceLocator.core, ServiceLocator.importer) } }
+        viewModelFactory { initializer { SharePickViewModel(ServiceLocator.coreHolder.api, ServiceLocator.importer) } }
     }
     private var incomingShare by mutableStateOf<ShareData?>(null)
 
@@ -67,6 +72,27 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // UNDISPATCHED：owner 在主线程同步登记，保证 onStop 的 release 一定排在它之后；创建 core 在 IO 线程
+        lifecycleScope.launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
+            try {
+                ServiceLocator.coreHolder.acquire(CoreHolder.UI)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 创建失败由 Launcher 的 GetSelf 请求再次尝试并显示错误
+                Log.w("MainActivity", "Failed to acquire core", e)
+            }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // 旋转等配置变更会 stop 再 start：此时放手会让“关闭”档位下的 core 白白重启
+        if (!isChangingConfigurations) ServiceLocator.coreHolder.release(CoreHolder.UI)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -80,7 +106,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** 先在 IO 线程创建 core 并 GetSelf，据此选起始路由；等待期间只显示主题背景。 */
+/** 先在 IO 线程经 CoreHolder 代理（必要时创建 core）GetSelf，据此选起始路由；等待期间只显示主题背景。 */
 @Composable
 private fun Launcher(incoming: ShareData?, onShareConsumed: () -> Unit, shareVm: () -> SharePickViewModel) {
     var start by remember { mutableStateOf<String?>(null) }
@@ -90,7 +116,7 @@ private fun Launcher(incoming: ShareData?, onShareConsumed: () -> Unit, shareVm:
         failure = null
         try {
             val self = withContext(Dispatchers.IO) {
-                ServiceLocator.core.call<Response.SelfInfo>(Request.GetSelf).value
+                ServiceLocator.coreHolder.api.call<Response.SelfInfo>(Request.GetSelf).value
             }
             start = if (self.initialized) Routes.CONVS else Routes.ONBOARDING
         } catch (e: CancellationException) {

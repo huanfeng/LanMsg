@@ -39,7 +39,7 @@ import name.apk.lanmsg.ui.theme.LanMsgControls
 fun ConversationListScreen(onOpenChat: (String) -> Unit, onSearch: () -> Unit) {
     val vm: ConversationListViewModel = viewModel(
         factory = viewModelFactory {
-            initializer { ConversationListViewModel(ServiceLocator.core, ServiceLocator.localPrefs) }
+            initializer { ConversationListViewModel(ServiceLocator.coreHolder.api, ServiceLocator.localPrefs) }
         },
     )
     val state by vm.state.collectAsStateWithLifecycle()

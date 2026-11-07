@@ -59,7 +59,7 @@ fun ForwardPickScreen(hashes: List<String>, onBack: () -> Unit, onDone: (String)
     }
     val vm: ForwardPickViewModel = viewModel(
         key = "forward-${hashes.joinToString(",")}",
-        factory = viewModelFactory { initializer { ForwardPickViewModel(ServiceLocator.core, hashes) } },
+        factory = viewModelFactory { initializer { ForwardPickViewModel(ServiceLocator.coreHolder.api, hashes) } },
     )
     val state by vm.state.collectAsStateWithLifecycle()
     ForwardPickContent(state, onBack, vm::pick, vm::clearError, onDone)
