@@ -862,18 +862,7 @@ impl Pairing {
         };
         let self_device = self.self_device().await;
 
-        // 校验：设备指向自己、证书验签、用户密钥与证书一致。
-        let reason = if bundle.device_cert.device != self_device {
-            Some(PairFailReason::CertMismatch)
-        } else if bundle.device_cert.verify().is_err() {
-            Some(PairFailReason::BadSignature)
-        } else if UserKey::from_bytes(&bundle.user_secret).user_id() != bundle.device_cert.user {
-            Some(PairFailReason::IdentityMismatch)
-        } else if crate::identity::validate_display_name(&bundle.display_name).is_err() {
-            Some(PairFailReason::InvalidName)
-        } else {
-            None
-        };
+        let reason = validate_bundle(&bundle, &self_device);
         if let Some(reason) = reason {
             let _ = self
                 .inner
@@ -1281,6 +1270,22 @@ impl Pairing {
 
 // ===== 单测 =====
 
+/// 校验 Bundle：证书指向本机、证书验签、用户密钥与证书一致、显示名合法。
+/// 返回首个不满足的失败原因；全部通过返回 None。
+fn validate_bundle(bundle: &PairBundle, self_device: &DeviceId) -> Option<PairFailReason> {
+    if bundle.device_cert.device != *self_device {
+        Some(PairFailReason::CertMismatch)
+    } else if bundle.device_cert.verify().is_err() {
+        Some(PairFailReason::BadSignature)
+    } else if UserKey::from_bytes(&bundle.user_secret).user_id() != bundle.device_cert.user {
+        Some(PairFailReason::IdentityMismatch)
+    } else if crate::identity::validate_display_name(&bundle.display_name).is_err() {
+        Some(PairFailReason::InvalidName)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1306,6 +1311,70 @@ mod tests {
         let e = [7u8; 32];
         assert_eq!(sas_code(&e), sas_code(&e));
         assert_eq!(sas_code(&e).len(), 6);
+    }
+
+    /// 构造一个对 `device` 有效的 Bundle（用户密钥、证书、显示名都合法）。
+    fn valid_bundle(device: DeviceId) -> PairBundle {
+        let user = UserKey::generate();
+        PairBundle {
+            user_secret: user.to_bytes(),
+            display_name: "甲".into(),
+            device_cert: DeviceCert::issue(
+                &user,
+                device,
+                "pc".into(),
+                lanmsg_proto::types::DeviceType::Desktop,
+                1,
+            ),
+            my_devices: Vec::new(),
+            revocations: Vec::new(),
+            contacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn valid_bundle_passes_validation() {
+        let dev = DeviceId([1u8; 32]);
+        assert_eq!(validate_bundle(&valid_bundle(dev), &dev), None);
+    }
+
+    #[test]
+    fn bundle_for_another_device_is_cert_mismatch() {
+        let b = valid_bundle(DeviceId([1u8; 32]));
+        assert_eq!(
+            validate_bundle(&b, &DeviceId([2u8; 32])),
+            Some(PairFailReason::CertMismatch)
+        );
+    }
+
+    #[test]
+    fn tampered_cert_is_bad_signature() {
+        let dev = DeviceId([1u8; 32]);
+        let mut b = valid_bundle(dev);
+        b.device_cert.device_name = "tampered".into();
+        assert_eq!(
+            validate_bundle(&b, &dev),
+            Some(PairFailReason::BadSignature)
+        );
+    }
+
+    #[test]
+    fn user_secret_of_another_user_is_identity_mismatch() {
+        let dev = DeviceId([1u8; 32]);
+        let mut b = valid_bundle(dev);
+        b.user_secret = UserKey::generate().to_bytes();
+        assert_eq!(
+            validate_bundle(&b, &dev),
+            Some(PairFailReason::IdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn empty_display_name_is_invalid_name() {
+        let dev = DeviceId([1u8; 32]);
+        let mut b = valid_bundle(dev);
+        b.display_name = String::new();
+        assert_eq!(validate_bundle(&b, &dev), Some(PairFailReason::InvalidName));
     }
 
     #[test]

@@ -8,8 +8,8 @@ mod common;
 use std::time::Duration;
 
 use lanmsg_api::types::{
-    ConvKind, ErrorCode, Event, InitMode, MessageBodyView, PairMethod, PairStateDto, PairTarget,
-    Request, Response, StatusDto,
+    ConvKind, ErrorCode, Event, InitMode, MessageBodyView, PairFailReason, PairMethod,
+    PairStateDto, PairTarget, Request, Response, StatusDto,
 };
 use lanmsg_core::discovery::MemoryBus;
 
@@ -34,6 +34,17 @@ fn is_failed(session: &str) -> impl Fn(&Event) -> bool + '_ {
             e,
             Event::PairStatus { session: s, state: PairStateDto::Failed { .. } } if s.as_str() == session
         )
+    }
+}
+
+/// 取 PairStatus{Failed} 事件里的失败原因（其余事件 panic）。
+fn failed_reason(ev: &Event) -> PairFailReason {
+    match ev {
+        Event::PairStatus {
+            state: PairStateDto::Failed { reason },
+            ..
+        } => *reason,
+        other => panic!("期望 PairStatus{{Failed}}，实际 {other:?}"),
     }
 }
 
@@ -480,7 +491,7 @@ async fn second_peer_is_rejected_while_session_active_and_first_completes() {
     // C 在 B 的会话进行中加入：被拒绝
     let session_c = join_device(&c, &a_dev).await;
     let failed = c.wait_event(is_failed(&session_c), 5).await;
-    assert!(format!("{failed:?}").contains("reason: Busy"));
+    assert_eq!(failed_reason(&failed), PairFailReason::Busy);
     assert_uninitialized(&c).await;
 
     // 原会话照常完成
@@ -591,14 +602,51 @@ async fn sas_mismatch_fails_both() {
     .expect("PairConfirm 失败");
     let fa = a.wait_event(is_failed(&session_a), 5).await;
     let fb = b.wait_event(is_failed(&session), 5).await;
-    assert!(format!("{fa:?}").contains("reason: SasMismatch"));
-    assert!(format!("{fb:?}").contains("reason: SasMismatch"));
+    assert_eq!(failed_reason(&fa), PairFailReason::SasMismatch);
+    assert_eq!(failed_reason(&fb), PairFailReason::SasMismatch);
 
     // B 保持未初始化。
     match b.try_call(Request::GetSelf).await.expect("GetSelf 失败") {
         Response::SelfInfo { value } => assert!(!value.initialized),
         other => panic!("期望 SelfInfo，实际 {other:?}"),
     }
+}
+
+/// 一方取消：取消方与对端都显示 Cancelled。
+#[tokio::test]
+async fn cancel_shows_cancelled_on_both_sides() {
+    init_log();
+    let bus = MemoryBus::new();
+    let mut a = node(&bus).await;
+    let mut b = node(&bus).await;
+    a.init_first("甲机").await;
+    init_join(&b).await;
+    reannounce(&a).await;
+
+    let session_a = match a
+        .try_call(Request::PairStart {
+            method: PairMethod::Sas,
+        })
+        .await
+        .expect("PairStart 失败")
+    {
+        Response::PairSession { value } => value.session,
+        other => panic!("期望 PairSession，实际 {other:?}"),
+    };
+    let a_dev = a.device_id().await;
+    let session = join_device(&b, &a_dev).await;
+    let _ = wait_show_sas(&mut a, &session_a).await;
+    let _ = wait_show_sas(&mut b, &session).await;
+
+    a.try_call(Request::PairCancel {
+        session: session_a.clone(),
+    })
+    .await
+    .expect("PairCancel 失败");
+    let fa = a.wait_event(is_failed(&session_a), 5).await;
+    let fb = b.wait_event(is_failed(&session), 5).await;
+    assert_eq!(failed_reason(&fa), PairFailReason::Cancelled);
+    assert_eq!(failed_reason(&fb), PairFailReason::Cancelled);
 }
 
 /// Qr 口令错误：双方 Failed{WrongSecret}，B 未初始化且 keystore 无 user.key。
@@ -635,8 +683,8 @@ async fn qr_pairing_with_wrong_secret_fails_and_leaks_nothing() {
 
     let fa = a.wait_event(is_failed(&session), 5).await;
     let fb = b.wait_event(is_failed(&session), 5).await;
-    assert!(format!("{fa:?}").contains("reason: WrongSecret"));
-    assert!(format!("{fb:?}").contains("reason: WrongSecret"));
+    assert_eq!(failed_reason(&fa), PairFailReason::WrongSecret);
+    assert_eq!(failed_reason(&fb), PairFailReason::WrongSecret);
 
     // B 保持未初始化，keystore 无 user.key。
     match b.try_call(Request::GetSelf).await.expect("GetSelf 失败") {

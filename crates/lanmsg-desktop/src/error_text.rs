@@ -135,4 +135,92 @@ mod tests {
             assert_ne!(t, format!("{r:?}"));
         }
     }
+
+    /// 逐个变体断言具体文案，抓映射错位。
+    #[test]
+    fn error_code_texts_match_spec() {
+        let expect = [
+            (ErrorCode::NotInitialized, "请先完成初始设置"),
+            (ErrorCode::AlreadyInitialized, "已经完成初始设置"),
+            (ErrorCode::NotFound, "内容不存在或已被删除"),
+            (ErrorCode::InvalidArgument, "输入有误，请检查后重试"),
+            (ErrorCode::PeerOffline, "对方不在线"),
+            (ErrorCode::Rejected, "操作被拒绝"),
+            (ErrorCode::Io, "读写文件失败"),
+            (ErrorCode::Internal, "出错了，请重试"),
+            (ErrorCode::Unimplemented, "此功能暂不可用"),
+        ];
+        for (code, text) in expect {
+            assert_eq!(error_text(&code), text, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn transfer_fail_texts_match_spec() {
+        let expect = [
+            (TransferFailReason::Cancelled, "已取消下载"),
+            (
+                TransferFailReason::SourceOffline,
+                "下载失败：文件所在设备不在线",
+            ),
+            (TransferFailReason::VerifyFailed, "下载失败：文件校验不通过"),
+            (TransferFailReason::Io, "下载失败：无法写入文件"),
+            (TransferFailReason::Unknown, "下载失败"),
+        ];
+        for (r, text) in expect {
+            assert_eq!(transfer_fail_text(&r), text, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn pair_fail_texts_match_spec() {
+        let expect = [
+            (PairFailReason::Timeout, "配对超时，请重新开始"),
+            (PairFailReason::Cancelled, "配对已取消"),
+            (
+                PairFailReason::NotOpen,
+                "对方没有开启配对，请在对方设备上重新打开",
+            ),
+            (
+                PairFailReason::WrongSecret,
+                "配对口令不正确，请重新扫描二维码",
+            ),
+            (PairFailReason::Busy, "对方正在与其他设备配对，请稍后再试"),
+            (
+                PairFailReason::CertMismatch,
+                "对方发来的证书不属于这台设备，请重试",
+            ),
+            (
+                PairFailReason::BadSignature,
+                "对方发来的证书验证失败，请重试",
+            ),
+            (
+                PairFailReason::IdentityMismatch,
+                "对方的身份信息不一致，请重试",
+            ),
+            (
+                PairFailReason::InvalidName,
+                "对方的名字不合法，请改名后重试",
+            ),
+            (
+                PairFailReason::SasMismatch,
+                "两台设备上的数字不一致，已取消配对",
+            ),
+            (PairFailReason::Unknown, "配对失败，请重试"),
+        ];
+        for (r, text) in expect {
+            assert_eq!(pair_fail_text(&r), text, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn texts_are_distinct_within_each_enum() {
+        use std::collections::HashSet;
+        let codes: HashSet<_> = ALL_CODES.iter().map(error_text).collect();
+        assert_eq!(codes.len(), ALL_CODES.len());
+        let transfers: HashSet<_> = ALL_REASONS.iter().map(transfer_fail_text).collect();
+        assert_eq!(transfers.len(), ALL_REASONS.len());
+        let pairs: HashSet<_> = ALL_PAIR_REASONS.iter().map(pair_fail_text).collect();
+        assert_eq!(pairs.len(), ALL_PAIR_REASONS.len());
+    }
 }
