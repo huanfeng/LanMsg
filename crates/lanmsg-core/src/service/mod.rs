@@ -6,6 +6,7 @@
 pub mod files;
 pub mod handlers;
 pub mod ingest;
+pub(crate) mod redial;
 pub mod views;
 
 use std::collections::{HashMap, HashSet};
@@ -89,6 +90,8 @@ pub(crate) struct Inner {
     pub(crate) static_peers: StdMutex<HashSet<SocketAddr>>,
     /// 发现触发的在途拨号地址：同一地址拨号未结束时不重复发起。
     dialing: StdMutex<HashSet<SocketAddr>>,
+    /// 受信对端的重连状态（任务登记、唤醒信号、尝试计数）。
+    pub(crate) redial: redial::RedialState,
 }
 
 /// 核心服务（C6）。内部状态由 Arc 持有，Clone 廉价。
@@ -287,6 +290,7 @@ impl Service {
             ui_focus: StdMutex::new(None),
             static_peers: StdMutex::new(HashSet::new()),
             dialing: StdMutex::new(HashSet::new()),
+            redial: redial::RedialState::new(),
         });
         let svc = Service {
             inner: inner.clone(),
@@ -310,6 +314,8 @@ impl Service {
         }));
 
         tokio::spawn(routing_task(inner.clone(), conn_rx, disc_rx));
+        // 重启后：为已知地址的受信设备恢复重连任务。
+        redial::resume_all(&inner);
         for addr in static_peers {
             register_static_peer(&inner, addr, false);
         }
@@ -360,6 +366,24 @@ impl Service {
         frame: Frame,
     ) -> Result<(), CoreError> {
         self.inner.conns.send(device, frame).await
+    }
+
+    /// 测试辅助：不登记静态对端地直接拨号（避免静态对端重连掩盖受信重连）。
+    #[doc(hidden)]
+    pub async fn connect_for_test(&self, addr: SocketAddr) -> Result<DeviceId, CoreError> {
+        self.inner.conns.connect(addr, false).await
+    }
+
+    /// 测试辅助：本端主动断开与某设备的连接。
+    #[doc(hidden)]
+    pub async fn disconnect_for_test(&self, device: &DeviceId) {
+        self.inner.conns.disconnect(device).await
+    }
+
+    /// 测试辅助：受信重连累计发起的拨号次数。
+    #[doc(hidden)]
+    pub fn redial_attempts_for_test(&self) -> u64 {
+        self.inner.redial.attempts()
     }
 
     /// 测试辅助：访问存储（集成测试断言 holders 等用）。
@@ -446,6 +470,9 @@ async fn routing_task(
                 Some(ConnEvent::Down(device)) => {
                     sync_workers.remove(&device);
                     inner.sync.on_peer_down(&device);
+                    // 关系可能在连接期间才变成受信（刚加联系人），断开时补建重连任务。
+                    redial::ensure_task(&inner, device);
+                    redial::wake(&inner);
                     let _ = inner
                         .events
                         .send(Event::PeerOffline { device: device.to_hex() });
@@ -568,7 +595,7 @@ async fn routing_task(
 
 /// 连接上线：设备与用户入库，发 PeerOnline；未初始化对端（cert == None，
 /// 配对流程专用）只记日志，不写库、不发 PeerOnline。
-async fn on_up(inner: &Inner, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJob>) {
+async fn on_up(inner: &Arc<Inner>, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJob>) {
     let Some(cert) = &peer.cert else {
         tracing::debug!(peer = %peer.device, "未初始化对端连接（配对流程专用）");
         return;
@@ -591,6 +618,7 @@ async fn on_up(inner: &Inner, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJob>) {
         is_self: false,
         updated_at: now,
     });
+    redial::ensure_task(inner, peer.device);
     let self_user = inner.state.read().unwrap().self_user;
     let _ = inner.events.send(Event::PeerOnline {
         peer: views::peer_view(&inner.store, &peer, self_user.as_ref()),

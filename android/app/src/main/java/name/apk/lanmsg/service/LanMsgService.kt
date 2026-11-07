@@ -5,6 +5,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
 import android.net.wifi.WifiManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -21,10 +22,12 @@ import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.core.CoreHolder
 import name.apk.lanmsg.notify.NotificationChannels
 import uniffi.lanmsg_api.BackgroundMode
+import uniffi.lanmsg_api.Request
 
 /** 常驻前台服务（specialUse）：持有 core 与网络锁，保证后台也能收到局域网消息。 */
 class LanMsgService : LifecycleService() {
     private var locks: NetworkLocks? = null
+    private var networkNotifier: NetworkChangeNotifier? = null
 
     // 常量在编译期内联；API 34 以下系统忽略类型参数
     @SuppressLint("InlinedApi")
@@ -48,6 +51,19 @@ class LanMsgService : LifecycleService() {
                 locks?.setWifiLockWanted(mode == BackgroundMode.REALTIME)
             }
         }
+        // 网络变化时让 core 清零重连退避、立即重拨已配对设备
+        val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        networkNotifier = NetworkChangeNotifier(cm) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    ServiceLocator.coreHolder.api.request(Request.NetworkChanged)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to notify core of network change", e)
+                }
+            }
+        }.also { it.start() }
         // UNDISPATCHED：owner 在主线程上同步登记，onDestroy 的 release 一定排在它之后
         lifecycleScope.launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
             try {
@@ -68,6 +84,8 @@ class LanMsgService : LifecycleService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        networkNotifier?.stop()
+        networkNotifier = null
         locks?.stop()
         locks = null
         ServiceLocator.coreHolder.release(CoreHolder.SERVICE)

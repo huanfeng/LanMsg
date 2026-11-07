@@ -53,6 +53,10 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
         Request::SetSettings { settings } => set_settings(inner, settings).await,
         Request::SetProfile { display_name } => set_profile(inner, display_name).await,
         Request::AddManualPeer { addr } => add_manual_peer(inner, addr).await,
+        Request::NetworkChanged => {
+            super::redial::network_changed(inner);
+            Ok(Response::Ok)
+        }
         Request::ListContacts => list_contacts(inner).await,
         Request::RequestContact { user } => request_contact(inner, user).await,
         Request::ListRequests => list_requests(inner).await,
@@ -991,6 +995,7 @@ fn variant_name(req: &Request) -> &'static str {
         Request::AddManualPeer { .. } => "AddManualPeer",
         Request::ScanSubnet { .. } => "ScanSubnet",
         Request::ListInterfaces => "ListInterfaces",
+        Request::NetworkChanged => "NetworkChanged",
         Request::StationCreate { .. } => "StationCreate",
         Request::StationList => "StationList",
         Request::StationPut { .. } => "StationPut",

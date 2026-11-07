@@ -1,5 +1,8 @@
 package name.apk.lanmsg.service
 
+import android.content.Context
+import android.net.ConnectivityManager
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -11,6 +14,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.testutil.FakeCoreApi
+import uniffi.lanmsg_api.Request
 
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34])
@@ -34,6 +38,20 @@ class LanMsgServiceTest {
         awaitRunning(true)
         assertTrue("service" in ServiceLocator.coreHolder.owners.value)
         controller.destroy()
+        awaitRunning(false)
+    }
+
+    @Test fun network_callback_notifies_core_and_is_unregistered_on_destroy() {
+        val cm = ApplicationProvider.getApplicationContext<Context>().getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val controller = Robolectric.buildService(LanMsgService::class.java).create()
+        awaitRunning(true)
+        val cb = shadowOf(cm).networkCallbacks.single()
+        cb.onAvailable(requireNotNull(cm.activeNetwork))
+        val deadline = System.currentTimeMillis() + 5000
+        while (cores.none { c -> c.requests.any { it is Request.NetworkChanged } } && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        assertTrue(cores.any { c -> c.requests.any { it is Request.NetworkChanged } })
+        controller.destroy()
+        assertTrue(shadowOf(cm).networkCallbacks.isEmpty())
         awaitRunning(false)
     }
 }

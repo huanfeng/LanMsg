@@ -170,6 +170,8 @@ pub enum Request {
         cidr: String,
     },
     ListInterfaces,
+    /// 平台层通知：网络已变化（Wi-Fi 切换 / 恢复）。core 清零重连退避并立即重拨、重新通告。
+    NetworkChanged,
     StationCreate {
         name: String,
     },
