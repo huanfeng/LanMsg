@@ -63,7 +63,7 @@ fn delivery_targets(
     match conv_row.kind {
         ConvKindRow::Dm => {
             let Some(peer_user) = conv_row.peer_user else {
-                warn!("DM 会话缺少 peer_user，无投递目标");
+                warn!("DM conversation has no peer_user, nothing to deliver to");
                 return Vec::new();
             };
             conns
@@ -477,7 +477,7 @@ impl Messaging {
                 self.emit_conv_updated(&conv_row, &self_user);
             }
             Err(e) => {
-                warn!(error = %e, "文件准备失败");
+                warn!(error = %e, "file preparation failed");
                 let _ = self.store.delete_preparing(&row.author, row.seq);
                 let view = preparing_view(
                     self.store.as_ref(),
@@ -628,7 +628,7 @@ impl Messaging {
                 for env in push.envelopes {
                     // 1. verify() 失败 → 丢弃并 warn!。
                     if env.verify().is_err() {
-                        warn!(peer = %from, "SyncPush 信封签名验证失败，丢弃");
+                        warn!(peer = %from, "SyncPush envelope signature verification failed, dropped");
                         continue;
                     }
 
@@ -637,14 +637,14 @@ impl Messaging {
                     let author_row = match self.store.get_device(&author_device) {
                         Ok(Some(r)) => r,
                         _ => {
-                            warn!(peer = %from, author = %author_device, "SyncPush 作者设备未入库，丢弃");
+                            warn!(peer = %from, author = %author_device, "SyncPush author device not in store, dropped");
                             continue;
                         }
                     };
                     // 2b. 作者设备已吊销 → 丢弃（吊销后其签名的信封不再可信，
                     //     无论经哪条路径到达，含第三台设备转发）。
                     if author_row.revoked {
-                        debug!(peer = %from, author = %author_device, "SyncPush 作者设备已吊销，丢弃");
+                        debug!(peer = %from, author = %author_device, "SyncPush author device revoked, dropped");
                         continue;
                     }
                     let author_user = author_row.user;
@@ -679,7 +679,7 @@ impl Messaging {
                                 None
                             };
                             let Some(peer_user) = peer_user else {
-                                warn!(peer = %from, "SyncPush conv 不匹配，丢弃");
+                                warn!(peer = %from, "SyncPush conv mismatch, dropped");
                                 continue;
                             };
                             let row = ConvRow {
@@ -706,7 +706,7 @@ impl Messaging {
                                 continue; // 未初始化，无法校验
                             };
                             if !conv_member_ok(&row, &author_user, &self_user) {
-                                warn!(peer = %from, "SyncPush 成员校验失败，丢弃");
+                                warn!(peer = %from, "SyncPush membership check failed, dropped");
                                 continue;
                             }
                         }
@@ -731,7 +731,7 @@ impl Messaging {
                                 Some(pi) => match cb(&pi, &env, wall) {
                                     Ok(d) => (d, had),
                                     Err(e) => {
-                                        warn!(peer = %from, error = %e, "SyncPush 门控失败，丢弃");
+                                        warn!(peer = %from, error = %e, "SyncPush gate check failed, dropped");
                                         continue;
                                     }
                                 },
@@ -745,7 +745,7 @@ impl Messaging {
                     match decision {
                         GateDecision::Drop => {
                             // 不入库、不回 Ack（发送方保持 Sending）。
-                            warn!(peer = %from, author = %author_user, "SyncPush 被门控丢弃");
+                            warn!(peer = %from, author = %author_user, "SyncPush dropped by gate");
                         }
                         GateDecision::Accept => {
                             // 6a. 会话已存在（步骤 4 已创建）；若 Dm 会话 gate 为

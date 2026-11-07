@@ -90,7 +90,7 @@ impl ConnManager {
             match TcpListener::bind(format!("0.0.0.0:{port}")).await {
                 Ok(l) => l,
                 Err(_) => {
-                    tracing::warn!(port, "端口被占用，回退到随机端口");
+                    tracing::warn!(port, "port in use, falling back to a random port");
                     TcpListener::bind("0.0.0.0:0")
                         .await
                         .map_err(CoreError::Io)?
@@ -673,7 +673,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                 }
                 Ok(Accepted::Data(peer_info)) => {
                     // 数据连接已交给注册的处理器，无需登记；仅记录审计日志。
-                    tracing::debug!(device = %peer_info.device, "数据连接已建立");
+                    tracing::debug!(device = %peer_info.device, "data connection established");
                 }
                 Err(_) => {
                     // 校验失败：已在 Connection 内发送 Error 帧并关闭。

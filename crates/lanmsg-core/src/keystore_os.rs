@@ -184,7 +184,10 @@ impl OsKeyStore {
             };
             if matches!(primary.get(name), Ok(Some(os_v)) if os_v == file_v) {
                 if let Err(e) = self.fallback.delete(name) {
-                    self.warn_once("密钥已在系统密钥库，但删除旧文件失败", &e);
+                    self.warn_once(
+                        "key is in the system keystore but deleting the old file failed",
+                        &e,
+                    );
                 }
             }
         }
@@ -205,7 +208,9 @@ impl OsKeyStore {
                     Ok(Mode::Os)
                 }
                 Err(e) => {
-                    tracing::warn!("系统密钥库不可用，改用文件密钥库: {e}");
+                    tracing::warn!(
+                        "system keystore unavailable, falling back to file keystore: {e}"
+                    );
                     self.write_marker(KEYSTORE_BACKEND_FILE)?;
                     Ok(Mode::File)
                 }
@@ -228,7 +233,9 @@ impl OsKeyStore {
                 Ok(Mode::Os)
             }
             Err(e) => {
-                tracing::warn!("密钥迁入系统密钥库失败，保留文件密钥库: {e}");
+                tracing::warn!(
+                    "failed to migrate key into system keystore, keeping file keystore: {e}"
+                );
                 for (name, v) in &legacy {
                     // 仅当条目值等于本次写入的值才回滚，避免误删他人写入。
                     if matches!(primary.get(name), Ok(Some(cur)) if cur == *v) {
@@ -254,7 +261,7 @@ fn probe(primary: &dyn SecretBackend) -> Result<(), KeyStoreError> {
     primary.set(&name, PROBE_VALUE)?;
     let back = primary.get(&name)?;
     if let Err(e) = primary.remove(&name) {
-        tracing::warn!("删除探测条目失败（忽略）: {e}");
+        tracing::warn!("failed to delete probe entry (ignored): {e}");
     }
     if back.as_deref() == Some(PROBE_VALUE) {
         Ok(())

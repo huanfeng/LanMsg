@@ -118,7 +118,7 @@ pub fn promote_paste(pending: &Path, sent_dir: &Path) -> Result<PathBuf, String>
     let name = pending
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| "无效的文件名".to_string())?;
+        .ok_or_else(|| "invalid file name".to_string())?;
     let stem = name.strip_suffix(".png").unwrap_or(name);
     let mut target = sent_dir.join(name);
     for n in 1..PASTE_NAME_TRIES {
@@ -165,7 +165,7 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, Strin
     use image::ImageEncoder;
     // 编码器遇到长度不符会 panic，先自行校验
     if width == 0 || height == 0 || rgba.len() as u64 != u64::from(width) * u64::from(height) * 4 {
-        return Err(format!("图片数据长度与 {width}x{height} 不符"));
+        return Err(format!("image data length does not match {width}x{height}"));
     }
     let mut out = Vec::new();
     image::codecs::png::PngEncoder::new(&mut out)

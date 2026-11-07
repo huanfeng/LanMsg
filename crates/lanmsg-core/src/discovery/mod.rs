@@ -236,20 +236,20 @@ async fn on_packet(
     let ann: Announce = match from_cbor(bytes) {
         Ok(a) => a,
         Err(e) => {
-            tracing::debug!(peer = %from, error = %e, "通告 CBOR 解析失败，丢弃");
+            tracing::debug!(peer = %from, error = %e, "announce CBOR decode failed, dropped");
             return;
         }
     };
     if let Err(e) = ann.verify() {
-        tracing::debug!(peer = %from, error = %e, "通告验签失败，丢弃");
+        tracing::debug!(peer = %from, error = %e, "announce signature verification failed, dropped");
         return;
     }
     if ann.proto != PROTO_VERSION {
-        tracing::debug!(peer = %from, proto = ann.proto, "通告协议版本不符，丢弃");
+        tracing::debug!(peer = %from, proto = ann.proto, "announce protocol version mismatch, dropped");
         return;
     }
     if ann.cert.device == self_device {
-        tracing::debug!(peer = %from, "收到自身通告，丢弃");
+        tracing::debug!(peer = %from, "received own announce, dropped");
         return;
     }
     if events
@@ -261,7 +261,7 @@ async fn on_packet(
         .await
         .is_err()
     {
-        tracing::debug!("发现事件接收端已关闭，丢弃事件");
+        tracing::debug!("discovery event receiver closed, event dropped");
     }
     // 首次（或距上次回应超过冷却期）时，向 from 单播回一份自己的通告。
     let now = std::time::Instant::now();

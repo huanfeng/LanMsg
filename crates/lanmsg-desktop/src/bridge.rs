@@ -137,7 +137,7 @@ impl Bridge {
                 {
                     Ok(rt) => rt,
                     Err(e) => {
-                        tracing::error!("桥线程创建运行时失败: {e}");
+                        tracing::error!("bridge thread failed to create runtime: {e}");
                         let _ = ui.send(UiMsg::Disconnected(e.to_string()));
                         return;
                     }
@@ -145,7 +145,7 @@ impl Bridge {
                 rt.block_on(run(endpoint, data_dir, ui, rx));
             });
         if let Err(e) = spawned {
-            tracing::error!("启动桥线程失败: {e}");
+            tracing::error!("failed to start bridge thread: {e}");
         }
         Bridge { tx: Some(tx) }
     }
@@ -258,7 +258,7 @@ async fn run(
                             reported = false;
                         }
                         if let Err(le) = spawn_daemon(&data_dir) {
-                            tracing::warn!("拉起 lanmsgd 失败: {le}");
+                            tracing::warn!("failed to launch lanmsgd: {le}");
                             reported = true;
                             if ui
                                 .send(UiMsg::LaunchFailed(launch_failure_text(&le)))
@@ -309,7 +309,7 @@ async fn run(
                         let msg = match spawn_daemon(&data_dir) {
                             Ok(()) => UiMsg::Disconnected(crate::strings::DAEMON_STARTING.to_string()),
                             Err(le) => {
-                                tracing::warn!("拉起 lanmsgd 失败: {le}");
+                                tracing::warn!("failed to launch lanmsgd: {le}");
                                 UiMsg::LaunchFailed(launch_failure_text(&le))
                             }
                         };
@@ -335,7 +335,7 @@ async fn serve(
         tokio::select! {
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else {
-                    return "界面已退出".to_string();
+                    return "UI exited".to_string();
                 };
                 let client = client.clone();
                 let ui = ui.clone();
@@ -359,16 +359,16 @@ async fn serve(
             ev = events.recv() => match ev {
                 Ok(e) => {
                     if ui.send(UiMsg::Event(e)).is_err() {
-                        return "界面已退出".to_string();
+                        return "UI exited".to_string();
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     if ui.send(UiMsg::Resync).is_err() {
-                        return "界面已退出".to_string();
+                        return "UI exited".to_string();
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    return "事件流已关闭".to_string();
+                    return "event stream closed".to_string();
                 }
             },
         }

@@ -324,7 +324,7 @@ impl Service {
         let backfill_store = inner.store.clone();
         tokio::task::spawn_blocking(move || {
             if let Err(e) = backfill_store.backfill_search_index() {
-                tracing::warn!("搜索索引回填失败: {e}");
+                tracing::warn!("search index backfill failed: {e}");
             }
         });
 
@@ -511,10 +511,10 @@ async fn routing_task(
                     Frame::CertUpdate(certs) => {
                         if let Some(pi) = inner.conns.peer(&d) {
                             if let Err(e) = inner.trust.on_cert_update(&pi, certs).await {
-                                tracing::warn!(peer = %d, error = %e, "CertUpdate 处理失败");
+                                tracing::warn!(peer = %d, error = %e, "CertUpdate handling failed");
                             }
                         } else {
-                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
+                            tracing::debug!(peer = %d, "connection no longer registered when frame arrived, dropped");
                         }
                     }
                     Frame::ContactRequest(req) => {
@@ -522,10 +522,10 @@ async fn routing_task(
                             if let Err(e) =
                                 inner.trust.on_contact_request(&inner.msg, &pi, req).await
                             {
-                                tracing::warn!(peer = %d, error = %e, "ContactRequest 处理失败");
+                                tracing::warn!(peer = %d, error = %e, "ContactRequest handling failed");
                             }
                         } else {
-                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
+                            tracing::debug!(peer = %d, "connection no longer registered when frame arrived, dropped");
                         }
                     }
                     Frame::ContactResponse(resp) => {
@@ -533,10 +533,10 @@ async fn routing_task(
                             if let Err(e) =
                                 inner.trust.on_contact_response(&inner.msg, &pi, resp).await
                             {
-                                tracing::warn!(peer = %d, error = %e, "ContactResponse 处理失败");
+                                tracing::warn!(peer = %d, error = %e, "ContactResponse handling failed");
                             }
                         } else {
-                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
+                            tracing::debug!(peer = %d, "connection no longer registered when frame arrived, dropped");
                         }
                     }
                     // 吊销帧分派给 Trust；本机被吊销时清空 HelloInfo 证书、
@@ -554,21 +554,21 @@ async fn routing_task(
                                 }
                                 Ok(_) => {}
                                 Err(e) => {
-                                    tracing::warn!(peer = %d, error = %e, "Revocation 处理失败");
+                                    tracing::warn!(peer = %d, error = %e, "Revocation handling failed");
                                 }
                             }
                         } else {
-                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
+                            tracing::debug!(peer = %d, "connection no longer registered when frame arrived, dropped");
                         }
                     }
                     // 配对帧分派给 Pairing（P2 Task 7）。
                     Frame::Pair(p) => {
                         if let Some(pi) = inner.conns.peer(&d) {
                             if let Err(e) = inner.pairing.on_pair_frame(&pi, p).await {
-                                tracing::warn!(peer = %d, error = %e, "Pair 帧处理失败");
+                                tracing::warn!(peer = %d, error = %e, "Pair frame handling failed");
                             }
                         } else {
-                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
+                            tracing::debug!(peer = %d, "connection no longer registered when frame arrived, dropped");
                         }
                     }
                     // 同步 offer 分派给 SyncEngine（P2 Task 9）。
@@ -594,11 +594,11 @@ async fn routing_task(
                                 }
                                 Ok(None) => {}
                                 Err(e) => {
-                                    tracing::warn!(peer = %d, error = %e, "SyncOffer 处理失败");
+                                    tracing::warn!(peer = %d, error = %e, "SyncOffer handling failed");
                                 }
                             }
                         } else {
-                            tracing::debug!(peer = %d, "帧到达时连接已不在登记表，丢弃");
+                            tracing::debug!(peer = %d, "connection no longer registered when frame arrived, dropped");
                         }
                     }
                     // Blob 持有者查询/应答分派给 BlobServer（P2 Task 11）。
@@ -626,7 +626,7 @@ async fn routing_task(
 /// 配对流程专用）只记日志，不写库、不发 PeerOnline。
 async fn on_up(inner: &Arc<Inner>, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJob>) {
     let Some(cert) = &peer.cert else {
-        tracing::debug!(peer = %peer.device, "未初始化对端连接（配对流程专用）");
+        tracing::debug!(peer = %peer.device, "uninitialized peer connection (pairing only)");
         return;
     };
     let now = now_millis();
@@ -665,7 +665,7 @@ fn try_enqueue<T>(tx: &mpsc::Sender<T>, job: T, peer: &DeviceId) -> bool {
     match tx.try_send(job) {
         Ok(()) => true,
         Err(e) => {
-            tracing::warn!(peer = %peer, error = %e, "同步作业队列已满或已关闭，丢弃作业");
+            tracing::warn!(peer = %peer, error = %e, "sync job queue full or closed, job dropped");
             false
         }
     }
@@ -683,12 +683,12 @@ async fn sync_worker(sync: crate::sync::SyncEngine, mut rx: mpsc::Receiver<SyncJ
         match job {
             SyncJob::Up(peer) => {
                 if let Err(e) = sync.on_peer_up(&peer).await {
-                    tracing::warn!(peer = %peer.device, error = %e, "SyncOffer 生成失败");
+                    tracing::warn!(peer = %peer.device, error = %e, "SyncOffer generation failed");
                 }
             }
             SyncJob::Offer(peer, plan) => {
                 if let Err(e) = sync.run_offer(&peer, plan).await {
-                    tracing::warn!(peer = %peer.device, error = %e, "SyncOffer 处理失败");
+                    tracing::warn!(peer = %peer.device, error = %e, "SyncOffer handling failed");
                 }
             }
         }

@@ -13,10 +13,10 @@ use crate::views::confirm::{confirm_host, Confirm, ConfirmState};
 /// 设备类型的中文名；未知类型原样显示。
 pub fn device_type_label(ty: &str) -> String {
     match ty {
-        "desktop" => "台式机",
-        "laptop" => "笔记本",
-        "phone" => "手机",
-        "tablet" => "平板",
+        "desktop" => strings::DEVICE_TYPE_DESKTOP,
+        "laptop" => strings::DEVICE_TYPE_LAPTOP,
+        "phone" => strings::DEVICE_TYPE_PHONE,
+        "tablet" => strings::DEVICE_TYPE_TABLET,
         other => other,
     }
     .to_string()

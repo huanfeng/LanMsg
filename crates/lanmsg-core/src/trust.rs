@@ -739,7 +739,7 @@ impl Trust {
         let mut forward: Vec<DeviceCert> = Vec::new();
         for cert in certs {
             if cert.verify().is_err() {
-                tracing::warn!(peer = %from.device, "CertUpdate 证书验签失败，忽略");
+                tracing::warn!(peer = %from.device, "CertUpdate certificate signature verification failed, ignored");
                 continue;
             }
             // 计划规则（自己或 Accepted 联系人）之外，放宽接受"发送方用户
@@ -754,11 +754,11 @@ impl Trust {
                     .flatten()
                     .is_some_and(|r| r.state == ContactState::Accepted);
             if !allowed {
-                tracing::warn!(peer = %from.device, "CertUpdate 证书用户非自己或联系人，忽略");
+                tracing::warn!(peer = %from.device, "CertUpdate certificate user is neither self nor a contact, ignored");
                 continue;
             }
             if self.store.is_revoked(&cert.device)? {
-                tracing::warn!(peer = %from.device, "CertUpdate 证书设备已吊销，忽略");
+                tracing::warn!(peer = %from.device, "CertUpdate certificate device revoked, ignored");
                 continue;
             }
             let known = self.store.get_device(&cert.device)?.is_some();
@@ -915,7 +915,7 @@ impl Trust {
             tokio::spawn(async move {
                 for d in targets {
                     if let Err(e) = conns.send(&d, Frame::Revocation(rev.clone())).await {
-                        tracing::debug!(peer = %d, error = %e, "吊销转发发送失败");
+                        tracing::debug!(peer = %d, error = %e, "failed to forward revocation");
                     }
                 }
             });

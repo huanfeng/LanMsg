@@ -240,7 +240,9 @@ impl Store {
                     Ok(env) => env,
                     Err(e) => {
                         skipped += 1;
-                        tracing::warn!("回填索引：跳过无法解码的信封 (seq={seq}): {e}");
+                        tracing::warn!(
+                            "index backfill: skipping undecodable envelope (seq={seq}): {e}"
+                        );
                         continue;
                     }
                 };
@@ -254,7 +256,7 @@ impl Store {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         if skipped > 0 {
-            tracing::warn!("回填索引：共跳过 {skipped} 条无法解码的消息");
+            tracing::warn!("index backfill: skipped {skipped} undecodable messages in total");
         }
         self.set_setting("search_index_v", "1")?;
         Ok(done)

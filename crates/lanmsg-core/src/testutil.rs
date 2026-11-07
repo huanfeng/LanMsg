@@ -79,7 +79,7 @@ pub async fn node() -> Node {
         id.init_first_device(
             &ks,
             &store,
-            "测试设备",
+            "test device",
             DeviceType::Desktop,
             1_700_000_000_000,
         )
@@ -99,7 +99,7 @@ pub async fn node() -> Node {
 
     // ConnManager：创建事件通道，发送端传给 bind，接收端留给路由任务。
     let (hello_tx, hello_rx) = watch::channel(HelloInfo {
-        display_name: "测试".into(),
+        display_name: "test".into(),
         cert: None,
         listen_port: 0,
     });
@@ -193,7 +193,7 @@ async fn wait_devices_synced(a: &Node, b: &Node) {
             return;
         }
         if start.elapsed() > Duration::from_secs(5) {
-            panic!("双方设备未在 5 秒内入库");
+            panic!("devices not stored on both sides within 5 seconds");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -216,7 +216,7 @@ pub async fn pair_of_nodes() -> (Node, Node) {
             break;
         }
         if start.elapsed() > Duration::from_secs(5) {
-            panic!("双方未在 5 秒内建立连接");
+            panic!("connection not established on both sides within 5 seconds");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -240,8 +240,8 @@ pub async fn next_event(
                 }
             }
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
-            Ok(Err(broadcast::error::RecvError::Closed)) => panic!("事件通道已关闭"),
-            Err(_) => panic!("5 秒内未收到匹配事件"),
+            Ok(Err(broadcast::error::RecvError::Closed)) => panic!("event channel closed"),
+            Err(_) => panic!("no matching event within 5 seconds"),
         }
     }
 }

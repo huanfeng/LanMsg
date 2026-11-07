@@ -80,7 +80,7 @@ fn main() {
         Some(name) => match DemoPage::parse(name) {
             Some(p) => Some(p),
             None => {
-                eprintln!("未知的演示页面: {name}");
+                eprintln!("unknown demo page: {name}");
                 std::process::exit(2);
             }
         },

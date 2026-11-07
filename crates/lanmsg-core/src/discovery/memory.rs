@@ -63,7 +63,7 @@ pub(crate) fn spawn_source(bus: &MemoryBus, inbox: mpsc::Sender<(Vec<u8>, Socket
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::debug!("内存总线接收滞后，丢失 {n} 包");
+                    tracing::debug!("memory bus receiver lagged, dropped {n} packets");
                 }
             }
         }

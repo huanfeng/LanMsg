@@ -43,7 +43,7 @@ impl BlobServer {
             let server = self.clone();
             tokio::spawn(async move {
                 if let Err(e) = server.serve(peer, stream).await {
-                    tracing::warn!(error = %e, "数据连接服务异常退出");
+                    tracing::warn!(error = %e, "data connection service exited abnormally");
                 }
             });
         })

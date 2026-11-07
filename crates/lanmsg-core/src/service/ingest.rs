@@ -49,7 +49,7 @@ async fn on_blobs_received(svc: &Inner, m: &StoredMessage, hashes: Vec<BlobHash>
     let now = now_millis();
     for h in hashes {
         if let Err(e) = svc.store.add_holder(&h, &m.env.id.author, now) {
-            tracing::warn!(error = %e, "记录 Blob 持有者失败");
+            tracing::warn!(error = %e, "failed to record blob holder");
         }
     }
 }
@@ -97,7 +97,7 @@ async fn auto_download_blobs(svc: &Inner, from: DeviceId, m: &StoredMessage, met
     let settings = match crate::settings::load_settings(&svc.store) {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!(error = %e, "自动下载读取设置失败");
+            tracing::warn!(error = %e, "auto-download failed to read settings");
             return;
         }
     };
@@ -105,7 +105,7 @@ async fn auto_download_blobs(svc: &Inner, from: DeviceId, m: &StoredMessage, met
         if crate::blob::policy::should_auto_download(meta, &settings, &ctx) {
             if let Err(e) = svc.transfer.clone().download(meta.hash).await {
                 // 已在本地 / 已在传：正常情形，跳过；其余记日志。
-                tracing::debug!(error = %e, "自动下载未发起");
+                tracing::debug!(error = %e, "auto-download not started");
             }
         }
     }
@@ -139,7 +139,7 @@ async fn on_read(svc: &Inner, m: &StoredMessage, upto: &Hlc) {
     {
         Ok(ids) => ids,
         Err(e) => {
-            tracing::warn!(error = %e, "已读回执应用失败");
+            tracing::warn!(error = %e, "failed to apply read receipt");
             return;
         }
     };
@@ -187,7 +187,7 @@ async fn on_recall(svc: &Inner, m: &StoredMessage, target: &MsgId) {
         }
         _ => {
             if let Err(e) = svc.store.undo_recall(target) {
-                tracing::warn!(error = %e, "undo_recall 失败");
+                tracing::warn!(error = %e, "undo_recall failed");
             }
         }
     }
@@ -207,7 +207,7 @@ async fn on_local_deleted(svc: &Inner, m: &StoredMessage, msgs: &[MsgId]) {
         return;
     }
     if let Err(e) = svc.store.mark_deleted(msgs) {
-        tracing::warn!(error = %e, "本地删除应用失败");
+        tracing::warn!(error = %e, "failed to apply local delete");
         return;
     }
     crate::service::notify_conversation(svc, &m.env.conv);
@@ -233,7 +233,7 @@ async fn on_contact_updated(svc: &Inner, m: &StoredMessage, rec: &ContactRecord)
             let _ = svc.events.send(lanmsg_api::types::Event::ContactsChanged);
         }
         Ok(false) => {}
-        Err(e) => tracing::warn!(error = %e, "ContactUpdated 应用失败"),
+        Err(e) => tracing::warn!(error = %e, "failed to apply ContactUpdated"),
     }
 }
 
@@ -260,7 +260,7 @@ async fn on_profile_updated(svc: &Inner, m: &StoredMessage, display_name: &str) 
     }
 
     let Ok(display) = crate::identity::validate_display_name(display_name) else {
-        tracing::warn!("忽略非法的对端资料更新显示名");
+        tracing::warn!("ignoring invalid display name in peer profile update");
         return;
     };
     let now = now_millis();

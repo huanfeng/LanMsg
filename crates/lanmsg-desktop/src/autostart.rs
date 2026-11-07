@@ -15,7 +15,7 @@ fn daemon_exe() -> io::Result<PathBuf> {
     let dir = std::env::current_exe()?
         .parent()
         .map(|d| d.to_path_buf())
-        .ok_or_else(|| io::Error::other("无法确定可执行文件目录"))?;
+        .ok_or_else(|| io::Error::other("cannot determine executable directory"))?;
     Ok(dir.join(name))
 }
 
@@ -191,7 +191,7 @@ mod imp {
         std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(PathBuf::from)
-            .ok_or_else(|| io::Error::other("未设置 HOME"))
+            .ok_or_else(|| io::Error::other("HOME is not set"))
     }
 
     /// 自启项文件路径。
@@ -242,7 +242,7 @@ mod imp {
         let home = std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(PathBuf::from)
-            .ok_or_else(|| io::Error::other("未设置 HOME"))?;
+            .ok_or_else(|| io::Error::other("HOME is not set"))?;
         Ok(home.join("Library/LaunchAgents/app.lanmsg.daemon.plist"))
     }
 
@@ -273,7 +273,9 @@ mod imp {
     use std::path::Path;
 
     pub fn set_enabled(_on: bool, _exe: &Path, _data_dir: Option<&Path>) -> io::Result<()> {
-        Err(io::Error::other("当前平台不支持开机自启"))
+        Err(io::Error::other(
+            "autostart is not supported on this platform",
+        ))
     }
 
     pub fn is_enabled() -> bool {

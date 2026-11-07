@@ -489,7 +489,7 @@ impl Pairing {
             }
         }
         let a = a_peer.ok_or(CoreError::PeerOffline)?;
-        tracing::debug!(peer = %a.device, addr = %a.dial_addr, "join：已连接对端");
+        tracing::debug!(peer = %a.device, addr = %a.dial_addr, "join: connected to peer");
 
         let device_name = self
             .inner
@@ -524,7 +524,7 @@ impl Pairing {
                 }),
             )
             .await?;
-        tracing::debug!(peer = %a.device, method = ?method, "join：Begin 已发送");
+        tracing::debug!(peer = %a.device, method = ?method, "join: Begin sent");
         match secret {
             Some(s) => {
                 // Qr：Begin 后立即发证明。
@@ -633,7 +633,7 @@ impl Pairing {
 
     /// 配对帧入口（routing_task 分派）。
     pub async fn on_pair_frame(&self, from: &PeerInfo, msg: PairMsg) -> Result<(), CoreError> {
-        tracing::debug!(peer = %from.device, kind = %pair_kind(&msg), "收到配对帧");
+        tracing::debug!(peer = %from.device, kind = %pair_kind(&msg), "pairing frame received");
         match msg {
             PairMsg::Begin {
                 session,
@@ -676,7 +676,7 @@ impl Pairing {
                 || (matches!(w.method, PairMethodWire::Qr) && matches!(method, PairMethodWire::Sas))
         };
         let Some(w) = window.filter(accepts) else {
-            tracing::debug!(peer = %from.device, "Begin 被拒：窗口未开或方法不符");
+            tracing::debug!(peer = %from.device, "Begin rejected: window closed or method mismatch");
             let _ = self
                 .inner
                 .conns
@@ -980,7 +980,7 @@ impl Pairing {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         self.inner.conns.disconnect(&a_device).await;
         if let Err(e) = self.inner.conns.connect(from.dial_addr, false).await {
-            tracing::warn!(peer = %a_device, error = %e, "配对完成后的重连失败");
+            tracing::warn!(peer = %a_device, error = %e, "reconnect after pairing failed");
         }
         let mut g = self.inner.active.lock().unwrap();
         if g.as_ref().is_some_and(|a| a.session == session) {
@@ -1033,7 +1033,7 @@ impl Pairing {
                 )
                 .await
             {
-                tracing::warn!(error = %e, "DeviceAdded 系统消息发送失败");
+                tracing::warn!(error = %e, "failed to send DeviceAdded system message");
             }
         }
 

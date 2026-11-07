@@ -46,7 +46,7 @@ fn enum_ifaces() -> (Vec<Ipv4Addr>, Vec<u32>) {
     let ifaces = match if_addrs::get_if_addrs() {
         Ok(list) => list,
         Err(e) => {
-            tracing::debug!(error = %e, "枚举网卡失败");
+            tracing::debug!(error = %e, "failed to enumerate network interfaces");
             return (v4, v6);
         }
     };
@@ -81,7 +81,7 @@ impl McSockets {
         let (v4_ips, v6_idx) = enum_ifaces();
         for ip in &v4_ips {
             if let Err(e) = v4_ref.join_multicast_v4(&DISCOVERY_V4, ip) {
-                tracing::debug!(error = %e, ip = %ip, "加入 IPv4 组播组失败");
+                tracing::debug!(error = %e, ip = %ip, "failed to join IPv4 multicast group");
             }
         }
         let (v6, joined) = match new_sock(
@@ -102,14 +102,14 @@ impl McSockets {
                     match v6_ref.join_multicast_v6(&DISCOVERY_V6, *idx) {
                         Ok(()) => joined.push(*idx),
                         Err(e) => {
-                            tracing::debug!(error = %e, index = *idx, "加入 IPv6 组播组失败");
+                            tracing::debug!(error = %e, index = *idx, "failed to join IPv6 multicast group");
                         }
                     }
                 }
                 (Some(arc_sock), joined)
             }
             Err(e) => {
-                tracing::debug!(error = %e, "IPv6 组播套接字创建失败，仅用 IPv4");
+                tracing::debug!(error = %e, "failed to create IPv6 multicast socket, using IPv4 only");
                 (None, Vec::new())
             }
         };
@@ -127,7 +127,7 @@ impl McSockets {
         for ip in v4_ips {
             if !self.v4_ifaces.contains(ip) {
                 if let Err(e) = v4_ref.join_multicast_v4(&DISCOVERY_V4, ip) {
-                    tracing::debug!(error = %e, ip = %ip, "加入新 IPv4 网卡组播组失败");
+                    tracing::debug!(error = %e, ip = %ip, "failed to join multicast group on new IPv4 interface");
                 }
             }
         }
@@ -138,7 +138,7 @@ impl McSockets {
                     match v6_ref.join_multicast_v6(&DISCOVERY_V6, *idx) {
                         Ok(()) => {}
                         Err(e) => {
-                            tracing::debug!(error = %e, index = *idx, "加入新 IPv6 网卡组播组失败");
+                            tracing::debug!(error = %e, index = *idx, "failed to join multicast group on new IPv6 interface");
                         }
                     }
                 }
@@ -191,7 +191,7 @@ async fn recv_loop(sock: Arc<UdpSocket>, inbox: mpsc::Sender<(Vec<u8>, SocketAdd
                     break; // 收件箱关闭
                 }
             }
-            Err(e) => tracing::debug!(error = %e, "发现接收失败"),
+            Err(e) => tracing::debug!(error = %e, "discovery receive failed"),
         }
     }
 }
@@ -220,7 +220,7 @@ pub(crate) async fn run(
     let sockets = Arc::new(match McSockets::open() {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!(error = %e, "打开发现套接字失败");
+            tracing::error!(error = %e, "failed to open discovery socket");
             return;
         }
     });

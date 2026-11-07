@@ -202,7 +202,7 @@ impl TransferEngine {
             let start = Instant::now();
             while self.tasks.lock().unwrap().contains_key(transfer_id) {
                 if start.elapsed() > Duration::from_secs(5) {
-                    tracing::warn!(transfer = %transfer_id, "取消等待任务退出超时");
+                    tracing::warn!(transfer = %transfer_id, "timed out waiting for task to exit on cancel");
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -357,7 +357,7 @@ impl TransferEngine {
             _ => match self.fetch_meta(&candidates, &row.hash).await {
                 Some(s) => {
                     if let Err(e) = self.store.put_blob(&mb.meta, &s) {
-                        tracing::warn!(error = %e, "持久化分段表失败");
+                        tracing::warn!(error = %e, "failed to persist segment table");
                     }
                     s
                 }
@@ -443,7 +443,7 @@ impl TransferEngine {
             }
             for h in handles {
                 if let Err(e) = h.await {
-                    tracing::warn!(error = %e, "传输工作者异常退出");
+                    tracing::warn!(error = %e, "transfer worker exited abnormally");
                 }
             }
             let failed = shared.failed_out.lock().unwrap().clone();
@@ -520,7 +520,7 @@ impl TransferEngine {
                     {
                         let _guard = shared.mark_lock.lock().unwrap();
                         if let Err(e) = self.store.mark_segment_done(&job.id, idx) {
-                            tracing::warn!(error = %e, "标记分段完成失败");
+                            tracing::warn!(error = %e, "failed to mark segment done");
                         }
                     }
                     self.record_progress(&shared, &job, len);
@@ -600,7 +600,7 @@ impl TransferEngine {
                     read_segment_to_file(stream, len, expect, file.clone(), offset).await
                 }
                 other => {
-                    tracing::debug!(?other, offset, "GetRange 应答帧非预期");
+                    tracing::debug!(?other, offset, "unexpected reply frame to GetRange");
                     Err(FetchFail::Source)
                 }
             }
@@ -689,7 +689,7 @@ impl TransferEngine {
                 )
                 .await
             {
-                tracing::warn!(error = %e, "发送 BlobQuery 失败");
+                tracing::warn!(error = %e, "failed to send BlobQuery");
             }
         }
         tokio::select! {
@@ -777,7 +777,7 @@ impl TransferEngine {
         };
         if hashed.hash.0 != meta.hash.0 {
             if let Err(e) = std::fs::remove_file(&row.part_path) {
-                tracing::warn!(error = %e, "删除校验失败的 .part 失败");
+                tracing::warn!(error = %e, "failed to delete .part file after verification failure");
             }
             return Some((
                 TransferFailReason::VerifyFailed,
@@ -808,7 +808,7 @@ impl TransferEngine {
             .store
             .add_holder(&row.hash, self_device, crate::service::now_millis())
         {
-            tracing::warn!(error = %e, "记录本机为持有者失败");
+            tracing::warn!(error = %e, "failed to record this device as holder");
         }
         // 向已连接的自己设备发 BlobHave，让其他设备知道本机持有。
         let self_user = self.identity.read().unwrap().user_id();
@@ -824,7 +824,7 @@ impl TransferEngine {
                     )
                     .await
                 {
-                    tracing::warn!(error = %e, "发送 BlobHave 失败");
+                    tracing::warn!(error = %e, "failed to send BlobHave");
                 }
             }
         }
@@ -867,7 +867,7 @@ impl TransferEngine {
         r.state = TransferState::Failed;
         r.error = Some(msg.to_string());
         if let Err(e) = self.store.upsert_transfer(&r) {
-            tracing::warn!(error = %e, "写入失败状态出错");
+            tracing::warn!(error = %e, "failed to write failed state");
         }
         let _ = self.events.send(Event::TransferFinished {
             transfer: row.transfer_id.clone(),

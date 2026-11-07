@@ -106,6 +106,11 @@ pub const SOURCE_STORED_PREFIX: &str = "存于 ";
 pub const REQ_PREVIEW_FOLDER_PREFIX: &str = "文件夹 ";
 pub const REQ_PREVIEW_FILES_ETC_MID: &str = " 等 ";
 pub const REQ_PREVIEW_FILES_UNIT: &str = " 个文件";
+/// 设备类型名称。
+pub const DEVICE_TYPE_DESKTOP: &str = "台式机";
+pub const DEVICE_TYPE_LAPTOP: &str = "笔记本";
+pub const DEVICE_TYPE_PHONE: &str = "手机";
+pub const DEVICE_TYPE_TABLET: &str = "平板";
 /// 自设备会话的标题（core 给空串，界面按 kind 显示）。
 pub const SELF_DEVICES_TITLE: &str = "我的设备";
 pub const MSG_UNSUPPORTED: &str = "不支持的消息类型，请升级";
