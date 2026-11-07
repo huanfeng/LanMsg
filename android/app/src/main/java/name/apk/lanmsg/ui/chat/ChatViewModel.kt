@@ -104,6 +104,7 @@ class ChatViewModel(
     }
 
     fun download(hash: String) {
+        cancelled -= hash
         viewModelScope.launch {
             guarded {
                 val r = core.request(Request.DownloadBlob(hash))
@@ -115,7 +116,10 @@ class ChatViewModel(
     fun cancel(hash: String) {
         val transfer = transfers[hash] ?: return
         cancelled += hash
-        viewModelScope.launch { guarded { core.request(Request.CancelTransfer(transfer)) } }
+        viewModelScope.launch {
+            // 取消没发出去，之后的失败是真实失败，不能再当作用户取消
+            guarded(onFail = { s -> cancelled -= hash; s }) { core.request(Request.CancelTransfer(transfer)) }
+        }
     }
 
     fun recall(msgId: String) {

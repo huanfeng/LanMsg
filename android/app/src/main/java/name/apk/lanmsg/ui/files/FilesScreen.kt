@@ -93,6 +93,7 @@ fun FilesScreen(initialConv: String?, onOpenChat: (String) -> Unit, onForward: (
         onDevice = vm::setSourceDevice,
         onQuery = vm::setQuery,
         onDismissError = vm::clearError,
+        onDismissDownloadError = vm::clearDownloadError,
         onClick = { v ->
             when (v.item.state) {
                 BlobState.REMOTE -> vm.download(v.item.hash)
@@ -124,6 +125,7 @@ fun FilesContent(
     onDevice: (String?) -> Unit,
     onQuery: (String) -> Unit,
     onDismissError: () -> Unit,
+    onDismissDownloadError: () -> Unit,
     onClick: (FileView) -> Unit,
     onCancel: (String) -> Unit,
     onOpenChat: (String) -> Unit,
@@ -134,6 +136,10 @@ fun FilesContent(
     val errorText = state.error?.let { stringResource(R.string.err_generic, it) }
     LaunchedEffect(errorText) {
         errorText?.let { snackbar.showSnackbar(it); onDismissError() }
+    }
+    val downloadErrorText = state.downloadError?.let { stringResource(R.string.err_generic, it) }
+    LaunchedEffect(downloadErrorText) {
+        downloadErrorText?.let { snackbar.showSnackbar(it); onDismissDownloadError() }
     }
     var query by remember { mutableStateOf("") }
     var filterMenu by remember { mutableStateOf(false) }

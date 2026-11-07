@@ -184,20 +184,59 @@ class FilesViewModelTest {
         assertTrue(fake.requests.contains(Request.CancelTransfer("t1")))
     }
 
-    @Test fun failed_transfer_sets_error_but_user_cancel_does_not() = runTest {
+    @Test fun failed_transfer_sets_download_error_that_survives_refresh() = runTest {
         val fake = fake()
         val vm = FilesViewModel(fake, null)
         advanceUntilIdle()
         fake.emit(Event.TransferProgress("t1", "h1", 1uL, 10uL, 0uL)); advanceUntilIdle()
-        // 页面收到错误后立即显示并 clearError；500ms 后的重查成功会重置 error，这里只看事件当下
-        fake.emit(Event.TransferFinished("t1", "h1", false, "connection reset")); runCurrent()
-        assertEquals("connection reset", vm.state.value.error)
+        fake.emit(Event.TransferFinished("t1", "h1", false, "connection reset"))
+        // 500ms 后的重查成功不能清掉下载失败提示，否则 Snackbar 只闪一下
+        advanceUntilIdle()
+        assertEquals("connection reset", vm.state.value.downloadError)
+        assertNull(vm.state.value.error)
         assertTrue(vm.state.value.progress.isEmpty())
-        vm.clearError()
+        vm.clearDownloadError()
+        assertNull(vm.state.value.downloadError)
+    }
+
+    @Test fun user_cancel_does_not_set_download_error() = runTest {
+        val fake = fake()
+        val vm = FilesViewModel(fake, null)
+        advanceUntilIdle()
         fake.emit(Event.TransferProgress("t2", "h2", 1uL, 10uL, 0uL)); advanceUntilIdle()
         vm.cancel("h2"); advanceUntilIdle()
-        fake.emit(Event.TransferFinished("t2", "h2", false, "cancelled")); runCurrent()
-        assertNull(vm.state.value.error)
+        fake.emit(Event.TransferFinished("t2", "h2", false, "cancelled")); advanceUntilIdle()
+        assertNull(vm.state.value.downloadError)
+    }
+
+    @Test fun failed_cancel_request_does_not_leave_stale_cancelled_mark() = runTest {
+        val fake = fake().apply {
+            val inner = handler
+            handler = { req -> if (req is Request.CancelTransfer) throw ApiException(ErrorCode.IO, "no cancel") else inner(req) }
+        }
+        val vm = FilesViewModel(fake, null)
+        advanceUntilIdle()
+        fake.emit(Event.TransferProgress("t3", "h3", 1uL, 10uL, 0uL)); advanceUntilIdle()
+        vm.cancel("h3"); advanceUntilIdle()
+        vm.clearDownloadError()
+        // 取消请求失败后，传输随后真实失败应当提示
+        fake.emit(Event.TransferFinished("t3", "h3", false, "reset")); advanceUntilIdle()
+        assertEquals("reset", vm.state.value.downloadError)
+    }
+
+    @Test fun new_download_clears_stale_cancelled_mark() = runTest {
+        val fake = fake().apply {
+            val inner = handler
+            handler = { req -> if (req is Request.DownloadBlob) Response.TransferId("t4") else inner(req) }
+        }
+        val vm = FilesViewModel(fake, null)
+        advanceUntilIdle()
+        fake.emit(Event.TransferProgress("t4", "h4", 1uL, 10uL, 0uL)); advanceUntilIdle()
+        vm.cancel("h4"); advanceUntilIdle()
+        // 取消后没有收到结束事件就重新下载，旧的取消标记不应吞掉这次的真实失败
+        vm.download("h4"); advanceUntilIdle()
+        fake.emit(Event.TransferFinished("t4", "h4", false, "reset")); advanceUntilIdle()
+        assertEquals("reset", vm.state.value.downloadError)
     }
 
     @Test fun source_devices_list_own_devices_first_then_other_peers() = runTest {

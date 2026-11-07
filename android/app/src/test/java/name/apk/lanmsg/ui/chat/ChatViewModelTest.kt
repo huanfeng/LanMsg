@@ -267,6 +267,31 @@ class ChatViewModelTest {
         assertEquals(ChatViewModel.ERROR_PEER_OFFLINE, vm.state.value.error)
     }
 
+    @Test fun failed_cancel_request_does_not_swallow_later_real_failure() = runTest {
+        val fake = fakeWith { listOf(m("m1")) }
+        val ok = fake.handler
+        fake.handler = { r -> if (r is Request.CancelTransfer) throw ApiException(ErrorCode.IO, "no cancel") else ok(r) }
+        val vm = ChatViewModel(fake, "c1", VisibleConversation)
+        advanceUntilIdle()
+        fake.emit(Event.TransferProgress("t1", "h", 5uL, 10uL, 0uL)); advanceUntilIdle()
+        vm.cancel("h"); advanceUntilIdle()
+        fake.emit(Event.TransferFinished("t1", "h", false, "reset")); advanceUntilIdle()
+        assertEquals("reset", vm.state.value.error)
+    }
+
+    @Test fun new_download_clears_stale_cancelled_mark() = runTest {
+        val fake = fakeWith { listOf(m("m1")) }
+        val ok = fake.handler
+        fake.handler = { r -> if (r is Request.DownloadBlob) Response.TransferId("t1") else ok(r) }
+        val vm = ChatViewModel(fake, "c1", VisibleConversation)
+        advanceUntilIdle()
+        fake.emit(Event.TransferProgress("t1", "h", 5uL, 10uL, 0uL)); advanceUntilIdle()
+        vm.cancel("h"); advanceUntilIdle()
+        vm.download("h"); advanceUntilIdle()
+        fake.emit(Event.TransferFinished("t1", "h", false, "reset")); advanceUntilIdle()
+        assertEquals("reset", vm.state.value.error)
+    }
+
     @Test fun cancel_uses_transfer_id_from_progress() = runTest {
         val fake = fakeWith { emptyList() }
         val vm = ChatViewModel(fake, "c1", VisibleConversation)

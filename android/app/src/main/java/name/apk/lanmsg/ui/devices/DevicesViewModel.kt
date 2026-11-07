@@ -2,6 +2,8 @@ package name.apk.lanmsg.ui.devices
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,6 +27,8 @@ class DevicesViewModel(private val core: CoreApi) : ViewModel() {
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    private var loadJob: Job? = null
 
     init {
         viewModelScope.launch { core.events.collect { if (affectsDevices(it)) load() } }
@@ -59,8 +63,11 @@ class DevicesViewModel(private val core: CoreApi) : ViewModel() {
         else -> false
     }
 
+    /** 250ms 防抖并取消在途的旧加载，避免连发事件的乱序响应覆盖新结果。 */
     private fun load() {
-        viewModelScope.launch {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
+            delay(LOAD_DEBOUNCE_MS)
             try {
                 val list = core.call<Response.Devices>(Request.ListMyDevices).value
                 _state.update { it.copy(devices = list) }
@@ -68,5 +75,9 @@ class DevicesViewModel(private val core: CoreApi) : ViewModel() {
                 _state.update { it.copy(error = e.message ?: e.code.name) }
             }
         }
+    }
+
+    companion object {
+        private const val LOAD_DEBOUNCE_MS = 250L
     }
 }

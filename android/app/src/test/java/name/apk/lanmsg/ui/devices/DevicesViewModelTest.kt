@@ -3,7 +3,10 @@
 package name.apk.lanmsg.ui.devices
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import name.apk.lanmsg.core.ApiException
 import name.apk.lanmsg.testutil.FakeCoreApi
@@ -124,5 +127,44 @@ class DevicesViewModelTest {
         assertEquals(true, isDeviceOnline(self.copy(online = false)))
         assertEquals(false, isDeviceOnline(other))
         assertEquals(true, isDeviceOnline(other.copy(online = true)))
+    }
+
+    @Test fun burst_of_events_is_debounced_into_one_load() = runTest {
+        val f = fake { listOf(self) }
+        val vm = DevicesViewModel(f)
+        advanceUntilIdle()
+        val before = f.requests.count { it == Request.ListMyDevices }
+        f.emit(Event.DevicesChanged); runCurrent()
+        advanceTimeBy(100)
+        f.emit(Event.PeerOnline(Fixtures.peer("d3"))); runCurrent()
+        advanceTimeBy(100)
+        f.emit(Event.PeerOffline("d3")); runCurrent()
+        assertEquals(before, f.requests.count { it == Request.ListMyDevices })
+        advanceUntilIdle()
+        assertEquals(before + 1, f.requests.count { it == Request.ListMyDevices })
+        assertEquals(1, vm.state.value.devices.size)
+    }
+
+    @Test fun older_in_flight_load_is_cancelled_by_newer_one() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        var calls = 0
+        val f = FakeCoreApi().apply {
+            handler = { req ->
+                if (req == Request.ListMyDevices) {
+                    val n = ++calls
+                    if (n == 1) gate.await()
+                    Response.Devices(if (n == 1) listOf(self) else listOf(self, other))
+                } else {
+                    Response.Ok
+                }
+            }
+        }
+        val vm = DevicesViewModel(f)
+        advanceTimeBy(300) // 第一次加载已发出并挂起
+        f.emit(Event.DevicesChanged)
+        advanceUntilIdle()
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(2, vm.state.value.devices.size)
     }
 }

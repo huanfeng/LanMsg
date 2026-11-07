@@ -30,6 +30,8 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
         val items: List<FileView> = emptyList(),
         val loading: Boolean = true,
         val error: String? = null,
+        /** 下载/取消失败的一次性提示；独立于 [error]，重查不会清掉它，由界面消费后 [clearDownloadError]。 */
+        val downloadError: String? = null,
         /** QueryFiles 未实现时为 true，界面显示 err_core_outdated。 */
         val coreOutdated: Boolean = false,
         val devices: List<DeviceOption> = emptyList(),
@@ -73,13 +75,14 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
     }
 
     fun download(hash: String) {
+        cancelled -= hash
         viewModelScope.launch {
             try {
                 val r = core.request(Request.DownloadBlob(hash))
                 if (r is Response.TransferId) transfers[hash] = r.value
                 scheduleRefresh()
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                _state.update { it.copy(downloadError = e.message ?: e.code.name) }
             }
         }
     }
@@ -91,12 +94,16 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
             try {
                 core.request(Request.CancelTransfer(transfer))
             } catch (e: ApiException) {
-                _state.update { it.copy(error = e.message ?: e.code.name) }
+                // 取消没发出去，之后的失败是真实失败，不能再当作用户取消
+                cancelled -= hash
+                _state.update { it.copy(downloadError = e.message ?: e.code.name) }
             }
         }
     }
 
     fun clearError() = _state.update { it.copy(error = null) }
+
+    fun clearDownloadError() = _state.update { it.copy(downloadError = null) }
 
     private fun changeFilter(change: (FileFilter) -> FileFilter) {
         _state.update { it.copy(filter = change(it.filter)) }
@@ -116,7 +123,7 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
                 val userCancelled = cancelled.remove(e.hash)
                 _state.update { s ->
                     val cleared = s.copy(progress = s.progress - e.hash)
-                    if (e.ok || userCancelled) cleared else cleared.copy(error = e.error ?: DOWNLOAD_FAILED)
+                    if (e.ok || userCancelled) cleared else cleared.copy(downloadError = e.error ?: DOWNLOAD_FAILED)
                 }
                 scheduleRefresh()
             }

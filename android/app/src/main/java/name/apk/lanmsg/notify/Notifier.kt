@@ -68,6 +68,12 @@ class Notifier(
     /** 本机设备 id；与 [status] 同时刷新，读取失败时为 null。 */
     @Volatile private var selfDeviceId: String? = null
 
+    /** 上次记日志时的 (通知开关, 权限)；只在变化时记一次，避免每条消息都刷日志。 */
+    @Volatile private var lastGate: Pair<Boolean, Boolean> = true to true
+
+    /** 本机设备 id 未知的告警是否已记过；拿到 id 后复位。 */
+    @Volatile private var selfUnknownLogged = false
+
     private val lock = Any()
 
     /** 同会话最近几条消息，用于 MessagingStyle 累积。 */
@@ -132,8 +138,8 @@ class Notifier(
         )
         val id = msg.conv.hashCode()
         // 用户划掉通知不会通知我们：通知已不在栏里时，累积的旧消息要丢弃
-        if (nm.activeNotifications.none { it.id == id }) synchronized(lock) { history.remove(msg.conv) }
         val lines = synchronized(lock) {
+            if (nm.activeNotifications.none { it.id == id }) history.remove(msg.conv)
             val q = history.getOrPut(msg.conv) { ArrayDeque() }
             if (q.none { it.id == msg.id }) q.addLast(Line(msg.id, body, msg.hlcMillis, msg.authorDeviceName))
             while (q.size > HISTORY_SIZE) q.removeFirst()
@@ -220,7 +226,11 @@ class Notifier(
     private suspend fun canNotify(): Boolean {
         val enabled = prefs.notificationsEnabled.first()
         val granted = permissionGranted()
-        if (!enabled || !granted) Log.w(TAG, "Notification suppressed: enabledInSettings=$enabled permissionGranted=$granted")
+        val gate = enabled to granted
+        if (gate != lastGate) {
+            lastGate = gate
+            if (!enabled || !granted) Log.w(TAG, "Notification suppressed: enabledInSettings=$enabled permissionGranted=$granted")
+        }
         return enabled && granted
     }
 
@@ -231,7 +241,10 @@ class Notifier(
     private fun isFromThisDevice(msg: MessageView): Boolean {
         val self = selfDeviceId
         if (self.isNullOrEmpty()) {
-            Log.w(TAG, "Self device id unknown, falling back to isMine")
+            if (!selfUnknownLogged) {
+                selfUnknownLogged = true
+                Log.w(TAG, "Self device id unknown, falling back to isMine")
+            }
             return msg.isMine
         }
         return msg.authorDevice == self
@@ -257,6 +270,7 @@ class Notifier(
         status = try {
             val info = holder.api.call<Response.SelfInfo>(Request.GetSelf).value
             selfDeviceId = info.deviceId
+            selfUnknownLogged = false
             info.status
         } catch (ex: CancellationException) {
             throw ex
