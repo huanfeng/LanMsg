@@ -6,6 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import name.apk.lanmsg.core.ApiException
 import name.apk.lanmsg.core.SettingsPrefs
@@ -39,17 +40,22 @@ class SettingsViewModelTest {
     private val outbox = MemoryOutbox(2048)
     private val modes = mutableListOf<BackgroundMode>()
 
+    /** core 当前持有的值：GetSettings 返回它，SetSettings 成功时更新它。 */
+    private var coreValue = initial.copy()
+
     private fun fake() = FakeCoreApi().apply {
         handler = { req ->
             when (req) {
-                Request.GetSettings -> Response.Settings(initial.copy())
-                is Request.SetSettings -> if (failSet) throw ApiException(ErrorCode.IO, "disk full") else Response.Ok
+                Request.GetSettings -> Response.Settings(coreValue.copy())
+                is Request.SetSettings -> if (failSet) throw ApiException(ErrorCode.IO, "disk full") else { coreValue = req.settings.copy(); Response.Ok }
                 else -> throw ApiException(ErrorCode.INTERNAL, "unexpected $req")
             }
         }
     }
 
-    private fun vm(fake: FakeCoreApi) = SettingsViewModel(fake, prefs, outbox, { modes += it }, main.dispatcher)
+    private var now = 10L * 24 * 3600 * 1000
+
+    private fun vm(fake: FakeCoreApi) = SettingsViewModel(fake, prefs, outbox, { modes += it }, main.dispatcher) { now }
 
     @Test fun loads_settings_local_prefs_and_outbox_size() = runTest {
         prefs.notifications.value = false
@@ -131,13 +137,76 @@ class SettingsViewModelTest {
         assertEquals(setOf("office"), vm.state.value.trustedWifi)
     }
 
-    @Test fun clear_outbox_clears_and_refreshes_size() = runTest {
+    @Test fun clear_outbox_uses_seven_day_cutoff_and_refreshes_size() = runTest {
         val vm = vm(fake())
         advanceUntilIdle()
         vm.clearOutbox()
         advanceUntilIdle()
-        assertTrue(outbox.cleared)
+        assertEquals(now - 7L * 24 * 3600 * 1000, outbox.cutoff)
         assertEquals(0L, vm.state.value.outboxBytes)
+    }
+
+    @Test fun consecutive_failed_updates_end_with_core_value() = runTest {
+        val fake = fake()
+        val vm = vm(fake)
+        advanceUntilIdle()
+        failSet = true
+        vm.update { it.copy(autoImageMax = 5uL) }
+        vm.update { it.copy(autoFileMax = 7uL) }
+        advanceUntilIdle()
+        assertEquals(initial.autoImageMax, vm.state.value.settings?.autoImageMax)
+        assertEquals(initial.autoFileMax, vm.state.value.settings?.autoFileMax)
+        assertNotNull(vm.state.value.error)
+    }
+
+    @Test fun failed_update_shows_core_value_not_pre_write_snapshot() = runTest {
+        val fake = fake()
+        val vm = vm(fake)
+        advanceUntilIdle()
+        failSet = true
+        vm.update { it.copy(autoImageMax = 5uL) }
+        coreValue = coreValue.copy(deviceName = "changed-elsewhere") // 失败期间 core 已被别处改过
+        advanceUntilIdle()
+        assertEquals("changed-elsewhere", vm.state.value.settings?.deviceName)
+    }
+
+    @Test fun failed_update_and_failed_reload_fall_back_to_last_confirmed() = runTest {
+        val fake = fake()
+        val vm = vm(fake)
+        advanceUntilIdle()
+        val ok = fake.handler
+        fake.handler = { req -> if (req is Request.SetSettings || req == Request.GetSettings) throw ApiException(ErrorCode.IO, "down") else ok(req) }
+        vm.update { it.copy(autoImageMax = 5uL) }
+        advanceUntilIdle()
+        assertEquals(initial.autoImageMax, vm.state.value.settings?.autoImageMax)
+    }
+
+    @Test fun failed_first_update_is_not_carried_by_second() = runTest {
+        val fake = fake()
+        val vm = vm(fake)
+        advanceUntilIdle()
+        val ok = fake.handler
+        var n = 0
+        fake.handler = { req -> if (req is Request.SetSettings && n++ == 0) throw ApiException(ErrorCode.IO, "once") else ok(req) }
+        vm.update { it.copy(autoImageMax = 5uL) }
+        vm.update { it.copy(autoFileMax = 7uL) }
+        advanceUntilIdle()
+        assertEquals(initial.autoImageMax, coreValue.autoImageMax)
+        assertEquals(7uL, coreValue.autoFileMax)
+        assertEquals(initial.autoImageMax, vm.state.value.settings?.autoImageMax)
+    }
+
+    @Test fun lagged_during_write_does_not_override_optimistic_value() = runTest {
+        val fake = fake()
+        val vm = vm(fake)
+        advanceUntilIdle()
+        vm.update { it.copy(autoImageMax = 5uL) }
+        fake.emitLagged() // 写入尚未发出：乐观值在途
+        runCurrent()
+        assertEquals(5uL, vm.state.value.settings?.autoImageMax)
+        advanceUntilIdle()
+        assertEquals(5uL, vm.state.value.settings?.autoImageMax)
+        assertEquals(2, fake.requests.count { it == Request.GetSettings }) // 初次 + 写完后补拉一次
     }
 
     @Test fun parse_ssid_strips_quotes_and_unknown() {
@@ -162,7 +231,7 @@ private class MemoryPrefs : SettingsPrefs {
 }
 
 private class MemoryOutbox(private var bytes: Long) : OutboxStore {
-    var cleared = false
+    var cutoff: Long? = null
     override fun outboxSizeBytes(): Long = bytes
-    override fun clear() { cleared = true; bytes = 0 }
+    override fun clearOlderThan(cutoffMillis: Long): Long { cutoff = cutoffMillis; val freed = bytes; bytes = 0; return freed }
 }

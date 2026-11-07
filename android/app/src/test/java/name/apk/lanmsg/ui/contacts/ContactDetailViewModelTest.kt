@@ -85,6 +85,33 @@ class ContactDetailViewModelTest {
         assertEquals("disk", vm.state.value.error)
     }
 
+    @Test fun consecutive_policy_failures_end_with_core_value() = runTest {
+        val fake = fake(autoAccept = false)
+        val vm = ContactDetailViewModel(fake, "u2")
+        advanceUntilIdle()
+        val ok = fake.handler
+        fake.handler = { req -> if (req is Request.SetContactPolicy) throw ApiException(ErrorCode.IO, "disk") else ok(req) }
+        vm.setAutoAccept(true)
+        vm.setAskAbove(10uL)
+        advanceUntilIdle()
+        assertEquals(false, vm.state.value.contact?.autoAccept)
+        assertEquals(null, vm.state.value.contact?.askAboveBytes)
+        assertEquals("disk", vm.state.value.error)
+    }
+
+    @Test fun failed_first_policy_is_not_carried_by_second() = runTest {
+        val fake = fake(autoAccept = false)
+        val vm = ContactDetailViewModel(fake, "u2")
+        advanceUntilIdle()
+        val ok = fake.handler
+        var n = 0
+        fake.handler = { req -> if (req is Request.SetContactPolicy && n++ == 0) throw ApiException(ErrorCode.IO, "once") else ok(req) }
+        vm.setAutoAccept(true)
+        vm.setAskAbove(10uL)
+        advanceUntilIdle()
+        assertEquals(Request.SetContactPolicy("u2", false, 10uL), fake.requests.last { it is Request.SetContactPolicy })
+    }
+
     @Test fun contacts_changed_reloads() = runTest {
         val fake = fake()
         val vm = ContactDetailViewModel(fake, "u2")

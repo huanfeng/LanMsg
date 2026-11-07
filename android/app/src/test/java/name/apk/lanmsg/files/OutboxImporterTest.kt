@@ -147,11 +147,45 @@ class OutboxImporterTest {
         assertEquals(listOf("ok.bin"), files)
     }
 
-    @Test fun size_and_clear() = runTest {
+    @Test fun size_of_outbox() = runTest {
         val imp = importer()
         imp.import(listOf(uri("abcd", "a.txt")))
         assertEquals(4L, imp.outboxSizeBytes())
-        imp.clear()
-        assertEquals(0L, imp.outboxSizeBytes())
+    }
+
+    private fun millis(y: Int, m: Int, d: Int, h: Int = 12) =
+        java.util.GregorianCalendar(y, m - 1, d, h, 0).timeInMillis
+
+    private fun outboxFile(dir: String, name: String, content: String): File {
+        val f = File(File(tmp.root, "outbox"), "$dir/$name")
+        f.parentFile!!.mkdirs()
+        f.writeText(content)
+        return f
+    }
+
+    @Test fun clear_older_than_removes_only_old_date_directories() {
+        val imp = importer()
+        val old = outboxFile("20240101", "a.txt", "1234")
+        val oldToo = outboxFile("20240102", "b.txt", "12")
+        val edge = outboxFile("20240110", "c.txt", "123456") // 当天结束时刻晚于 cutoff：保留
+        val fresh = outboxFile("20240115", "d.txt", "1")
+        val freed = imp.clearOlderThan(millis(2024, 1, 10))
+        assertEquals(6L, freed)
+        assertFalse(old.exists())
+        assertFalse(oldToo.exists())
+        assertFalse(old.parentFile!!.exists())
+        assertTrue(edge.exists())
+        assertTrue(fresh.exists())
+    }
+
+    @Test fun clear_older_than_keeps_non_date_entries() {
+        val imp = importer()
+        val misc = outboxFile("misc", "m.txt", "xx")
+        val bad = outboxFile("20241399", "n.txt", "xx") // 8 位数字但不是合法日期
+        val loose = File(tmp.root, "outbox/20230101").apply { parentFile!!.mkdirs(); writeText("file, not dir") }
+        assertEquals(0L, imp.clearOlderThan(millis(2030, 1, 1)))
+        assertTrue(misc.exists())
+        assertTrue(bad.exists())
+        assertTrue(loose.exists())
     }
 }

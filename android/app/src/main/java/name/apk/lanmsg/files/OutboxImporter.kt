@@ -10,6 +10,7 @@ import java.io.File
 import kotlin.coroutines.cancellation.CancellationException
 import java.io.IOException
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
@@ -22,7 +23,8 @@ interface Importer {
 interface OutboxStore {
     fun outboxSizeBytes(): Long
 
-    fun clear()
+    /** 删除整天都早于 [cutoffMillis] 的日期子目录，返回释放的字节数。 */
+    fun clearOlderThan(cutoffMillis: Long): Long
 }
 
 /**
@@ -93,13 +95,32 @@ class OutboxImporter(
 
     override fun outboxSizeBytes(): Long = outboxRoot.walkTopDown().filter { it.isFile }.sumOf { it.length() }
 
-    /** 设置页「清理已分享文件的副本」。 */
-    override fun clear() {
-        outboxRoot.deleteRecursively()
+    /**
+     * 设置页「清理已分享文件的副本」。core 发送文件只记录副本路径，对端之后下载仍读该路径，
+     * 所以只清理早于 cutoff 的日期目录（yyyyMMdd，该日结束时刻 <= cutoff）；非日期命名或解析失败的条目不动。
+     */
+    override fun clearOlderThan(cutoffMillis: Long): Long {
+        val fmt = SimpleDateFormat("yyyyMMdd", Locale.ROOT).apply { isLenient = false }
+        var freed = 0L
+        for (dir in outboxRoot.listFiles().orEmpty()) {
+            if (!dir.isDirectory || !DATE_DIR.matches(dir.name)) continue
+            val dayStart = try {
+                fmt.parse(dir.name)
+            } catch (e: java.text.ParseException) {
+                Log.w(TAG, "Skipped unparsable outbox directory: ${dir.name}", e)
+                null
+            } ?: continue
+            val dayEnd = Calendar.getInstance().apply { time = dayStart; add(Calendar.DAY_OF_MONTH, 1) }.timeInMillis
+            if (dayEnd > cutoffMillis) continue
+            val size = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+            if (dir.deleteRecursively()) freed += size
+        }
+        return freed
     }
 
     companion object {
         private const val TAG = "OutboxImporter"
+        private val DATE_DIR = Regex("""\d{8}""")
         private const val MAX_NAME = 120
         private const val MAX_NAME_BYTES = 200 // 文件系统上限 255，给重名后缀留余量
 

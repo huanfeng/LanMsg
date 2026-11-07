@@ -93,8 +93,11 @@ fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onB
     val needLocation = stringResource(R.string.settings_trusted_wifi_need_location)
     val notConnected = stringResource(R.string.settings_trusted_wifi_not_connected)
     fun addCurrentWifi() {
-        val ssid = WifiSsid.current(ctx)
-        if (ssid == null) scope.launch { snackbar.showSnackbar(notConnected) } else vm.addTrustedWifi(ssid)
+        when (val r = WifiSsid.current(ctx)) {
+            is WifiSsid.Reading.Connected -> vm.addTrustedWifi(r.ssid)
+            WifiSsid.Reading.NotConnected -> scope.launch { snackbar.showSnackbar(notConnected) }
+            WifiSsid.Reading.Unavailable -> scope.launch { snackbar.showSnackbar(needLocation) }
+        }
     }
     val locationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) addCurrentWifi() else scope.launch { snackbar.showSnackbar(needLocation) }
