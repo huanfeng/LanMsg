@@ -747,6 +747,11 @@ async fn mark_read(inner: &Inner, conv: String, upto: String) -> Result<Response
             message: format!("会话中不存在该消息: {upto}"),
         });
     }
+    // 隐藏消息（Read/Recall 等）不能作为已读位置：否则把 Read 当 upto 再发 Read，
+    // 会在两端之间形成无限回执循环。
+    if lanmsg_proto::body_is_hidden(&m.env.body) {
+        return Ok(Response::Ok);
+    }
     if inner
         .store
         .set_last_read(&conv, m.env.hlc.clone())

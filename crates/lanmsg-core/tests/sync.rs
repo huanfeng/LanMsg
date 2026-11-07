@@ -653,6 +653,68 @@ async fn hidden_bodies_never_reach_ui_events() {
     }
 }
 
+/// 回归：以隐藏消息（Read 回执）作为 MarkRead 的 upto 不得再产生新的 Read，
+/// 否则界面把回执当新消息再标已读会形成无限循环。
+#[tokio::test]
+async fn mark_read_on_hidden_message_does_not_loop() {
+    let mut a = node_offline().await;
+    let a_user = a.init_first("甲").await;
+    let mut x = node_offline().await;
+    let x_user = x.init_first("小张").await;
+    befriend(&mut a, &mut x).await;
+
+    let conv = ConvId::dm(&user(&a_user), &user(&x_user)).to_hex();
+    x.call(Request::OpenDm {
+        user: a_user.clone(),
+    })
+    .await;
+    x.call(Request::SendText {
+        conv: conv.clone(),
+        text: "回执测试".into(),
+    })
+    .await;
+    wait_until(|| async { list_texts(&a, &conv).await.len() == 1 }, 5).await;
+    let upto = list_texts(&a, &conv).await[0].id.clone();
+    a.call(Request::MarkRead {
+        conv: conv.clone(),
+        upto,
+    })
+    .await;
+
+    // 统计 A 自己发出的信封数（含隐藏 Read）。
+    let store = a.svc.store_for_test();
+    let a_dev = lanmsg_proto::ids::DeviceId::from_hex(&a.device_id().await).expect("device id");
+    let count = || {
+        (1..=50u64)
+            .take_while(|seq| {
+                store
+                    .get_message(&lanmsg_proto::ids::MsgId {
+                        author: a_dev,
+                        seq: *seq,
+                    })
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+            .count()
+    };
+    let before = count();
+    assert!(before >= 1, "A 应已发出 Read 回执");
+
+    // 把 A 自己发出的最后一条（Read 回执）当 upto 再标已读：必须是空操作。
+    let read_id = lanmsg_proto::ids::MsgId {
+        author: a_dev,
+        seq: before as u64,
+    };
+    a.call(Request::MarkRead {
+        conv: conv.clone(),
+        upto: read_id.to_string(),
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(count(), before, "对隐藏消息 MarkRead 不应产生新 Read");
+}
+
 /// 撤回他人消息被拒绝（InvalidArgument）。
 #[tokio::test]
 async fn recall_others_message_rejected() {
