@@ -129,6 +129,9 @@ fn main() {
         }
     };
     *slot.borrow_mut() = Some(ui.clone());
+    if let Some((path, name, kind)) = demo.and_then(fixtures::demo_preview) {
+        ui.preview.open_blocking(path, name, kind);
+    }
     if demo.is_none() {
         // 清理上次遗留的未确认粘贴图片；后台线程，不阻塞界面
         let (pending, _) = views::composer::paste_dirs(&data_dir);
@@ -154,6 +157,7 @@ fn main() {
             ui_tick.tick_paste();
             ui_tick.tick_pair();
             ui_tick.tick_files();
+            ui_tick.preview.tick();
         })
         .on_window_activated(move |_ctx, active| {
             ui_focus.act(|m| m.set_window_focused(active));

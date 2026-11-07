@@ -34,6 +34,8 @@ fn every_demo_page_renders() {
         "files",
         "files-grid",
         "settings",
+        "preview-image",
+        "preview-text",
     ] {
         let png = dir.join(format!("{page}.png"));
         let status = Command::new(env!("CARGO_BIN_EXE_lanmsg"))

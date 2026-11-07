@@ -9,6 +9,7 @@ pub mod files;
 pub mod forward;
 pub mod message_row;
 pub mod pair;
+pub mod preview;
 pub mod settings;
 pub mod shell;
 pub mod wizard;

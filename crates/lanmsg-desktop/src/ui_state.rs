@@ -16,6 +16,7 @@ use crate::model::{ConnState, Effect, Model, Page, PairUi};
 use crate::strings;
 use crate::views::composer::PastedImage;
 use crate::views::files::FilesUi;
+use crate::views::preview::PreviewState;
 use lanmsg_api::types::{PairStateDto, Response};
 
 /// 当前输入框的登记：(会话, 文本信号)。
@@ -41,6 +42,8 @@ pub struct UiState {
     pub bottom_epoch: Signal<u64>,
     /// 文件页筛选控件的状态。
     pub files_ui: FilesUi,
+    /// 应用内文件预览（图片 / 文本）。
+    pub preview: PreviewState,
     /// 当前输入框：(会话, 文本信号)；发送失败的草稿经它回填。
     composer: Rc<RefCell<Option<ComposerSlot>>>,
     /// 配对对话框的显隐信号：ESC 只隐藏、不改 Model，由 `tick_pair` 发现后取消配对。
@@ -94,6 +97,7 @@ impl UiState {
             paste: signal(None),
             bottom_epoch: signal(0u64),
             files_ui,
+            preview: PreviewState::new(),
             composer: Rc::new(RefCell::new(None)),
             pair_show: Rc::new(RefCell::new(None)),
             pair_done_since: Rc::new(RefCell::new(None)),

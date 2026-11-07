@@ -24,6 +24,7 @@ use crate::views::message_row::{
     aggregate_progress, duration_label, file_icon, human_size, icon_bytes, parent_dir,
     progress_text, FileIcon,
 };
+use crate::views::preview::open_local;
 
 /// 内容区最大宽度之外的两侧留白。
 const PAGE_PAD: i32 = style::SPACE_XL;
@@ -298,9 +299,10 @@ fn menu_builder(
         if state == BlobState::Local {
             if let Some(p) = item.local_path.clone() {
                 if let Some(d) = parent_dir(&p) {
+                    let (ui_open, mime, name) = (ui.clone(), item.mime.clone(), item.name.clone());
                     v.push(MenuItem::run(
                         strings::FILES_MENU_OPEN,
-                        move |ctx| ctx.open_url(&p),
+                        move |ctx| open_local(ctx, &ui_open, &mime, &name, &p),
                         false,
                     ));
                     v.push(MenuItem::run(
@@ -440,8 +442,12 @@ fn file_actions(ui: &UiState, item: &lanmsg_api::types::FileItemView, status: St
                 let mut row = Element::row().spacing(style::SPACE_SM).cross(Align::Center);
                 if let Some(p) = item.local_path.clone() {
                     if let Some(d) = parent_dir(&p) {
+                        let (ui, mime, name) = (ui.clone(), item.mime.clone(), item.name.clone());
                         row = row
-                            .child(button(strings::FILE_OPEN).on_click(move |ctx| ctx.open_url(&p)))
+                            .child(
+                                button(strings::FILE_OPEN)
+                                    .on_click(move |ctx| open_local(ctx, &ui, &mime, &name, &p)),
+                            )
                             .child(
                                 button(strings::FILE_OPEN_FOLDER)
                                     .on_click(move |ctx| ctx.open_url(&d)),
@@ -627,8 +633,9 @@ fn grid_tile(ui: &UiState, f: &FileView, confirm: ConfirmState) -> Element {
     }
     let (ui_click, hash, local) = (ui.clone(), item.hash.clone(), item.local_path.clone());
     let state = item.state.clone();
+    let (ui_open, mime, name) = (ui.clone(), item.mime.clone(), item.name.clone());
     thumb = thumb.on_click(move |ctx| match (&state, &local) {
-        (BlobState::Local, Some(p)) => ctx.open_url(p),
+        (BlobState::Local, Some(p)) => open_local(ctx, &ui_open, &mime, &name, p),
         (BlobState::Remote, _) => ui_click.act(|m| m.download(hash.clone())),
         _ => {}
     });

@@ -11,6 +11,7 @@ use crate::model::{effective_state, Model, TransferInfo};
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
+use crate::views::preview::open_local;
 
 /// 气泡最大宽度（规范：正文最大行宽约 560px）。
 pub const BUBBLE_MAX_W: i32 = 560;
@@ -382,15 +383,18 @@ fn state_area_for(ui: &UiState, items: &[FileItemView], state: BlobState) -> Ele
         BlobState::Local => {
             let first = items.first().and_then(|i| i.local_path.clone());
             let open_file = if items.len() == 1 {
-                first.clone()
+                items.first().zip(first.clone())
             } else {
                 None
             };
             let folder = first.as_deref().and_then(parent_dir);
             let mut row = Element::row().spacing(style::SPACE_LG).cross(Align::Center);
-            if let Some(p) = open_file {
-                row = row
-                    .child(Element::link(strings::FILE_OPEN).on_click(move |ctx| ctx.open_url(&p)));
+            if let Some((it, p)) = open_file {
+                let (ui, mime, name) = (ui.clone(), it.mime.clone(), it.name.clone());
+                row = row.child(
+                    Element::link(strings::FILE_OPEN)
+                        .on_click(move |ctx| open_local(ctx, &ui, &mime, &name, &p)),
+                );
             }
             if let Some(d) = folder {
                 row = row.child(
@@ -651,9 +655,10 @@ fn media_thumb(ui: &UiState, item: &FileItemView, video: bool) -> Element {
         item.hash.clone(),
         item.local_path.clone(),
     );
+    let (mime, name) = (item.mime.clone(), item.name.clone());
     let ui = ui.clone();
     stack.on_click(move |ctx| match (&state, &local) {
-        (BlobState::Local, Some(p)) => ctx.open_url(p),
+        (BlobState::Local, Some(p)) => open_local(ctx, &ui, &mime, &name, p),
         (BlobState::Remote, _) => ui.act(|m| m.download(hash.clone())),
         _ => {}
     })

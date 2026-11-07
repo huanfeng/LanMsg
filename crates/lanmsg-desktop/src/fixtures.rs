@@ -4,6 +4,7 @@
 use lanmsg_api::types::*;
 
 use crate::model::{ConnState, Model, Page, PairUi, TransferInfo};
+use crate::views::preview::PreviewKind;
 
 /// 演示页面。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,10 @@ pub enum DemoPage {
     /// 文件页，筛选为“图片”（网格）。
     FilesGrid,
     Settings,
+    /// 会话页上叠着图片预览。
+    PreviewImage,
+    /// 会话页上叠着文本预览。
+    PreviewText,
 }
 
 impl DemoPage {
@@ -42,6 +47,8 @@ impl DemoPage {
             "files" => DemoPage::Files,
             "files-grid" => DemoPage::FilesGrid,
             "settings" => DemoPage::Settings,
+            "preview-image" => DemoPage::PreviewImage,
+            "preview-text" => DemoPage::PreviewText,
             _ => return None,
         })
     }
@@ -96,6 +103,38 @@ fn demo_thumb(name: &str, w: u32, h: u32, hue: u8) -> Option<String> {
     });
     img.save(&path).ok()?;
     Some(path.to_string_lossy().into_owned())
+}
+
+/// 预览演示页要预览的文件（现场生成到临时目录）：(路径, 文件名, 类别)。
+pub fn demo_preview(p: DemoPage) -> Option<(String, String, PreviewKind)> {
+    let dir = std::env::temp_dir().join("lanmsg-demo-preview");
+    std::fs::create_dir_all(&dir).ok()?;
+    match p {
+        DemoPage::PreviewImage => {
+            let path = demo_thumb("预览示例.png", 960, 600, 40).map(std::path::PathBuf::from)?;
+            Some((
+                path.to_string_lossy().into_owned(),
+                "预览示例.png".into(),
+                PreviewKind::Image,
+            ))
+        }
+        DemoPage::PreviewText => {
+            let path = dir.join("main.rs");
+            let mut src = String::from(
+                "// 局域网消息：入口示例\nuse std::net::UdpSocket;\n\nfn main() -> std::io::Result<()> {\n    let sock = UdpSocket::bind(\"0.0.0.0:0\")?;\n    sock.set_broadcast(true)?;\n    println!(\"你好，LanMsg！端口 {}\", sock.local_addr()?.port());\n    Ok(())\n}\n",
+            );
+            for i in 0..40 {
+                src.push_str(&format!("// 第 {i} 行：用来演示滚动与截断的填充内容\n"));
+            }
+            std::fs::write(&path, src).ok()?;
+            Some((
+                path.to_string_lossy().into_owned(),
+                "main.rs".into(),
+                PreviewKind::Text,
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn file_item(name: &str, mime: &str, size: u64, state: BlobState) -> FileItemView {
@@ -601,7 +640,7 @@ pub fn demo_model(p: DemoPage) -> Model {
             m.current_conv = Some("c-self".into());
             m.messages = self_messages();
         }
-        DemoPage::Chat => {
+        DemoPage::Chat | DemoPage::PreviewImage | DemoPage::PreviewText => {
             m.page = Page::Chats;
             m.current_conv = Some("c-dm".into());
             m.messages = demo_messages();
@@ -737,6 +776,8 @@ mod tests {
             "files",
             "files-grid",
             "settings",
+            "preview-image",
+            "preview-text",
         ] {
             assert!(DemoPage::parse(n).is_some(), "{n}");
         }

@@ -87,6 +87,14 @@ pub const FILE_DOWNLOAD: &str = "下载";
 pub const FILE_CANCEL: &str = "取消";
 pub const FILE_OPEN: &str = "打开";
 pub const FILE_OPEN_FOLDER: &str = "打开所在文件夹";
+/// 应用内预览。
+pub const PREVIEW_OPEN_DEFAULT: &str = "用默认程序打开";
+pub const PREVIEW_SHOW_IN_FOLDER: &str = "在文件夹中显示";
+pub const PREVIEW_CLOSE: &str = "关闭";
+pub const PREVIEW_LOADING: &str = "正在加载…";
+pub const PREVIEW_TRUNCATED: &str = "仅显示前 1 MB";
+pub const PREVIEW_BINARY: &str = "这个文件看起来不是文本，无法预览。";
+pub const PREVIEW_FAILED: &str = "无法预览这个文件。";
 pub const FILE_CLICK_TO_DOWNLOAD: &str = "点击下载";
 pub const FILE_SOURCE_OFFLINE: &str = "源设备离线";
 pub const FILE_PREPARING: &str = "准备中…";
