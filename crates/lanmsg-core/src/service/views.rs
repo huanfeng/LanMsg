@@ -528,21 +528,23 @@ pub fn peer_view(store: &Store, p: &PeerInfo, self_user: Option<&UserId>) -> Pee
     }
 }
 
-/// 将设备行转换为设备视图（online 按当前已连接设备集合判定；is_self 标本机）。
+/// 将设备行转换为设备视图（online：本机恒为 true，其余按当前已连接设备集合判定）。
 pub fn device_view(d: &DeviceRow, peers: &[PeerInfo], self_device: &DeviceId) -> DeviceView {
+    let is_self = d.device == *self_device;
     DeviceView {
         device_id: d.device.to_hex(),
         device_short: d.device.short(),
         name: d.name.clone(),
         device_type: format!("{:?}", d.device_type),
-        online: peers.iter().any(|p| p.device == d.device),
+        // 本机不在 peers 里，需单独判定，否则本机永远显示离线。
+        online: is_self || peers.iter().any(|p| p.device == d.device),
         path: d.last_path.clone().map(|p| match p {
             lanmsg_proto::types::PathClass::Lan => PathClassDto::Lan,
             lanmsg_proto::types::PathClass::Vpn => PathClassDto::Vpn,
             lanmsg_proto::types::PathClass::Internet => PathClassDto::Internet,
             lanmsg_proto::types::PathClass::Relay => PathClassDto::Relay,
         }),
-        is_self: d.device == *self_device,
+        is_self,
     }
 }
 
@@ -767,5 +769,37 @@ mod tests {
         let sum = last(&s);
         assert_eq!(sum.last_kind, Some(LastMessageKind::Text));
         assert_eq!(sum.last_text.as_deref(), Some("可见"));
+    }
+
+    fn device_row(id: u8) -> crate::store::DeviceRow {
+        let device = DeviceId([id; 32]);
+        let user = UserId([9u8; 32]);
+        crate::store::DeviceRow {
+            device,
+            user,
+            cert: lanmsg_proto::types::DeviceCert {
+                device,
+                user,
+                device_name: "d".into(),
+                device_type: lanmsg_proto::types::DeviceType::Desktop,
+                created_at: 0,
+                key_epoch: 0,
+                sig: Signature64([0u8; 64]),
+            },
+            name: "d".into(),
+            device_type: lanmsg_proto::types::DeviceType::Desktop,
+            last_addr: None,
+            last_path: None,
+            last_seen: None,
+            revoked: false,
+        }
+    }
+
+    #[test]
+    fn self_device_is_online_even_without_peers() {
+        let me = device_row(1);
+        let other = device_row(2);
+        assert!(device_view(&me, &[], &me.device).online);
+        assert!(!device_view(&other, &[], &me.device).online);
     }
 }

@@ -142,5 +142,5 @@ fun DevicesContent(
     }
 }
 
-/** core 按 peers 判断 online，本机不在 peers 中，恒为 false；本机视为在线。 */
+/** 本机视为在线（core 已对本机返回 online=true，这里作为旧核心的兜底保留）。 */
 internal fun isDeviceOnline(d: DeviceView) = d.isSelf || d.online
