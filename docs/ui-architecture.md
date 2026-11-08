@@ -221,6 +221,8 @@
 | contacts_empty | 还没有联系人 |
 | toast_request_sent | 已发送请求 |
 | req_accept_once | 接收一次 |
+| req_source_addr | 来源地址：%1$s |
+| req_addr_changed | 该设备已被信任，但本次来源地址与上次不同，请确认 |
 | req_add_contact | 加为联系人 |
 | req_reject | 拒绝 |
 | req_block | 屏蔽 |

@@ -42,6 +42,13 @@ const PEER_DB_REFRESH: Duration = Duration::from_secs(20);
 const MAX_TRACKED_PEERS: usize = 512;
 /// 别名最大字符数。
 const ALIAS_MAX_CHARS: usize = 64;
+/// 数据库中保留的 LocalSend 对端上限（含已信任与已屏蔽）。
+const MAX_STORED_PEERS: u64 = 512;
+/// 同时跟踪的接收会话上限与过期时间。
+const MAX_SESSIONS: usize = 64;
+const SESSION_TTL: Duration = Duration::from_secs(3600);
+/// 每个指纹最多记录的来源 IP 数。
+const MAX_IPS_PER_PEER: usize = 4;
 /// 文字请求预览的最大字符数。
 const TEXT_PREVIEW_CHARS: usize = 100;
 /// 等待文件消息准备完成（出现在 messages 表）的最长时间。
@@ -93,7 +100,8 @@ pub(crate) struct LsDeps {
 struct PendingReq {
     reply: oneshot::Sender<LsDecision>,
     fingerprint: String,
-    ip: IpAddr,
+    /// 请求方的发现信息（批准后才落库）。
+    peer: LsPeer,
     text: Option<String>,
     view: RequestView,
 }
@@ -101,6 +109,8 @@ struct PendingReq {
 /// 已发现对端的内存状态。
 struct SeenPeer {
     peer: LsPeer,
+    /// 各来源 IP 最近一次被发现的时间（同一指纹可能出现在多个 IP）。
+    by_ip: HashMap<IpAddr, (LsPeer, Instant)>,
     alias: String,
     last_event: Instant,
     last_db: Instant,
@@ -137,7 +147,7 @@ fn normalize_fingerprint(raw: &str) -> Option<String> {
 fn clean_alias(raw: &str, fingerprint: &str) -> String {
     let s: String = raw
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_format_char(*c))
         .take(ALIAS_MAX_CHARS)
         .collect();
     let s = s.trim().to_string();
@@ -146,6 +156,18 @@ fn clean_alias(raw: &str, fingerprint: &str) -> String {
     } else {
         s
     }
+}
+
+/// Unicode 格式字符（Cf 类中常被用来伪装文字的部分：零宽、双向控制、BOM 等）。
+fn is_format_char(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{061C}' | '\u{180E}'
+        | '\u{200B}'..='\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}'
+        | '\u{FEFF}'
+        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{E0000}'..='\u{E007F}')
 }
 
 fn is_lan(ip: IpAddr) -> bool {
@@ -223,15 +245,26 @@ impl LocalSendBridge {
             action,
             RequestAction::AcceptOnce | RequestAction::AddContact
         );
-        match action {
+        // 只有用户做出接受 / 信任 / 屏蔽的决定后才落库对端与会话（拒绝不留痕）
+        let persisted = match action {
+            RequestAction::AcceptOnce | RequestAction::Block => self
+                .inner
+                .ensure_peer(&p.peer, &p.fingerprint, false)
+                .map(|_| ()),
             RequestAction::AddContact => {
                 // 信任以本次请求的来源 IP 为准：之后只有同一 IP 的请求才会自动接受
-                if let Some(row) = store.get_ls_peer(&p.fingerprint)? {
-                    store.upsert_ls_peer(&LsPeerRow {
-                        last_addr: Some(p.ip.to_string()),
-                        ..row
-                    })?;
-                }
+                self.inner
+                    .ensure_peer(&p.peer, &p.fingerprint, true)
+                    .map(|_| ())
+            }
+            RequestAction::Reject => Ok(()),
+        };
+        if let Err(e) = persisted {
+            let _ = p.reply.send(LsDecision::Reject);
+            return Err(e);
+        }
+        match action {
+            RequestAction::AddContact => {
                 store.set_ls_trust(&p.fingerprint, true, false)?;
                 let _ = self.inner.deps.events.send(Event::ContactsChanged);
             }
@@ -266,6 +299,29 @@ impl LocalSendBridge {
     /// 实际监听端口（测试里端口为 0 时取系统分配的端口）。
     pub fn port(&self) -> u16 {
         self.inner.ls.info().port
+    }
+
+    /// 本机 LocalSend 证书指纹（小写）。
+    pub fn fingerprint(&self) -> String {
+        self.inner.own_fingerprint.clone()
+    }
+
+    /// 发给尚无会话的在线对端前，按需建立会话（用户主动发起才落库）。
+    /// 返回该会话现在是否存在。
+    pub fn ensure_conv(&self, conv: &ConvId) -> Result<bool, CoreError> {
+        let found = {
+            let g = lock(&self.inner.seen);
+            g.iter()
+                .find(|(fp, s)| s.online && ConvId::localsend(fp) == *conv)
+                .map(|(fp, s)| (fp.clone(), s.peer.clone()))
+        };
+        match found {
+            Some((fp, peer)) => {
+                self.inner.ensure_peer(&peer, &fp, false)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// 对端当前是否在线（最近被发现过）。
@@ -334,16 +390,35 @@ impl LocalSendBridge {
 
 impl BridgeInner {
     fn self_device(&self) -> DeviceId {
-        self.deps.identity.read().unwrap().device_id()
+        self.deps
+            .identity
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .device_id()
     }
 
-    /// 对端当前可达的 LocalSend 地址：取该会话对应指纹最近一次被发现的记录。
-    /// 同一指纹可能出现在多个 IP 下，以最近一次为准而不是取第一条。
+    /// 对端当前可达的 LocalSend 地址。
+    /// 已信任的对端只发往记录的地址（新通告的其他 IP 不会改变发送目标）；
+    /// 其余对端取最近一次被发现的记录。
     fn peer_for_conv(&self, conv: &ConvId) -> Option<LsPeer> {
-        let g = lock(&self.seen);
-        g.iter()
-            .find(|(fp, s)| s.online && ConvId::localsend(fp) == *conv)
-            .map(|(_, s)| s.peer.clone())
+        let (fp, latest, by_ip) = {
+            let g = lock(&self.seen);
+            let (fp, s) = g
+                .iter()
+                .find(|(fp, s)| s.online && ConvId::localsend(fp) == *conv)?;
+            (fp.clone(), s.peer.clone(), s.by_ip.clone())
+        };
+        let row = self.deps.store.get_ls_peer(&fp).ok().flatten();
+        match row {
+            Some(r) if r.trusted => {
+                let addr: IpAddr = r.last_addr.as_deref()?.parse().ok()?;
+                by_ip
+                    .get(&addr)
+                    .filter(|(_, at)| at.elapsed() < PEER_OFFLINE_AFTER)
+                    .map(|(p, _)| p.clone())
+            }
+            _ => Some(latest),
+        }
     }
 
     /// 来源判定：非局域网或指纹非法 → 拒绝；已屏蔽 → 拒绝；
@@ -371,48 +446,65 @@ impl BridgeInner {
         }
     }
 
-    /// 记录并（必要时）落库一个对端，确保会话存在。返回库中的行。
-    fn ensure_peer(
+    /// 由发现信息构造对端行（不落库）。已信任对端的别名、型号与地址只在用户确认
+    /// （`confirm`）时更新，避免被伪造通告改写。
+    fn row_from_peer(
         &self,
         peer: &LsPeer,
         fp: &str,
-        refresh_addr: bool,
-    ) -> Result<LsPeerRow, CoreError> {
-        let store = &self.deps.store;
-        let alias = clean_alias(&peer.info.alias, fp);
-        let existing = store.get_ls_peer(fp)?;
-        // 已信任对端的地址只在用户确认时更新，避免被伪造通告劫持自动接受
-        let last_addr = match &existing {
-            Some(r) if r.trusted && !refresh_addr => r.last_addr.clone(),
-            _ => Some(peer.ip.to_string()),
-        };
-        let row = LsPeerRow {
+        existing: Option<&LsPeerRow>,
+        confirm: bool,
+    ) -> LsPeerRow {
+        let keep = existing.filter(|r| r.trusted && !confirm);
+        LsPeerRow {
             fingerprint: fp.to_string(),
             pseudo_device: pseudo_device_id(fp),
-            alias: alias.clone(),
-            device_model: peer.info.device_model.clone(),
-            device_type: peer.info.device_type.clone(),
-            last_addr,
+            alias: keep
+                .map(|r| r.alias.clone())
+                .unwrap_or_else(|| clean_alias(&peer.info.alias, fp)),
+            device_model: match keep {
+                Some(r) => r.device_model.clone(),
+                None => peer.info.device_model.clone(),
+            },
+            device_type: match keep {
+                Some(r) => r.device_type.clone(),
+                None => peer.info.device_type.clone(),
+            },
+            last_addr: match keep {
+                Some(r) => r.last_addr.clone(),
+                None => Some(peer.ip.to_string()),
+            },
             protocol: match peer.info.protocol {
                 lanmsg_localsend::LsProtocol::Http => "http".into(),
                 lanmsg_localsend::LsProtocol::Https => "https".into(),
             },
             port: peer.info.port,
             last_seen: now_millis(),
-            trusted: existing.as_ref().is_some_and(|r| r.trusted),
-            blocked: existing.as_ref().is_some_and(|r| r.blocked),
-        };
+            trusted: existing.is_some_and(|r| r.trusted),
+            blocked: existing.is_some_and(|r| r.blocked),
+        }
+    }
+
+    /// 落库一个对端并确保会话存在（只在用户主动操作或对端已存在时调用）。
+    /// 新对端超过库级上限时拒绝。
+    fn ensure_peer(&self, peer: &LsPeer, fp: &str, confirm: bool) -> Result<LsPeerRow, CoreError> {
+        let store = &self.deps.store;
+        let existing = store.get_ls_peer(fp)?;
+        if existing.is_none() && store.count_ls_peers()? >= MAX_STORED_PEERS {
+            return Err(CoreError::Rejected("too many localsend peers".into()));
+        }
+        let row = self.row_from_peer(peer, fp, existing.as_ref(), confirm);
         store.upsert_ls_peer(&row)?;
         let conv = ConvId::localsend(fp);
         store.ensure_conversation(&ConvRow {
             conv,
             kind: ConvKindRow::LocalSend,
             peer_user: None,
-            title: Some(alias.clone()),
+            title: Some(row.alias.clone()),
             created_at: row.last_seen,
         })?;
-        if existing.as_ref().is_some_and(|r| r.alias != alias) {
-            store.set_conversation_title(&conv, &alias)?;
+        if existing.as_ref().is_some_and(|r| r.alias != row.alias) {
+            store.set_conversation_title(&conv, &row.alias)?;
         }
         Ok(row)
     }
@@ -422,7 +514,12 @@ impl BridgeInner {
         let Ok(Some(row)) = store.get_conversation(conv) else {
             return;
         };
-        let self_user = self.deps.identity.read().unwrap().user_id();
+        let self_user = self
+            .deps
+            .identity
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .user_id();
         let summary = conv_summary(store.as_ref(), self_user.as_ref(), &row, false);
         let _ = self
             .deps
@@ -448,7 +545,8 @@ impl BridgeInner {
         }
     }
 
-    /// 处理发现到的对端。
+    /// 处理发现到的对端：发现阶段只放内存；库里已有的对端（用户接受过 / 主动发过）
+    /// 才刷新数据库。
     fn on_peer_seen(&self, peer: LsPeer) {
         let Some(fp) = normalize_fingerprint(&peer.info.fingerprint) else {
             return;
@@ -465,6 +563,7 @@ impl BridgeInner {
             let alias = clean_alias(&peer.info.alias, &fp);
             let entry = g.entry(fp.clone()).or_insert_with(|| SeenPeer {
                 peer: peer.clone(),
+                by_ip: HashMap::new(),
                 alias: alias.clone(),
                 last_event: now,
                 last_db: now - PEER_DB_REFRESH * 2,
@@ -473,6 +572,17 @@ impl BridgeInner {
             let changed = entry.peer.ip != peer.ip || entry.alias != alias;
             let announce = !entry.online;
             entry.peer = peer.clone();
+            if !entry.by_ip.contains_key(&peer.ip) && entry.by_ip.len() >= MAX_IPS_PER_PEER {
+                if let Some(oldest) = entry
+                    .by_ip
+                    .iter()
+                    .min_by_key(|(_, (_, at))| *at)
+                    .map(|(ip, _)| *ip)
+                {
+                    entry.by_ip.remove(&oldest);
+                }
+            }
+            entry.by_ip.insert(peer.ip, (peer.clone(), now));
             entry.alias = alias;
             entry.last_event = now;
             entry.online = true;
@@ -485,17 +595,25 @@ impl BridgeInner {
         if !write {
             return;
         }
-        match self.ensure_peer(&peer, &fp, false) {
-            Ok(row) => {
-                if announce {
-                    let addr = std::net::SocketAddr::new(peer.ip, peer.info.port).to_string();
-                    let _ = self.deps.events.send(Event::PeerOnline {
-                        peer: self.peer_view(&row, addr),
-                    });
-                    self.emit_conv_updated(&ConvId::localsend(&fp));
-                }
+        let existing = match self.deps.store.get_ls_peer(&fp) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read localsend peer");
+                return;
             }
-            Err(e) => tracing::warn!(error = %e, "failed to record localsend peer"),
+        };
+        let row = self.row_from_peer(&peer, &fp, existing.as_ref(), false);
+        if existing.is_some() {
+            if let Err(e) = self.ensure_peer(&peer, &fp, false) {
+                tracing::warn!(error = %e, "failed to refresh localsend peer");
+            }
+        }
+        if announce {
+            let addr = std::net::SocketAddr::new(peer.ip, peer.info.port).to_string();
+            let _ = self.deps.events.send(Event::PeerOnline {
+                peer: self.peer_view(&row, addr),
+            });
+            self.emit_conv_updated(&ConvId::localsend(&fp));
         }
     }
 
@@ -532,13 +650,13 @@ impl BridgeInner {
             let _ = reply.send(LsDecision::Reject);
             return;
         };
-        // 接受前先落库对端与会话，保证收到的消息有处可去
-        if let Err(e) = self.ensure_peer(&peer, &fp, false) {
-            tracing::warn!(error = %e, "failed to record localsend peer");
-            let _ = reply.send(LsDecision::Reject);
-            return;
-        }
+        // 未经批准的请求不落库；已信任对端（Auto）的行与会话本来就在库里
         if verdict == Verdict::Auto {
+            if let Err(e) = self.ensure_peer(&peer, &fp, false) {
+                tracing::warn!(error = %e, "failed to refresh localsend peer");
+                let _ = reply.send(LsDecision::Reject);
+                return;
+            }
             if let Some(t) = text {
                 if let Err(e) = self.insert_remote(&fp, MsgBody::Text { text: t }) {
                     tracing::warn!(error = %e, "failed to store localsend text");
@@ -550,6 +668,13 @@ impl BridgeInner {
             return;
         }
         let alias = clean_alias(&peer.info.alias, &fp);
+        let addr_changed = self
+            .deps
+            .store
+            .get_ls_peer(&fp)
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.trusted);
         let (kind, preview) = match (&text, &files) {
             (Some(t), _) => (
                 RequestKind::Message,
@@ -579,6 +704,8 @@ impl BridgeInner {
             from_short: fp.chars().take(8).collect(),
             preview,
             created_at: now_millis(),
+            source_addr: Some(peer.ip.to_string()),
+            addr_changed,
         };
         {
             let mut g = lock(&self.pending);
@@ -588,7 +715,7 @@ impl BridgeInner {
                 PendingReq {
                     reply,
                     fingerprint: fp,
-                    ip: peer.ip,
+                    peer,
                     text,
                     view: view.clone(),
                 },
@@ -615,7 +742,12 @@ impl BridgeInner {
     ) -> Result<(), CoreError> {
         let store = &self.deps.store;
         let (seq, conv_seq) = store.next_seqs(&author, conv)?;
-        let hlc = self.deps.clock.lock().unwrap().now(now_millis());
+        let hlc = self
+            .deps
+            .clock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .now(now_millis());
         let env = Envelope {
             conv: *conv,
             id: MsgId { author, seq },
@@ -729,8 +861,19 @@ async fn event_loop(
 /// 登记收到的文件并在会话结束时生成文件消息；哈希与缩略图较慢，因此独立成任务。
 async fn finisher_loop(inner: Arc<BridgeInner>, mut rx: mpsc::UnboundedReceiver<LsEvent>) {
     // 会话 ID -> (指纹, 已登记文件)
-    let mut sessions: HashMap<String, (String, Vec<BlobMeta>)> = HashMap::new();
+    let mut sessions: HashMap<String, (String, Vec<BlobMeta>, Instant)> = HashMap::new();
     while let Some(ev) = rx.recv().await {
+        // 收尾事件丢失时的兜底：过期或超限的会话把已收到的文件先落成消息
+        let stale: Vec<String> = sessions
+            .iter()
+            .filter(|(_, (_, _, at))| at.elapsed() >= SESSION_TTL)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            if let Some((fp, items, _)) = sessions.remove(&id) {
+                inner.flush_session(&fp, items);
+            }
+        }
         match ev {
             LsEvent::FileReceived {
                 session,
@@ -751,17 +894,26 @@ async fn finisher_loop(inner: Arc<BridgeInner>, mut rx: mpsc::UnboundedReceiver<
                     false,
                 )
                 .await;
+                if !sessions.contains_key(&session) && sessions.len() >= MAX_SESSIONS {
+                    let oldest = sessions
+                        .iter()
+                        .min_by_key(|(_, (_, _, at))| *at)
+                        .map(|(id, _)| id.clone());
+                    if let Some((fp, items, _)) = oldest.and_then(|id| sessions.remove(&id)) {
+                        inner.flush_session(&fp, items);
+                    }
+                }
                 match meta {
                     Ok(m) => sessions
                         .entry(session)
-                        .or_insert((fp, Vec::new()))
+                        .or_insert((fp, Vec::new(), Instant::now()))
                         .1
                         .push(m),
                     Err(e) => tracing::warn!(error = %e, "failed to register received file"),
                 }
             }
             LsEvent::SessionFinished { session, .. } => {
-                if let Some((fp, items)) = sessions.remove(&session) {
+                if let Some((fp, items, _)) = sessions.remove(&session) {
                     inner.flush_session(&fp, items);
                 }
             }
@@ -785,6 +937,8 @@ pub(crate) struct LsSlot {
     current: StdMutex<Option<Arc<LocalSendBridge>>>,
     /// 串行化重配置，并记录当前运行所用配置。
     key: tokio::sync::Mutex<Option<LsKey>>,
+    /// 服务已关闭：之后的重配置（含后台轮询）不得再拉起桥。
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl LsSlot {
@@ -793,6 +947,7 @@ impl LsSlot {
             production,
             current: StdMutex::new(None),
             key: tokio::sync::Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -804,6 +959,7 @@ impl LsSlot {
     /// 停止当前的桥（服务关闭时调用）。
     pub(crate) async fn stop(&self) {
         let mut key = self.key.lock().await;
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         let old = lock(&self.current).take();
         if let Some(b) = old {
             b.stop().await;
@@ -814,6 +970,9 @@ impl LsSlot {
     /// 按当前设置启动、重启或停止桥：已初始化且开关开启才运行，配置变化则重启。
     pub(crate) async fn reconfigure(&self, inner: &crate::service::Inner) {
         let mut key = self.key.lock().await;
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let desired = self.desired_key(inner);
         if *key == desired && (desired.is_none() || self.get().is_some()) {
             return;
@@ -861,7 +1020,12 @@ impl LsSlot {
     }
 
     fn desired_key(&self, inner: &crate::service::Inner) -> Option<LsKey> {
-        if !inner.identity.read().unwrap().is_initialized() {
+        if !inner
+            .identity
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_initialized()
+        {
             return None;
         }
         let settings = crate::settings::load_settings(&inner.store).ok()?;
@@ -928,6 +1092,15 @@ mod tests {
         assert_eq!(clean_alias("  Pho\nne ", "abcdef0123456789"), "Phone");
         assert_eq!(clean_alias("", "abcdef0123456789"), "abcdef01");
         assert_eq!(clean_alias(&"x".repeat(200), "ff").chars().count(), 64);
+    }
+
+    #[test]
+    fn alias_drops_bidi_and_zero_width_characters() {
+        assert_eq!(clean_alias("a\u{202E}b\u{200B}c\u{FEFF}", "ff"), "abc");
+        assert_eq!(
+            clean_alias("\u{2066}\u{2069}", "abcdef0123456789"),
+            "abcdef01"
+        );
     }
 
     #[test]

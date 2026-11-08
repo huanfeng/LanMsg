@@ -91,6 +91,8 @@
     <string name="contacts_empty">还没有联系人</string>
     <string name="toast_request_sent">已发送请求</string>
     <string name="req_accept_once">接收一次</string>
+    <string name="req_source_addr">来源地址：%1$s</string>
+    <string name="req_addr_changed">该设备已被信任，但本次来源地址与上次不同，请确认</string>
     <string name="req_add_contact">加为联系人</string>
     <string name="req_reject">拒绝</string>
     <string name="req_block">屏蔽</string>

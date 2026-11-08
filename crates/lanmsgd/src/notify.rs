@@ -214,6 +214,8 @@ mod tests {
                 from_short: "abcd".into(),
                 preview: RequestPreviewView::None,
                 created_at: 0,
+                source_addr: None,
+                addr_changed: false,
             },
         }
     }

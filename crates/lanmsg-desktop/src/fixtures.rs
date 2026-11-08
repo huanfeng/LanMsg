@@ -714,6 +714,8 @@ pub fn demo_model(p: DemoPage) -> Model {
         // 联系人请求没有内容预览
         preview: RequestPreviewView::None,
         created_at: NOW - 5 * MIN,
+        source_addr: None,
+        addr_changed: false,
     }];
     m.peers = vec![
         PeerView {

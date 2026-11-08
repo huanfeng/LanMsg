@@ -37,6 +37,14 @@ fn http_err(e: reqwest::Error) -> LsError {
 }
 
 impl LocalSend {
+    /// 访问对端用的客户端：HTTPS 对端按其通告的指纹固定证书，HTTP 对端直接用共享客户端。
+    fn client_for(&self, peer: &LsPeer) -> Result<reqwest::Client, LsError> {
+        match peer.info.protocol {
+            LsProtocol::Http => Ok(self.inner.client.clone()),
+            LsProtocol::Https => crate::discovery::pinned_client(&peer.info.fingerprint),
+        }
+    }
+
     /// 发送文字：一个 `text/plain` “文件”，正文放在 `preview`；对方返回 204 即完成。
     pub async fn send_text(&self, peer: &LsPeer, text: &str) -> Result<(), LsError> {
         let meta = LsFileMeta {
@@ -60,8 +68,7 @@ impl LocalSend {
             .cloned()
             .ok_or_else(|| LsError::Json("missing file token".into()))?;
         let r = self
-            .inner
-            .client
+            .client_for(peer)?
             .post(format!("{}/upload", base_url(peer)))
             .query(&[
                 ("sessionId", resp.session_id.as_str()),
@@ -126,7 +133,7 @@ impl LocalSend {
                 continue;
             };
             let (client, url, sid) = (
-                self.inner.client.clone(),
+                self.client_for(peer)?,
                 format!("{}/upload", base_url(peer)),
                 resp.session_id.clone(),
             );
@@ -152,8 +159,7 @@ impl LocalSend {
         if let Some(e) = first_err {
             // 尽力通知对方清理
             let _ = self
-                .inner
-                .client
+                .client_for(peer)?
                 .post(format!("{}/cancel", base_url(peer)))
                 .query(&[("sessionId", resp.session_id.as_str())])
                 .timeout(Duration::from_secs(5))
@@ -175,8 +181,7 @@ impl LocalSend {
             files: files.into_iter().map(|f| (f.id.clone(), f)).collect(),
         };
         let r = self
-            .inner
-            .client
+            .client_for(peer)?
             .post(format!("{}/prepare-upload", base_url(peer)))
             .timeout(PREPARE_TIMEOUT)
             .json(&req)

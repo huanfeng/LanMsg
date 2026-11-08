@@ -401,6 +401,17 @@ fn request_card(ui: &UiState, r: &RequestView, confirm: ConfirmState) -> Element
             strings::CONTACT_FINGERPRINT,
             r.from_short
         )));
+    if let Some(addr) = &r.source_addr {
+        info = info.child(meta(format!("{} {addr}", strings::REQUEST_SOURCE_ADDR)));
+    }
+    if r.addr_changed {
+        info = info.child(
+            Element::label(strings::REQUEST_ADDR_CHANGED)
+                .font_size(style::FONT_META)
+                .fg_role(Role::Danger)
+                .max_lines(2),
+        );
+    }
     if let Some(text) = request_preview_text(&r.preview) {
         info = info.child(
             Element::label(text)

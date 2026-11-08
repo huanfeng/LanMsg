@@ -1742,6 +1742,8 @@ mod tests {
             from_short: "ab".into(),
             preview: RequestPreviewView::None,
             created_at: 1,
+            source_addr: None,
+            addr_changed: false,
         }
     }
 

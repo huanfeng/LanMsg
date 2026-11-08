@@ -779,6 +779,8 @@ pub fn request_view(store: &Store, r: &RequestRow) -> RequestView {
         from_short,
         preview: r.preview.clone(),
         created_at: r.created_at,
+        source_addr: None,
+        addr_changed: false,
     }
 }
 

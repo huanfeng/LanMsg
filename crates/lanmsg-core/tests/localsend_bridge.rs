@@ -79,7 +79,7 @@ impl App {
                 version: "2.0".into(),
                 device_model: None,
                 device_type: None,
-                fingerprint: "ee".repeat(32),
+                fingerprint: svc.svc.localsend_fingerprint_for_test().unwrap(),
                 port: svc.svc.localsend_port_for_test().expect("LocalSend 未运行"),
                 protocol: LsProtocol::Https,
                 download: false,
@@ -219,8 +219,6 @@ async fn incoming_text_from_stranger_becomes_request_then_message() {
 async fn add_contact_makes_next_transfer_automatic() {
     let mut n = started().await;
     let app = App::start("PhoneApp").await;
-    // 先让 Service 记录该对端的来源 IP
-    app.announce_to(&n).await;
     let result = spawn_send_text(&app, &n, "first");
     let req = incoming_request(&mut n).await;
     n.call(Request::RespondRequest {
@@ -241,34 +239,139 @@ async fn add_contact_makes_next_transfer_automatic() {
 async fn trusted_peer_from_a_different_address_is_asked_again() {
     let mut n = started().await;
     let app = App::start("PhoneApp").await;
-    app.announce_to(&n).await;
     let store = n.svc.store_for_test();
     let fp = app.fingerprint();
-    wait_until(
-        || {
-            let (store, fp) = (store.clone(), fp.clone());
-            async move { store.get_ls_peer(&fp).unwrap().is_some() }
-        },
-        5,
-    )
-    .await;
     // 已信任，但记录的来源地址不是本次请求的来源
-    store.set_ls_trust(&fp, true, false).unwrap();
-    let row = store.get_ls_peer(&fp).unwrap().unwrap();
     store
         .upsert_ls_peer(&lanmsg_core::store::LsPeerRow {
+            fingerprint: fp.clone(),
+            pseudo_device: lanmsg_core::store::pseudo_device_id(&fp),
+            alias: "Trusted".into(),
+            device_model: None,
+            device_type: None,
             last_addr: Some("10.9.9.9".into()),
-            ..row
+            protocol: "https".into(),
+            port: 1,
+            last_seen: 1,
+            trusted: true,
+            blocked: false,
         })
         .unwrap();
     let result = spawn_send_text(&app, &n, "hello");
     let req = incoming_request(&mut n).await;
+    assert_eq!(req.source_addr.as_deref(), Some("127.0.0.1"));
+    assert!(req.addr_changed);
     n.call(Request::RespondRequest {
         request: req.request,
         action: RequestAction::Reject,
     })
     .await;
     assert!(matches!(result.await.unwrap(), Err(LsError::Status(403))));
+    // 已信任对端的别名不会被请求里的别名改写
+    assert_eq!(store.get_ls_peer(&fp).unwrap().unwrap().alias, "Trusted");
+}
+
+#[tokio::test]
+async fn discovery_and_unapproved_requests_do_not_touch_the_database() {
+    let mut n = started().await;
+    let port = n.svc.localsend_port_for_test().unwrap();
+    let client = lenient_client().unwrap();
+    for i in 0..30u32 {
+        let info = LsInfo {
+            alias: format!("rand{i}"),
+            version: "2.0".into(),
+            device_model: None,
+            device_type: None,
+            fingerprint: format!("{:064x}", i + 1),
+            port: 1,
+            protocol: LsProtocol::Https,
+            download: false,
+        };
+        let r = client
+            .post(format!(
+                "https://127.0.0.1:{port}/api/localsend/v2/register"
+            ))
+            .json(&info)
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success());
+    }
+    // 一个被拒绝的请求也不留痕
+    let app = App::start("PhoneApp").await;
+    let result = spawn_send_text(&app, &n, "x");
+    let req = incoming_request(&mut n).await;
+    n.call(Request::RespondRequest {
+        request: req.request,
+        action: RequestAction::Reject,
+    })
+    .await;
+    let _ = result.await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let store = n.svc.store_for_test();
+    assert_eq!(store.count_ls_peers().unwrap(), 0);
+    match n.call(Request::ListConversations).await {
+        Response::Conversations { value } => {
+            assert!(value.iter().all(|c| c.kind != ConvKind::LocalSend));
+        }
+        other => panic!("期望 Conversations，实际 {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn peer_table_is_capped_when_approving_new_strangers() {
+    let mut n = started().await;
+    let store = n.svc.store_for_test();
+    for i in 0..512u32 {
+        let fp = format!("{:064x}", i + 1);
+        store
+            .upsert_ls_peer(&lanmsg_core::store::LsPeerRow {
+                fingerprint: fp.clone(),
+                pseudo_device: lanmsg_core::store::pseudo_device_id(&fp),
+                alias: "x".into(),
+                device_model: None,
+                device_type: None,
+                last_addr: None,
+                protocol: "https".into(),
+                port: 1,
+                last_seen: 1,
+                trusted: false,
+                blocked: false,
+            })
+            .unwrap();
+    }
+    let app = App::start("PhoneApp").await;
+    let result = spawn_send_text(&app, &n, "x");
+    let req = incoming_request(&mut n).await;
+    let err = n
+        .try_call(Request::RespondRequest {
+            request: req.request,
+            action: RequestAction::AcceptOnce,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Rejected);
+    assert!(matches!(result.await.unwrap(), Err(LsError::Status(403))));
+    assert_eq!(store.count_ls_peers().unwrap(), 512);
+}
+
+#[tokio::test]
+async fn shutdown_is_final_and_settings_changes_do_not_restart_it() {
+    let n = started().await;
+    n.svc.shutdown().await;
+    assert!(n.svc.localsend_port_for_test().is_none());
+    let mut s = match n.call(Request::GetSettings).await {
+        Response::Settings { value } => value,
+        other => panic!("期望 Settings，实际 {other:?}"),
+    };
+    s.localsend_enabled = false;
+    n.call(Request::SetSettings {
+        settings: s.clone(),
+    })
+    .await;
+    s.localsend_enabled = true;
+    n.call(Request::SetSettings { settings: s }).await;
+    assert!(n.svc.localsend_port_for_test().is_none());
 }
 
 #[tokio::test]
@@ -392,13 +495,6 @@ async fn send_text_to_localsend_conv_marks_delivered_and_offline_fails() {
     n.wait_event(|e| matches!(e, Event::PeerOnline { .. }), 5)
         .await;
     let conv = app.conv();
-    // 在线对端：会话摘要带在线标记
-    match n.call(Request::ListConversations).await {
-        Response::Conversations { value } => {
-            assert!(value.iter().any(|c| c.conv == conv && c.peer_online));
-        }
-        other => panic!("期望 Conversations，实际 {other:?}"),
-    }
     n.call(Request::SendText {
         conv: conv.clone(),
         text: "hello app".into(),
@@ -409,6 +505,13 @@ async fn send_text_to_localsend_conv_marks_delivered_and_offline_fails() {
         10,
     )
     .await;
+    // 首次发送才建立会话；在线对端的摘要带在线标记
+    match n.call(Request::ListConversations).await {
+        Response::Conversations { value } => {
+            assert!(value.iter().any(|c| c.conv == conv && c.peer_online));
+        }
+        other => panic!("期望 Conversations，实际 {other:?}"),
+    }
 
     // 文件夹不支持
     let err = n
@@ -529,4 +632,39 @@ async fn busy_peer_fails_the_message_and_adds_a_notice() {
         5,
     )
     .await;
+}
+
+#[tokio::test]
+async fn trusted_peer_is_only_sent_to_its_recorded_address() {
+    let mut n = started().await;
+    let app = App::start("PhoneApp").await;
+    let store = n.svc.store_for_test();
+    let fp = app.fingerprint();
+    store
+        .upsert_ls_peer(&lanmsg_core::store::LsPeerRow {
+            fingerprint: fp.clone(),
+            pseudo_device: lanmsg_core::store::pseudo_device_id(&fp),
+            alias: "PhoneApp".into(),
+            device_model: None,
+            device_type: None,
+            last_addr: Some("10.9.9.9".into()),
+            protocol: "https".into(),
+            port: 1,
+            last_seen: 1,
+            trusted: true,
+            blocked: false,
+        })
+        .unwrap();
+    // 新通告来自 127.0.0.1，与记录的地址不同：不作为发送目标
+    app.announce_to(&n).await;
+    n.wait_event(|e| matches!(e, Event::PeerOnline { .. }), 5)
+        .await;
+    let err = n
+        .try_call(Request::SendText {
+            conv: app.conv(),
+            text: "x".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PeerOffline);
 }

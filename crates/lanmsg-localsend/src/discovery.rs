@@ -189,7 +189,88 @@ pub fn lenient_client() -> Result<reqwest::Client, LsError> {
         .map_err(|e| LsError::Http(e.to_string()))
 }
 
-/// 接受任意服务端证书（签名仍按握手校验）。
+/// 构造按指纹固定证书的客户端：服务端证书的 SHA-256 必须等于对端通告的指纹
+/// （忽略大小写），仍允许自签；指纹不符的握手被拒绝。
+pub fn pinned_client(fingerprint: &str) -> Result<reqwest::Client, LsError> {
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| LsError::Tls(e.to_string()))?
+    .dangerous()
+    .with_custom_certificate_verifier(Arc::new(PinnedCert {
+        provider: rustls::crypto::aws_lc_rs::default_provider(),
+        fingerprint: fingerprint.to_ascii_lowercase(),
+    }))
+    .with_no_client_auth();
+    reqwest::Client::builder()
+        .use_preconfigured_tls(config)
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| LsError::Http(e.to_string()))
+}
+
+/// 只接受指纹匹配的服务端证书（签名仍按握手校验）。
+#[derive(Debug)]
+struct PinnedCert {
+    provider: rustls::crypto::CryptoProvider,
+    fingerprint: String,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedCert {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if crate::cert::fingerprint(end_entity.as_ref()).to_ascii_lowercase() == self.fingerprint {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(
+                "server certificate fingerprint mismatch".into(),
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// 接受任意服务端证书（签名仍按握手校验）。仅用于发现阶段的 register 握手。
 #[derive(Debug)]
 struct AcceptAnyCert(rustls::crypto::CryptoProvider);
 

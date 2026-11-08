@@ -103,5 +103,6 @@ object Fixtures {
         RequestView(
             request = id, kind = kind, fromUser = fromUser, fromName = fromName,
             fromShort = fromUser.uppercase(), preview = RequestPreviewView.None, createdAt = 1000,
+            sourceAddr = null, addrChanged = false,
         )
 }

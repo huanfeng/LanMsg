@@ -637,6 +637,10 @@ pub struct RequestView {
     pub from_short: String,
     pub preview: RequestPreviewView,
     pub created_at: i64,
+    /// 请求方的网络地址（LocalSend 请求给出来源 IP；其余为 None）。P5 追加。
+    pub source_addr: Option<String>,
+    /// 对端指纹已被信任，但本次来源地址与记录不同（界面应提示）。P5 追加。
+    pub addr_changed: bool,
 }
 
 /// 请求内容预览（结构化；界面按 kind 与变体自行拼本地化文案）。

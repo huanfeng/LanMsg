@@ -111,6 +111,12 @@ private fun RequestItem(item: RequestView, onRespond: (String, RequestAction) ->
             Column(Modifier.weight(1f).padding(start = 12.dp)) {
                 Text(item.fromName, color = c.ink, style = MaterialTheme.typography.bodyLarge)
                 Text(stringResource(kind), color = c.inkMuted, style = MaterialTheme.typography.bodyMedium)
+                item.sourceAddr?.let {
+                    Text(stringResource(R.string.req_source_addr, it), color = c.inkSubtle, style = MaterialTheme.typography.bodySmall)
+                }
+                if (item.addrChanged) {
+                    Text(stringResource(R.string.req_addr_changed), color = c.danger, style = MaterialTheme.typography.bodySmall)
+                }
                 requestPreviewText(item.preview)?.let {
                     Text(it, color = c.inkSubtle, style = MaterialTheme.typography.bodySmall, maxLines = 2)
                 }

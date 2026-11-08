@@ -637,3 +637,18 @@ async fn shutdown_cleans_part_files_and_reports_session_finished() {
     assert!(!b.download_dir().join("x.txt.part").exists());
     h.abort();
 }
+
+#[tokio::test]
+async fn certificate_fingerprint_mismatch_is_rejected() {
+    let a = node(LsDecision::Accept).await;
+    let mut b = node(LsDecision::Accept).await;
+    let mut wrong = b.peer();
+    wrong.info.fingerprint = "00".repeat(32);
+    let err = a.ls.send_text(&wrong, "hi").await.unwrap_err();
+    assert!(matches!(err, LsError::Http(_)), "{err:?}");
+    // 指纹大小写不敏感，正确指纹可发送
+    let mut lower = b.peer();
+    lower.info.fingerprint = lower.info.fingerprint.to_ascii_lowercase();
+    a.ls.send_text(&lower, "ok").await.unwrap();
+    next_matching(&mut b, |e| matches!(e, LsEvent::TextReceived { .. })).await;
+}

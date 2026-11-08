@@ -539,6 +539,12 @@ impl Service {
         self.inner.localsend.get().map(|b| b.port())
     }
 
+    /// 测试辅助：LocalSend 服务的证书指纹（小写，未运行为 None）。
+    #[doc(hidden)]
+    pub fn localsend_fingerprint_for_test(&self) -> Option<String> {
+        self.inner.localsend.get().map(|b| b.fingerprint())
+    }
+
     /// 测试辅助：访问存储（集成测试断言 holders 等用）。
     #[doc(hidden)]
     pub fn store_for_test(&self) -> Arc<Store> {

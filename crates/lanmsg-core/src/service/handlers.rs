@@ -462,10 +462,16 @@ fn localsend_target(
     inner: &Inner,
     conv: &ConvId,
 ) -> Result<Option<Arc<crate::localsend_bridge::LocalSendBridge>>, ApiError> {
-    if !crate::localsend_bridge::is_localsend_conv(&inner.store, conv) {
+    let bridge = inner.localsend.get();
+    // 发现阶段不建会话：用户首次向在线的 LocalSend 对端发送时才建立
+    let exists = crate::localsend_bridge::is_localsend_conv(&inner.store, conv)
+        || bridge
+            .as_ref()
+            .is_some_and(|b| b.ensure_conv(conv).unwrap_or(false));
+    if !exists {
         return Ok(None);
     }
-    match inner.localsend.get() {
+    match bridge {
         Some(b) if b.peer_online(conv) => Ok(Some(b)),
         _ => Err(CoreError::PeerOffline.into()),
     }

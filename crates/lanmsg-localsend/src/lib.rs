@@ -7,7 +7,7 @@ mod server;
 pub mod types;
 
 pub use cert::{fingerprint, load_or_create, LsCert};
-pub use discovery::{lenient_client, register_reply, LsDiscovery, LsPeerEvent};
+pub use discovery::{lenient_client, pinned_client, register_reply, LsDiscovery, LsPeerEvent};
 pub use server::{LocalSend, LsConfig, LsDecision, LsEvent};
 pub use types::{
     LsAnnounce, LsFileMeta, LsFileTimes, LsInfo, LsPeer, LsProtocol, PrepareUploadRequest,

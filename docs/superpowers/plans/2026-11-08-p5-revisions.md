@@ -81,6 +81,11 @@
   - `trusted` 自动接受须同时核对：来源 IP 与该指纹上次记录的 IP 一致（`LsEvent` 的 `peer.ip`），并按 `classify` 过滤非 Lan 来源。
   - 审批通过后若发送方收到 409（会话被占用）：界面按“对方忙”处理，不重复弹窗；`prepare-upload` 待审批名额有限（全局 8、每源 IP 1，超出 429）。
   - `LocalSend::shutdown` 目前只停服务与发现，不清理进行中会话的 `.part`，也不发 `SessionFinished`；T11 接入开关时处理。
+  - **T11 落地说明（实现与审阅修订）**：
+    - 信任模型：LocalSend 兼容的“信任” = 指纹 + 来源 IP，**不是密码学身份**。入站方向（prepare-upload 里的指纹是对端自报）无法校验；出站方向已按通告指纹固定证书（`lanmsg_localsend::pinned_client`，SHA-256 不符则握手失败，仍允许自签）。已信任对端换 IP 后重新询问，发送只发往记录的地址。
+    - 发现阶段只放内存，不落库、不建会话；只有用户接受 / 加为联系人 / 屏蔽，或用户首次向在线对端发送（`ensure_conv`）时才落库，库内对端上限 512。已信任对端的别名、型号、地址只在用户确认时更新；别名过滤控制与 Unicode 格式字符。
+    - C5 追加：`SystemEvent` / `SystemEventView` 的 `LocalSendPin`、`LocalSendBusy`；`SettingsDto.localsend_port`；`RequestView.source_addr`（来源 IP）与 `addr_changed`（已信任但地址不同，界面提示）。
+    - 首次联系：发现到的设备在用户首次发送前没有会话行，界面需要由 `PeerOnline` 以外的入口取得会话 ID（`ConvId::localsend(小写指纹)`），由 T15/T16 的“附近设备”入口处理。
 - **T12（安全审阅后修订，已实现）**：
   - HKDF 输出 128 字节：`k_page | k_host | k_enc_p2h | k_enc_h2p`（各 32）。加密按方向分离：页面发往宿主用 `k_enc_p2h`，宿主发往页面用 `k_enc_h2p`，防反射。`SessionKeys` 提供 `seal_to_page` / `open_from_page`（宿主端）与 `seal_to_host` / `open_from_host`（页面侧、测试用），原 `k_enc`、`seal`、`open` 删除。`vectors.json` 的每种模式含 `k_enc_p2h`、`k_enc_h2p`、`sealed_p2h`、`sealed_h2p`。
   - `derive` 与 `host_respond` 返回 `Result<_, CoreError>`：X25519 共享密钥非贡献性（零点等低阶公钥）时返回 `InvalidArgument`。
