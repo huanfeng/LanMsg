@@ -18,7 +18,9 @@ use crate::error::CoreError;
 use crate::identity::Identity;
 use crate::net::PeerInfo;
 use crate::platform::ThumbnailProvider;
-use crate::store::{BlobLocalKind, ConvKindRow, ConvRow, StationItemRow, Store, StoreModeRow};
+use crate::store::{
+    BlobLocalKind, BlobLocalRow, ConvKindRow, ConvRow, StationItemRow, Store, StoreModeRow,
+};
 
 /// 站点名称最大字符数。
 const MAX_NAME_CHARS: usize = 64;
@@ -183,13 +185,32 @@ impl StationHost {
         if paths.is_empty() {
             return Err(CoreError::InvalidArgument("path list is empty".into()));
         }
-        let mut out = Vec::with_capacity(paths.len());
+        // 先全部登记完再一次性写库：中途失败时清理已复制的副本，不留半截结果。
+        let mut rows = Vec::with_capacity(paths.len());
         for path in paths {
-            let row = self
+            match self
                 .put_one_path(station, path, mode, expires_at, added_by, now)
-                .await?;
-            self.store.upsert_station_item(&row)?;
-            out.push(row.item);
+                .await
+            {
+                Ok(row) => rows.push(row),
+                Err(e) => {
+                    for r in &rows {
+                        if r.store_mode == Some(StoreModeRow::Copy) {
+                            remove_dir_blocking(item_dir(&self.data_dir, station, &r.item.item))
+                                .await;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            if let Err(e) = self.store.upsert_station_item(row) {
+                self.notify(station, out);
+                return Err(e.into());
+            }
+            out.push(row.item.clone());
         }
         self.notify(station, out.clone());
         Ok(out)
@@ -205,12 +226,21 @@ impl StationHost {
         now: i64,
     ) -> Result<StationItemRow, CoreError> {
         let p = path.to_path_buf();
-        let (abs, is_dir) = tokio::task::spawn_blocking(move || {
-            let meta = std::fs::metadata(&p).map_err(|_| {
+        // 先规整路径（解析 `..` 与符号链接）再取名字：否则以 `..` 或 `/` 结尾的路径
+        // 取不到文件名，复制目标会退化成源路径本身。
+        let (abs, is_dir, name) = tokio::task::spawn_blocking(move || {
+            let abs = std::fs::canonicalize(&p).map_err(|_| {
                 CoreError::InvalidArgument(format!("path does not exist: {}", p.display()))
             })?;
-            let abs = std::path::absolute(&p).map_err(CoreError::Io)?;
-            Ok::<_, CoreError>((abs, meta.is_dir()))
+            let is_dir = std::fs::metadata(&abs).map_err(CoreError::Io)?.is_dir();
+            let name = abs
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .filter(|n| !n.is_empty() && n != "." && n != ".." && !n.contains(['/', '\\']))
+                .ok_or_else(|| {
+                    CoreError::InvalidArgument(format!("path has no usable name: {}", p.display()))
+                })?;
+            Ok::<_, CoreError>((abs, is_dir, name))
         })
         .await
         .map_err(|e| CoreError::Proto(format!("path task failed: {e}")))??;
@@ -226,25 +256,18 @@ impl StationHost {
         // 逐文件登记；失败时清理已复制的副本。
         let result = async {
             // (原文件, rel_path)；File 条目 rel_path 为 None。
-            let (name, sources): (String, Vec<(PathBuf, Option<String>)>) = if is_dir {
+            let sources: Vec<(PathBuf, Option<String>)> = if is_dir {
                 let root = abs.clone();
-                let (name, files) =
+                let (_, files) =
                     tokio::task::spawn_blocking(move || crate::blob::collect_folder_sources(&root))
                         .await
                         .map_err(|e| CoreError::Proto(format!("walk task failed: {e}")))??;
                 if files.is_empty() {
                     return Err(CoreError::InvalidArgument("folder is empty".into()));
                 }
-                (
-                    name,
-                    files.into_iter().map(|f| (f.path, f.rel_path)).collect(),
-                )
+                files.into_iter().map(|f| (f.path, f.rel_path)).collect()
             } else {
-                let name = abs
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                (name, vec![(abs.clone(), None)])
+                vec![(abs.clone(), None)]
             };
 
             let mut entries = Vec::new();
@@ -259,6 +282,12 @@ impl StationHost {
                             Some(r) => dir.join(&name).join(r),
                             None => dir.join(&name),
                         };
+                        // 防御：副本必须落在条目目录内且不能覆盖源文件。
+                        if dest == src || !dest.starts_with(&dir) {
+                            return Err(CoreError::InvalidArgument(
+                                "copy destination is not inside the item directory".into(),
+                            ));
+                        }
                         let (from, to) = (src.clone(), dest.clone());
                         tokio::task::spawn_blocking(move || {
                             if let Some(parent) = to.parent() {
@@ -305,7 +334,7 @@ impl StationHost {
             Ok(v) => v,
             Err(e) => {
                 if mode == StoreModeRow::Copy {
-                    let _ = std::fs::remove_dir_all(&dir);
+                    remove_dir_blocking(dir).await;
                 }
                 return Err(e);
             }
@@ -396,7 +425,8 @@ impl StationHost {
             return Err(CoreError::Rejected("access denied".into()));
         }
         Self::check_expiry(item.expires_at, now)?;
-        if let Some(existing) = self.store.get_station_item(&item.item)? {
+        let existing = self.store.get_station_item(&item.item)?;
+        if let Some(existing) = &existing {
             if existing.station != *station {
                 return Err(CoreError::InvalidArgument(
                     "item belongs to another station".into(),
@@ -427,6 +457,19 @@ impl StationHost {
         row.item.pinned = item.pinned;
         row.item.available = !copy;
         row.store_mode = copy.then_some(StoreModeRow::Copy);
+        // 重复投递：已拉取完成的复制条目保留本地状态，避免退回「待拉取」。
+        if let Some(old) = existing.filter(|o| {
+            copy && !o.item.removed
+                && o.store_mode == Some(StoreModeRow::Copy)
+                && o.item.available
+                && o.item.content == row.item.content
+        }) {
+            row.item.available = true;
+            row.item.added_at = old.item.added_at;
+            row.local_path = old.local_path;
+            row.local_size = old.local_size;
+            row.local_mtime = old.local_mtime;
+        }
         self.store.upsert_station_item(&row)?;
         if copy {
             for hash in &blobs {
@@ -457,57 +500,130 @@ impl StationHost {
     }
 
     /// 标记条目已删除；复制模式同时删除副本目录。
-    pub fn remove(&self, station: &ConvId, item: &ItemId, now: i64) -> Result<(), CoreError> {
+    pub async fn remove(&self, station: &ConvId, item: &ItemId, now: i64) -> Result<(), CoreError> {
+        self.hosted(station)?;
         let mut row = self
             .store
             .get_station_item(item)?
             .filter(|r| r.station == *station)
             .ok_or_else(|| CoreError::NotFound(item.to_hex()))?;
-        self.remove_row(&mut row, now)?;
+        let dir = self.remove_row(&mut row, now)?;
         self.notify(station, vec![row.item]);
+        if let Some(dir) = dir {
+            remove_dir_blocking(dir).await;
+        }
         Ok(())
     }
 
-    fn remove_row(&self, row: &mut StationItemRow, now: i64) -> Result<(), CoreError> {
+    /// 写库标记删除并整理本地行，返回待删除的副本目录（由调用方在阻塞线程里删）。
+    fn remove_row(&self, row: &mut StationItemRow, now: i64) -> Result<Option<PathBuf>, CoreError> {
         row.item.removed = true;
         row.item.updated_at = now;
         self.store.upsert_station_item(row)?;
-        if row.store_mode == Some(StoreModeRow::Copy) {
-            let dir = item_dir(&self.data_dir, &row.station, &row.item.item);
-            if let Err(e) = std::fs::remove_dir_all(&dir) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    warn!(error = %e, dir = %dir.display(), "removing station copy failed");
+        if row.store_mode != Some(StoreModeRow::Copy) {
+            return Ok(None);
+        }
+        let dir = item_dir(&self.data_dir, &row.station, &row.item.item);
+        // 本地行指向即将删除的副本时，改由仍存活的其他条目接手（否则同内容的
+        // 引用条目会因本地行悬空而无法下载）。
+        for (meta, _) in content_blobs(&row.item.content) {
+            let Some(local) = self.store.get_local(&meta.hash)? else {
+                continue;
+            };
+            if !local.path.starts_with(&dir) {
+                continue;
+            }
+            self.store.remove_local(&meta.hash)?;
+            for other in self.store.station_items_with_blob(&meta.hash)? {
+                if other.item.available {
+                    self.restore_local(&other)?;
                 }
             }
+        }
+        Ok(Some(dir))
+    }
+
+    /// 本地行缺失时按条目记录补登记。大小取元数据、mtime 记 0，
+    /// 让数据通道首次服务前重新哈希校验，不信任条目记录。
+    fn restore_local(&self, row: &StationItemRow) -> Result<(), CoreError> {
+        let Some(root) = &row.local_path else {
+            return Ok(());
+        };
+        let kind = match row.store_mode {
+            Some(StoreModeRow::Reference) => BlobLocalKind::Source,
+            Some(StoreModeRow::Copy) => BlobLocalKind::Downloaded,
+            None => return Ok(()),
+        };
+        for (meta, rel) in content_blobs(&row.item.content) {
+            if self.store.get_local(&meta.hash)?.is_some() {
+                continue;
+            }
+            let path = match (&row.item.content, row.store_mode, rel) {
+                (StationContent::File { .. }, Some(StoreModeRow::Reference), _) => root.clone(),
+                (StationContent::File { blob }, _, _) => root.join(&blob.name),
+                (StationContent::Folder { .. }, Some(StoreModeRow::Reference), Some(rel)) => {
+                    root.join(rel)
+                }
+                (StationContent::Folder { name, .. }, _, Some(rel)) => root.join(name).join(rel),
+                _ => continue,
+            };
+            if !std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == meta.size) {
+                continue;
+            }
+            self.store.set_local(&BlobLocalRow {
+                hash: meta.hash,
+                path,
+                kind,
+                size: meta.size,
+                mtime: 0,
+            })?;
         }
         Ok(())
     }
 
     /// 置顶 / 取消置顶。
-    pub fn set_pinned(&self, item: &ItemId, pinned: bool, now: i64) -> Result<(), CoreError> {
+    pub fn set_pinned(
+        &self,
+        station: &ConvId,
+        item: &ItemId,
+        pinned: bool,
+        now: i64,
+    ) -> Result<(), CoreError> {
+        self.hosted(station)?;
         let mut row = self
             .store
             .get_station_item(item)?
+            .filter(|r| r.station == *station)
             .ok_or_else(|| CoreError::NotFound(item.to_hex()))?;
         row.item.pinned = pinned;
         row.item.updated_at = now;
         self.store.upsert_station_item(&row)?;
-        self.notify(&row.station, vec![row.item]);
+        self.notify(station, vec![row.item]);
         Ok(())
     }
 
     /// 巡检：到期条目按删除处理；引用模式条目的原文件被移动 / 删除 / 修改时
-    /// 标为不可用（恢复一致后重新可用）。返回变化条数。
+    /// 标为不可用（恢复一致后重新可用，并补回被清掉的本地行）。返回变化条数。
+    /// 阻塞函数，调用方在 spawn_blocking 中执行。
     pub fn sweep(&self, now: i64) -> Result<usize, CoreError> {
         let mut changed: std::collections::HashMap<ConvId, Vec<StationItem>> = Default::default();
         let mut count = 0;
         for mut row in self.store.station_items_expiring(now)? {
-            self.remove_row(&mut row, now)?;
+            if let Some(dir) = self.remove_row(&mut row, now)? {
+                if let Err(e) = std::fs::remove_dir_all(&dir) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!(error = %e, dir = %dir.display(), "removing station copy failed");
+                    }
+                }
+            }
             changed.entry(row.station).or_default().push(row.item);
             count += 1;
         }
         for mut row in self.store.station_reference_items()? {
             let ok = reference_unchanged(&row);
+            if ok {
+                self.restore_local(&row)?;
+            }
             if ok == row.item.available {
                 continue;
             }
@@ -521,6 +637,30 @@ impl StationHost {
             self.notify(&station, items);
         }
         Ok(count)
+    }
+}
+
+/// 在阻塞线程里删除目录，不存在不算错误，其他失败只记警告。
+async fn remove_dir_blocking(dir: PathBuf) {
+    let d = dir.clone();
+    match tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&d)).await {
+        Ok(Err(e)) if e.kind() != std::io::ErrorKind::NotFound => {
+            warn!(error = %e, dir = %dir.display(), "removing station copy failed");
+        }
+        Err(e) => warn!(error = %e, "removing station copy task failed"),
+        _ => {}
+    }
+}
+
+/// 条目内容引用的 Blob 与 rel_path（File 为 None）。
+fn content_blobs(content: &StationContent) -> Vec<(&BlobMeta, Option<&String>)> {
+    match content {
+        StationContent::Text { .. } => Vec::new(),
+        StationContent::File { blob } => vec![(blob, None)],
+        StationContent::Folder { entries, .. } => entries
+            .iter()
+            .map(|e| (&e.blob, Some(&e.rel_path)))
+            .collect(),
     }
 }
 
@@ -804,7 +944,10 @@ mod tests {
         assert_eq!(std::fs::read(&local.path).unwrap(), b"hello");
 
         // 删除条目时副本目录一并删除。
-        f.host.remove(&f.station, &items[0].item, 4_000).unwrap();
+        f.host
+            .remove(&f.station, &items[0].item, 4_000)
+            .await
+            .unwrap();
         assert!(!local.path.exists());
         assert!(f
             .store
@@ -959,12 +1102,14 @@ mod tests {
     fn set_pinned_updates_row() {
         let f = fixture();
         let item = f.host.put_text(&f.station, "x", None, f.me, 2_000).unwrap();
-        f.host.set_pinned(&item.item, true, 2_005).unwrap();
+        f.host
+            .set_pinned(&f.station, &item.item, true, 2_005)
+            .unwrap();
         let row = f.store.get_station_item(&item.item).unwrap().unwrap();
         assert!(row.item.pinned);
         assert_eq!(row.item.updated_at, 2_005);
         assert!(matches!(
-            f.host.set_pinned(&ItemId([3u8; 16]), true, 1),
+            f.host.set_pinned(&f.station, &ItemId([3u8; 16]), true, 1),
             Err(CoreError::NotFound(_))
         ));
     }
@@ -1139,8 +1284,191 @@ mod tests {
         assert!(f.store.blob_visible_to(&hash, &f.user, &f.user).unwrap());
         assert!(!f.store.blob_visible_to(&hash, &other, &f.user).unwrap());
         // 条目删除后 Blob 行消失，且本地行被清掉后本人也不再可见。
-        f.host.remove(&f.station, &items[0].item, 3_000).unwrap();
+        f.host
+            .remove(&f.station, &items[0].item, 3_000)
+            .await
+            .unwrap();
         f.store.remove_local(&hash).unwrap();
         assert!(!f.store.blob_visible_to(&hash, &f.user, &f.user).unwrap());
+    }
+
+    #[tokio::test]
+    async fn copy_never_overwrites_source_for_dotdot_and_root_paths() {
+        let f = fixture();
+        let root = f.files.path().join("dir");
+        let a = write(&root, "a.txt", b"keep me");
+        write(&root, "sub/b.txt", b"b");
+        // `dir/sub/..` 规整后就是 `dir`。
+        let tricky = root.join("sub").join("..");
+        let items = f
+            .host
+            .put_paths(&f.station, &[tricky], StoreModeRow::Copy, None, f.me, 2_000)
+            .await
+            .unwrap();
+        let StationContent::Folder { name, .. } = &items[0].content else {
+            panic!("expected folder");
+        };
+        assert_eq!(name, "dir");
+        assert_eq!(std::fs::read(&a).unwrap(), b"keep me");
+        // 文件路径加 `/..` 不是有效路径；根目录没有可用名字。
+        for p in [a.join(".."), PathBuf::from("/")] {
+            let r = f
+                .host
+                .put_paths(&f.station, &[p], StoreModeRow::Copy, None, f.me, 2_000)
+                .await;
+            assert!(matches!(r, Err(CoreError::InvalidArgument(_))));
+        }
+        assert_eq!(std::fs::read(&a).unwrap(), b"keep me");
+    }
+
+    #[tokio::test]
+    async fn failed_put_paths_leaves_no_items_or_copies() {
+        let f = fixture();
+        let ok = write(f.files.path(), "a.txt", b"x");
+        let r = f
+            .host
+            .put_paths(
+                &f.station,
+                &[ok, f.files.path().join("missing")],
+                StoreModeRow::Copy,
+                None,
+                f.me,
+                2_000,
+            )
+            .await;
+        assert!(matches!(r, Err(CoreError::InvalidArgument(_))));
+        assert!(f
+            .store
+            .station_items(&f.station, 0, true)
+            .unwrap()
+            .is_empty());
+        let station_dir = f.data.path().join("Station").join(f.station.to_hex());
+        let leftovers = std::fs::read_dir(&station_dir)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        assert_eq!(leftovers, 0);
+    }
+
+    #[tokio::test]
+    async fn removing_copy_hands_local_row_to_surviving_reference() {
+        let f = fixture();
+        let path = write(f.files.path(), "a.txt", b"same");
+        let r = f
+            .host
+            .put_paths(
+                &f.station,
+                std::slice::from_ref(&path),
+                StoreModeRow::Reference,
+                None,
+                f.me,
+                2_000,
+            )
+            .await
+            .unwrap();
+        let c = f
+            .host
+            .put_paths(
+                &f.station,
+                std::slice::from_ref(&path),
+                StoreModeRow::Copy,
+                None,
+                f.me,
+                2_001,
+            )
+            .await
+            .unwrap();
+        let hash = file_blob(&r[0]).hash;
+        // 后登记的复制覆盖了本地行。
+        assert!(f
+            .store
+            .get_local(&hash)
+            .unwrap()
+            .unwrap()
+            .path
+            .starts_with(f.data.path()));
+        f.host.remove(&f.station, &c[0].item, 3_000).await.unwrap();
+        let local = f.store.get_local(&hash).unwrap().unwrap();
+        assert_eq!(local.path, std::fs::canonicalize(&path).unwrap());
+        assert_eq!(local.kind, BlobLocalKind::Source);
+    }
+
+    #[tokio::test]
+    async fn sweep_restores_cleared_local_row() {
+        let f = fixture();
+        let path = write(f.files.path(), "a.txt", b"hello");
+        let items = f
+            .host
+            .put_paths(
+                &f.station,
+                &[path],
+                StoreModeRow::Reference,
+                None,
+                f.me,
+                2_000,
+            )
+            .await
+            .unwrap();
+        let hash = file_blob(&items[0]).hash;
+        f.store.remove_local(&hash).unwrap();
+        assert_eq!(f.host.sweep(3_000).unwrap(), 0);
+        assert!(f.store.get_local(&hash).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn pin_and_remove_check_station() {
+        let f = fixture();
+        let other = f.host.create("other", 1_500).unwrap().station;
+        let item = f.host.put_text(&f.station, "x", None, f.me, 2_000).unwrap();
+        assert!(matches!(
+            f.host.set_pinned(&other, &item.item, true, 3_000),
+            Err(CoreError::NotFound(_))
+        ));
+        assert!(matches!(
+            f.host.remove(&other, &item.item, 3_000).await,
+            Err(CoreError::NotFound(_))
+        ));
+        assert!(matches!(
+            f.host.remove(&ConvId([9u8; 32]), &item.item, 3_000).await,
+            Err(CoreError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn accept_remote_redelivery_keeps_fetched_copy_state() {
+        let f = fixture();
+        let mut p = peer(&UserKey::generate(), DeviceId([8u8; 32]));
+        p.cert.as_mut().unwrap().user = f.user;
+        let blob = BlobMeta {
+            hash: BlobHash([6u8; 32]),
+            size: 4,
+            name: "r.bin".into(),
+            mime: "application/octet-stream".into(),
+            media: None,
+            thumb: None,
+        };
+        let item = StationItem {
+            item: ItemId::random(),
+            added_by: DeviceId([1u8; 32]),
+            added_at: 1,
+            expires_at: None,
+            content: StationContent::File { blob },
+            pinned: false,
+            removed: false,
+            available: false,
+            updated_at: 1,
+        };
+        f.host
+            .accept_remote(&p, &f.station, item.clone(), true, 2_000)
+            .unwrap();
+        f.host
+            .mark_available(&item.item, Path::new("/x/y"), 2_100)
+            .unwrap();
+        f.host
+            .accept_remote(&p, &f.station, item.clone(), true, 3_000)
+            .unwrap();
+        let row = f.store.get_station_item(&item.item).unwrap().unwrap();
+        assert!(row.item.available);
+        assert_eq!(row.local_path, Some(PathBuf::from("/x/y")));
+        assert_eq!(row.item.added_at, 2_000);
     }
 }

@@ -121,7 +121,7 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
             mode,
             expires_at,
         } => station_put(inner, &station, item, mode, expires_at).await,
-        Request::StationRemove { station, item } => station_remove(inner, &station, &item),
+        Request::StationRemove { station, item } => station_remove(inner, &station, &item).await,
         Request::StationSetPinned {
             station,
             item,
@@ -1065,7 +1065,11 @@ fn station_create(inner: &Arc<Inner>, name: &str) -> Result<Response, ApiError> 
 /// 校验站点在本机托管：远程站点的写入由拉取端（Task 6）处理，此处尚未支持。
 fn local_station(inner: &Arc<Inner>, station: &str) -> Result<ConvId, ApiError> {
     let station = parse_conv(station)?;
-    let self_device = inner.identity.read().unwrap().device_id();
+    let self_device = inner
+        .identity
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .device_id();
     if let Some(info) = inner.store.get_station(&station).map_err(CoreError::from)? {
         if info.host != self_device {
             return Err(ApiError {
@@ -1088,7 +1092,11 @@ async fn station_put(
     use lanmsg_api::types::{StationPutItem, StoreMode};
     let station = local_station(inner, station)?;
     let now = now_millis();
-    let me = inner.identity.read().unwrap().device_id();
+    let me = inner
+        .identity
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .device_id();
     match item {
         StationPutItem::Paths { paths } => {
             let mode = match mode {
@@ -1121,11 +1129,16 @@ fn parse_item(s: &str) -> Result<lanmsg_proto::station::ItemId, ApiError> {
         .map_err(|_| invalid_arg(format!("invalid item ID: {s}")))
 }
 
-fn station_remove(inner: &Arc<Inner>, station: &str, item: &str) -> Result<Response, ApiError> {
+async fn station_remove(
+    inner: &Arc<Inner>,
+    station: &str,
+    item: &str,
+) -> Result<Response, ApiError> {
     let station = local_station(inner, station)?;
     inner
         .station
-        .remove(&station, &parse_item(item)?, now_millis())?;
+        .remove(&station, &parse_item(item)?, now_millis())
+        .await?;
     Ok(Response::Ok)
 }
 
@@ -1135,10 +1148,10 @@ fn station_set_pinned(
     item: &str,
     pinned: bool,
 ) -> Result<Response, ApiError> {
-    let _station = local_station(inner, station)?;
+    let station = local_station(inner, station)?;
     inner
         .station
-        .set_pinned(&parse_item(item)?, pinned, now_millis())?;
+        .set_pinned(&station, &parse_item(item)?, pinned, now_millis())?;
     Ok(Response::Ok)
 }
 

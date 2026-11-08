@@ -347,6 +347,24 @@ impl Store {
         Ok(out)
     }
 
+    /// 引用了该哈希的未删除条目（已删除条目不保留 station_blobs 行）。
+    pub fn station_items_with_blob(
+        &self,
+        hash: &BlobHash,
+    ) -> Result<Vec<StationItemRow>, StoreError> {
+        let conn = self.conn().map_err(codec)?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ITEM_COLS} FROM station_items
+             WHERE removed = 0 AND item_id IN (SELECT item_id FROM station_blobs WHERE hash = ?1)"
+        ))?;
+        let rows = stmt.query_map([&hash.0[..]], item_from_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?.into_row()?);
+        }
+        Ok(out)
+    }
+
     /// 全部未删除的引用模式条目（可用性巡检用）。
     pub fn station_reference_items(&self) -> Result<Vec<StationItemRow>, StoreError> {
         let conn = self.conn().map_err(codec)?;
