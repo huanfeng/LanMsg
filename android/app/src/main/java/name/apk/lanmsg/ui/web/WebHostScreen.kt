@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -52,6 +53,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import name.apk.lanmsg.R
 import name.apk.lanmsg.ServiceLocator
+import name.apk.lanmsg.ui.common.ConfirmDialog
 import name.apk.lanmsg.ui.common.ConversationAvatar
 import name.apk.lanmsg.ui.common.QrImage
 import name.apk.lanmsg.ui.common.SectionHeader
@@ -89,8 +91,9 @@ fun WebHostScreen(onBack: () -> Unit, onOpenGuest: (String) -> Unit) {
     LaunchedEffect(state.ended) { if (state.ended) onBack() }
     WebHostContent(
         state = state,
-        onBack = onBack,
+        onBack = vm::requestExit,
         onStop = vm::stop,
+        onDismissExit = vm::dismissExit,
         onSelectUrl = vm::selectUrl,
         onRespond = vm::respond,
         onOpenGuest = onOpenGuest,
@@ -108,12 +111,14 @@ fun WebHostContent(
     state: WebHostViewModel.UiState,
     onBack: () -> Unit,
     onStop: () -> Unit,
+    onDismissExit: () -> Unit,
     onSelectUrl: (Int) -> Unit,
     onRespond: (Boolean) -> Unit,
     onOpenGuest: (String) -> Unit,
     onCopy: (String) -> Unit,
 ) {
     val c = LanMsgColors.current
+    BackHandler(onBack = onBack)
     Scaffold(
         containerColor = c.canvas,
         topBar = {
@@ -157,8 +162,9 @@ fun WebHostContent(
                 )
             } else {
                 QrImage(current)
+                // 完整地址含密钥，只在二维码与“复制地址”里使用；这里只显示主机:端口
                 Text(
-                    current,
+                    hostOf(current),
                     color = c.ink,
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
@@ -236,6 +242,15 @@ fun WebHostContent(
             ) { Text(stringResource(R.string.web_stop)) }
         }
 
+        if (state.confirmExit) {
+            ConfirmDialog(
+                title = stringResource(R.string.web_exit_title),
+                text = stringResource(R.string.web_exit_body),
+                confirmLabel = stringResource(R.string.web_exit_confirm),
+                onConfirm = onStop,
+                onDismiss = onDismissExit,
+            )
+        }
         state.pending?.let { p ->
             AlertDialog(
                 // 必须明确选择允许或拒绝，点外部不处理

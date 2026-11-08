@@ -305,6 +305,15 @@ class NotifierTest {
         assertEquals("t".repeat(100) + "…", title)
     }
 
+    @Test fun guest_conversation_notification_uses_localized_title() = runTest {
+        val n = notifier()
+        fake.handler = { req ->
+            if (req is Request.ListConversations) Response.Conversations(listOf(Fixtures.conv("g1", "", kind = ConvKind.GUEST))) else Response.SelfInfo(Fixtures.selfInfo())
+        }
+        n.handle(other("m1", "g1"))
+        assertEquals("网页访客", titleOf(active().single().notification))
+    }
+
     @Test fun truncate_does_not_split_surrogate_pairs() {
         val s = "😀".repeat(5)
         assertEquals("😀😀😀…", Notifier.truncate(s, 3))

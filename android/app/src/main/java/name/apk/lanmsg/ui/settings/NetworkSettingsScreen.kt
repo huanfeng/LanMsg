@@ -110,7 +110,7 @@ fun NetworkSettingsContent(state: NetworkSettingsViewModel.UiState, vm: NetworkS
                     )
                     if (settings.localsendEnabled && settings.localsendListening == false) {
                         Text(
-                            stringResource(R.string.localsend_port_busy),
+                            stringResource(R.string.localsend_port_busy, LOCALSEND_DEFAULT_PORT),
                             color = c.danger,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
@@ -187,8 +187,18 @@ fun NetworkSettingsContent(state: NetworkSettingsViewModel.UiState, vm: NetworkS
 
             SectionHeader(stringResource(R.string.net_scan))
             Group {
-                for (iface in state.interfaces) {
+                val shown = visibleInterfaces(state.interfaces)
+                for (iface in shown.ipv4) {
                     InterfaceRow(iface, scanEnabled = state.scanning == null) { vm.scan(scanCidrFor(iface)) }
+                    HorizontalDivider(color = c.line)
+                }
+                if (shown.otherIpv6 > 0) {
+                    Text(
+                        stringResource(R.string.net_other_ipv6, shown.otherIpv6),
+                        color = c.inkMuted,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(16.dp),
+                    )
                     HorizontalDivider(color = c.line)
                 }
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -278,4 +288,22 @@ internal fun scanCidrFor(iface: InterfaceView): String {
     val mask = (0xFFFFFFFFL shl (32 - prefix)) and 0xFFFFFFFFL
     val net = addr and mask
     return "${(net shr 24) and 0xFF}.${(net shr 16) and 0xFF}.${(net shr 8) and 0xFF}.${net and 0xFF}/$prefix"
+}
+
+/** 网卡列表的展示结果：可扫描的 IPv4 网卡，以及被折叠的其他 IPv6 地址个数。 */
+internal data class VisibleInterfaces(val ipv4: List<InterfaceView>, val otherIpv6: Int)
+
+private const val LOCALSEND_DEFAULT_PORT = 53317
+
+/** IPv4 在前并按（名称，地址）去重；IPv6 中隐藏链路本地（fe80::/10）与已废弃的站点本地（fec0::/10），其余只计数。 */
+internal fun visibleInterfaces(all: List<InterfaceView>): VisibleInterfaces {
+    val v4 = all.filter { isIpv4Address(it.addr) }.distinctBy { it.name to it.addr }
+    val v6 = all.filter { !isIpv4Address(it.addr) }.distinctBy { it.name to it.addr }.count { !isHiddenIpv6(it.addr) }
+    return VisibleInterfaces(v4, v6)
+}
+
+private fun isHiddenIpv6(addr: String): Boolean {
+    val first = addr.substringBefore(':').toIntOrNull(16) ?: return false
+    // fe80::/10 与 fec0::/10 的首个 16 位组分别落在 0xfe80..0xfebf 与 0xfec0..0xfeff
+    return first in 0xfe80..0xfeff
 }

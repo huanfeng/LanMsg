@@ -165,3 +165,18 @@ class ScanCidrTest {
         assertFalse(isIpv4Address("fe80::1"))
     }
 }
+
+class VisibleInterfacesTest {
+    private fun i(name: String, addr: String) = InterfaceView(name, addr, 24u, null)
+
+    @Test fun ipv4_first_deduped_and_link_local_hidden() {
+        val v = visibleInterfaces(
+            listOf(
+                i("wlan0", "fe80::1"), i("wlan0", "fec0::5"), i("wlan0", "2409::1"), i("wlan0", "fd00::2"),
+                i("wlan0", "10.0.2.16"), i("wlan0", "10.0.2.16"), i("eth0", "192.168.1.2"),
+            ),
+        )
+        assertEquals(listOf("10.0.2.16", "192.168.1.2"), v.ipv4.map { it.addr })
+        assertEquals(2, v.otherIpv6)
+    }
+}

@@ -3,6 +3,11 @@
 package name.apk.lanmsg.ui.web
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -136,5 +141,86 @@ class WebHostViewModelTest {
         assertEquals(1, vm.state.value.urlIndex)
         vm.selectUrl(5)
         assertEquals(1, vm.state.value.urlIndex)
+    }
+
+    @Test fun leaving_while_start_in_flight_clears_hosting_and_stops_core() = runTest {
+        val gate = CompletableDeferred<Response>()
+        val f = fake().apply {
+            val base = handler
+            handler = { req -> if (req == Request.WebStart) gate.await() else base(req) }
+        }
+        val store = ViewModelStore()
+        val vm = ViewModelProvider(store, viewModelFactory { initializer { vm(f) } })[WebHostViewModel::class.java]
+        vm.start()
+        runCurrent()
+        assertTrue(hosting)
+        store.clear()
+        runCurrent()
+        assertFalse(hosting)
+        assertTrue(f.requests.contains(Request.WebStop))
+    }
+
+    @Test fun leaving_with_active_session_stops_core() = runTest {
+        val f = fake()
+        val store = ViewModelStore()
+        val vm = ViewModelProvider(store, viewModelFactory { initializer { vm(f) } })[WebHostViewModel::class.java]
+        vm.start()
+        advanceUntilIdle()
+        store.clear()
+        advanceUntilIdle()
+        assertFalse(hosting)
+        assertTrue(f.requests.contains(Request.WebStop))
+    }
+
+    @Test fun exit_without_guests_stops_directly() = runTest {
+        val f = fake()
+        val vm = vm(f)
+        vm.start()
+        advanceUntilIdle()
+        vm.requestExit()
+        advanceUntilIdle()
+        assertFalse(vm.state.value.confirmExit)
+        assertTrue(vm.state.value.ended)
+        assertTrue(f.requests.contains(Request.WebStop))
+    }
+
+    @Test fun exit_with_active_guest_asks_confirmation_first() = runTest {
+        val f = fake()
+        val vm = vm(f)
+        vm.start()
+        advanceUntilIdle()
+        f.emit(Event.ConversationUpdated(Fixtures.conv("g1", kind = ConvKind.GUEST)))
+        advanceUntilIdle()
+        vm.requestExit()
+        advanceUntilIdle()
+        assertTrue(vm.state.value.confirmExit)
+        assertFalse(vm.state.value.ended)
+        assertTrue(f.requests.none { it == Request.WebStop })
+        vm.dismissExit()
+        assertFalse(vm.state.value.confirmExit)
+        vm.requestExit()
+        vm.stop()
+        advanceUntilIdle()
+        assertTrue(vm.state.value.ended)
+        assertTrue(f.requests.contains(Request.WebStop))
+    }
+
+    @Test fun requests_are_queued_in_arrival_order() = runTest {
+        val f = fake()
+        val vm = vm(f)
+        advanceUntilIdle()
+        f.emit(Event.WebRequest("r1", "UA", "192.168.1.5"))
+        f.emit(Event.WebRequest("r2", "UA", "192.168.1.6"))
+        f.emit(Event.WebRequest("r1", "UA", "192.168.1.5"))
+        runCurrent()
+        assertEquals("r1", vm.state.value.pending?.request)
+        vm.respond(false)
+        runCurrent()
+        assertEquals("r2", vm.state.value.pending?.request)
+        assertEquals(Request.WebRespond("r1", false), f.requests.last())
+        vm.respond(true)
+        runCurrent()
+        assertNull(vm.state.value.pending)
+        assertEquals(Request.WebRespond("r2", true), f.requests.last())
     }
 }

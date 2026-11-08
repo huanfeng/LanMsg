@@ -255,6 +255,10 @@
     <string name="web_guests">已连接的访客</string>
     <string name="web_guests_empty">还没有访客</string>
     <string name="web_no_address">没有可用的局域网地址，请先连接 Wi-Fi</string>
+    <string name="web_exit_title">结束网页传输？</string>
+    <string name="web_exit_body">有访客正在使用，结束后他们会断开连接。</string>
+    <string name="web_exit_confirm">结束</string>
+    <string name="net_other_ipv6">其他 IPv6 地址（%1$d），不可扫描</string>
     <string name="web_starting">正在开启网页传输</string>
     <string name="conv_guest_title">网页访客</string>
     <string name="notif_service_web_text">网页传输中</string>
@@ -280,6 +284,6 @@
     <string name="net_tunnel_zerotier">ZeroTier</string>
     <string name="net_tunnel_wireguard">WireGuard</string>
     <string name="net_tunnel_generic">隧道</string>
-    <string name="localsend_port_busy">53317 端口被占用（可能正在运行 LocalSend），只能向 LocalSend 设备发送</string>
+    <string name="localsend_port_busy">%1$d 端口被占用（可能正在运行 LocalSend），只能向 LocalSend 设备发送</string>
     <string name="toast_copied">已复制</string>
 </resources>

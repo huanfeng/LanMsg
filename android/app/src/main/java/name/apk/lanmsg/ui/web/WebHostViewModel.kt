@@ -44,6 +44,8 @@ class WebHostViewModel(
         val error: ErrorCode? = null,
         /** 会话已结束（用户结束、空闲超时或启动失败），界面应返回上一页。 */
         val ended: Boolean = false,
+        /** 正在显示“结束网页传输？”确认。 */
+        val confirmExit: Boolean = false,
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -53,6 +55,12 @@ class WebHostViewModel(
     private val queue = mutableListOf<PendingRequest>()
     private val timeouts = mutableMapOf<String, Job>()
     private var starting = false
+
+    /**
+     * 本次托管期间有过动静的访客会话。core 不提供“访客是否在线”（访客会话的 peerOnline 恒为 false，
+     * 也没有结束事件），所以只能用“本页开启后收到过该会话更新”近似“有访客在用”。
+     */
+    private val seenGuests = mutableSetOf<String>()
 
     init {
         viewModelScope.launch { core.events.collect(::onEvent) }
@@ -77,6 +85,13 @@ class WebHostViewModel(
             }
         }
     }
+
+    /** 返回键 / 返回按钮：有访客在用时先确认，否则直接结束。 */
+    fun requestExit() {
+        if (seenGuests.isEmpty()) stop() else _state.update { it.copy(confirmExit = true) }
+    }
+
+    fun dismissExit() = _state.update { it.copy(confirmExit = false) }
 
     fun stop() {
         finishLocal()
@@ -146,6 +161,7 @@ class WebHostViewModel(
             is Event.ConversationUpdated -> {
                 val s = e.summary
                 if (s.kind == ConvKind.GUEST) {
+                    seenGuests += s.conv
                     _state.update { st ->
                         val others = st.guests.filter { it.conv != s.conv }
                         st.copy(guests = (others + s).sortedByDescending { it.lastHlcMillis ?: 0L })
@@ -162,7 +178,8 @@ class WebHostViewModel(
         timeouts.values.forEach { it.cancel() }
         timeouts.clear()
         queue.clear()
-        _state.update { it.copy(info = null, pending = null, ended = true) }
+        seenGuests.clear()
+        _state.update { it.copy(info = null, pending = null, ended = true, confirmExit = false) }
     }
 
     private suspend fun requestStop() {
@@ -174,8 +191,8 @@ class WebHostViewModel(
     }
 
     override fun onCleared() {
-        // 页面被离开时会话仍在：结束它
-        if (_state.value.info != null) {
+        // 页面被离开时会话仍在（含启动请求还在途）：结束它。WebStop 对无会话幂等
+        if (starting || _state.value.info != null) {
             setWebHosting(false)
             detachedScope.launch { requestStop() }
         }
