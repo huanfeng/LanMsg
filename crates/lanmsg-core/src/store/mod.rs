@@ -10,6 +10,7 @@ pub mod file_index;
 pub mod messages;
 pub mod schema;
 pub mod search_index;
+pub mod stations;
 pub mod users;
 
 pub use addresses::{AddrSource, KnownAddrRow};
@@ -21,6 +22,7 @@ pub use contacts::{ContactRow, ContactState, RequestKindRow, RequestRow};
 pub use convs::{ConvKindRow, ConvRow, Gate};
 pub use file_index::{file_kind, FileQuery, FileRow};
 pub use messages::{MsgStateRow, StoredMessage};
+pub use stations::{StationItemRow, StoreModeRow};
 pub use users::{DeviceRow, UserRow};
 
 use std::path::Path;

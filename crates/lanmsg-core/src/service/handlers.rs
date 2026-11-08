@@ -114,6 +114,19 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
                 value: id.to_string(),
             })
         }
+        Request::StationCreate { name } => station_create(inner, &name),
+        Request::StationPut {
+            station,
+            item,
+            mode,
+            expires_at,
+        } => station_put(inner, &station, item, mode, expires_at).await,
+        Request::StationRemove { station, item } => station_remove(inner, &station, &item),
+        Request::StationSetPinned {
+            station,
+            item,
+            pinned,
+        } => station_set_pinned(inner, &station, &item, pinned),
         Request::Shutdown => {
             inner.discovery.shutdown();
             inner.conns.shutdown().await;
@@ -1040,6 +1053,94 @@ async fn delete_local(
 }
 
 // ---- 辅助 ----
+
+/// 创建中转站（只有桌面 / 笔记本 / 无界面设备能当主机，由 `StationHost::create` 判定）。
+fn station_create(inner: &Arc<Inner>, name: &str) -> Result<Response, ApiError> {
+    let info = inner.station.create(name, now_millis())?;
+    Ok(Response::ConvId {
+        value: info.station.to_hex(),
+    })
+}
+
+/// 校验站点在本机托管：远程站点的写入由拉取端（Task 6）处理，此处尚未支持。
+fn local_station(inner: &Arc<Inner>, station: &str) -> Result<ConvId, ApiError> {
+    let station = parse_conv(station)?;
+    let self_device = inner.identity.read().unwrap().device_id();
+    if let Some(info) = inner.store.get_station(&station).map_err(CoreError::from)? {
+        if info.host != self_device {
+            return Err(ApiError {
+                code: ErrorCode::Unimplemented,
+                message: "unimplemented: remote station".into(),
+            });
+        }
+    }
+    Ok(station)
+}
+
+async fn station_put(
+    inner: &Arc<Inner>,
+    station: &str,
+    item: lanmsg_api::types::StationPutItem,
+    mode: lanmsg_api::types::StoreMode,
+    expires_at: Option<i64>,
+) -> Result<Response, ApiError> {
+    use crate::store::StoreModeRow;
+    use lanmsg_api::types::{StationPutItem, StoreMode};
+    let station = local_station(inner, station)?;
+    let now = now_millis();
+    let me = inner.identity.read().unwrap().device_id();
+    match item {
+        StationPutItem::Paths { paths } => {
+            let mode = match mode {
+                StoreMode::Reference => StoreModeRow::Reference,
+                StoreMode::Copy => StoreModeRow::Copy,
+            };
+            let paths: Vec<std::path::PathBuf> = paths.into_iter().map(Into::into).collect();
+            inner
+                .station
+                .put_paths(&station, &paths, mode, expires_at, me, now)
+                .await?;
+        }
+        StationPutItem::Text { text } => {
+            inner
+                .station
+                .put_text(&station, &text, expires_at, me, now)?;
+        }
+        StationPutItem::Blobs { hashes } => {
+            let metas = crate::station::host::resolve_blob_metas(&inner.store, &hashes)?;
+            inner
+                .station
+                .put_blobs(&station, metas, expires_at, me, now)?;
+        }
+    }
+    Ok(Response::Ok)
+}
+
+fn parse_item(s: &str) -> Result<lanmsg_proto::station::ItemId, ApiError> {
+    lanmsg_proto::station::ItemId::from_hex(s)
+        .map_err(|_| invalid_arg(format!("invalid item ID: {s}")))
+}
+
+fn station_remove(inner: &Arc<Inner>, station: &str, item: &str) -> Result<Response, ApiError> {
+    let station = local_station(inner, station)?;
+    inner
+        .station
+        .remove(&station, &parse_item(item)?, now_millis())?;
+    Ok(Response::Ok)
+}
+
+fn station_set_pinned(
+    inner: &Arc<Inner>,
+    station: &str,
+    item: &str,
+    pinned: bool,
+) -> Result<Response, ApiError> {
+    let _station = local_station(inner, station)?;
+    inner
+        .station
+        .set_pinned(&parse_item(item)?, pinned, now_millis())?;
+    Ok(Response::Ok)
+}
 
 fn parse_conv(s: &str) -> Result<ConvId, ApiError> {
     ConvId::from_hex(s).map_err(|_| invalid_arg(format!("invalid conversation ID: {s}")))

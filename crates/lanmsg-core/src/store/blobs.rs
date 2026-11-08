@@ -262,6 +262,50 @@ impl Store {
         Ok(out)
     }
 
+    /// 单事务登记本地文件：写 Blob 元数据与分段、本地行、本机持有者。
+    pub fn register_local_blob(
+        &self,
+        meta: &BlobMeta,
+        segment_hashes: &[[u8; 32]],
+        local: &BlobLocalRow,
+        holder: &DeviceId,
+        now: i64,
+    ) -> Result<(), crate::store::StoreError> {
+        let mut conn = self
+            .conn()
+            .map_err(|e| crate::store::StoreError::Codec(e.to_string()))?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO blobs(hash, size, mime, segment_hashes) VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(hash) DO UPDATE SET segment_hashes = excluded.segment_hashes",
+            rusqlite::params![
+                &meta.hash.0[..],
+                meta.size as i64,
+                meta.mime,
+                lanmsg_proto::to_cbor(&segment_hashes.to_vec()),
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO blob_local(hash, path, kind, size, mtime) VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(hash) DO UPDATE SET path = excluded.path, kind = excluded.kind,
+               size = excluded.size, mtime = excluded.mtime",
+            rusqlite::params![
+                &local.hash.0[..],
+                local.path.to_string_lossy(),
+                local.kind.as_str(),
+                local.size as i64,
+                local.mtime,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO blob_holders(hash, device_id, updated_at) VALUES(?1, ?2, ?3)
+             ON CONFLICT(hash, device_id) DO UPDATE SET updated_at = excluded.updated_at",
+            rusqlite::params![&meta.hash.0[..], &holder.0[..], now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 查询本地 Blob 行。
     pub fn get_local(
         &self,
@@ -711,7 +755,8 @@ impl Store {
         Ok(out)
     }
 
-    /// `user` 能否看到该 Blob：自己可看任何被消息引用的；他人仅当
+    /// `user` 能否看到该 Blob：自己可看被消息引用、被中转站条目引用或本机持有
+    /// 本地文件的 Blob（自己的设备共享用户密钥）；他人仅当
     /// `message_blobs` 中存在 `conv_id = dm(self_user, user)` 的引用。
     pub fn blob_visible_to(
         &self,
@@ -726,7 +771,10 @@ impl Store {
         if *user == *self_user {
             let n: Option<i64> = conn
                 .query_row(
-                    "SELECT 1 FROM message_blobs WHERE hash = ?1",
+                    "SELECT 1 FROM message_blobs WHERE hash = ?1
+                     UNION ALL SELECT 1 FROM station_blobs WHERE hash = ?1
+                     UNION ALL SELECT 1 FROM blob_local WHERE hash = ?1
+                     LIMIT 1",
                     [&hash.0[..]],
                     |r| r.get(0),
                 )
@@ -1111,6 +1159,27 @@ mod tests {
         assert!(s
             .blob_visible_to(&BlobHash([4u8; 32]), &self_user, &self_user)
             .unwrap());
+    }
+
+    #[test]
+    fn own_user_can_see_locally_held_blob_but_others_cannot() {
+        use lanmsg_proto::ids::UserId;
+        let s = store();
+        let self_user = UserId([1u8; 32]);
+        let other = UserId([2u8; 32]);
+        let h = BlobHash([9u8; 32]);
+        // 未被任何消息引用、也没有本地行：本人也看不到。
+        assert!(!s.blob_visible_to(&h, &self_user, &self_user).unwrap());
+        s.set_local(&BlobLocalRow {
+            hash: h,
+            path: PathBuf::from("/tmp/x"),
+            kind: BlobLocalKind::Source,
+            size: 1,
+            mtime: 1,
+        })
+        .unwrap();
+        assert!(s.blob_visible_to(&h, &self_user, &self_user).unwrap());
+        assert!(!s.blob_visible_to(&h, &other, &self_user).unwrap());
     }
 
     /// 测试辅助：在无设备行时直接入库一条引用消息。

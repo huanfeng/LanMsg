@@ -13,6 +13,7 @@ pub mod paths;
 pub mod platform;
 pub mod service;
 pub mod settings;
+pub mod station;
 pub mod store;
 pub mod sync;
 pub mod thumb_cache;

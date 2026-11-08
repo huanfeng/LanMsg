@@ -83,6 +83,8 @@ pub(crate) struct Inner {
     pub(crate) blob: Arc<crate::blob::serve::BlobServer>,
     /// 传输引擎：分段并行、多源、断点续传（P2 Task 12）。
     pub(crate) transfer: Arc<crate::blob::transfer::TransferEngine>,
+    /// 文件中转站主机端（P5 Task 5）。
+    pub(crate) station: Arc<crate::station::StationHost>,
     /// 平台钩子：自动下载策略查询网络状态（P2 Task 13）。
     pub(crate) platform: PlatformHooks,
     /// 界面当前正在看的会话（SetUiFocus 设置，只存内存不落库）。
@@ -285,6 +287,13 @@ impl Service {
         // 多设备同步引擎（P2 Task 9）。
         let sync = crate::sync::SyncEngine::new(store.clone(), identity.clone(), conns.clone());
 
+        let station = Arc::new(crate::station::StationHost::new(
+            store.clone(),
+            identity.clone(),
+            data_dir.clone(),
+            platform.thumbnailer.clone(),
+        ));
+
         let inner = Arc::new(Inner {
             store,
             identity,
@@ -303,6 +312,7 @@ impl Service {
             sync,
             blob,
             transfer,
+            station,
             platform,
             ui_focus: StdMutex::new(None),
             static_peers: StdMutex::new(HashSet::new()),
@@ -336,6 +346,9 @@ impl Service {
 
         tokio::spawn(routing_task(inner.clone(), conn_rx, disc_rx));
         tokio::spawn(address_book_task(inner.clone()));
+        // 订阅须在 spawn 之前完成，否则任务启动前的变化会丢失。
+        let station_changes = inner.station.subscribe_changes();
+        tokio::spawn(station_task(inner.clone(), station_changes));
         // 重启后：为已知地址的受信设备恢复重连任务。
         redial::resume_all(&inner);
         for addr in static_peers {
@@ -873,6 +886,41 @@ async fn address_book_task(inner: Arc<Inner>) {
         }
     }
 }
+
+/// 中转站后台任务：每 60 秒巡检过期与引用文件可用性，并把条目变化转成界面事件。
+async fn station_task(
+    inner: Arc<Inner>,
+    mut changes: tokio::sync::broadcast::Receiver<(
+        ConvId,
+        Vec<lanmsg_proto::station::StationItem>,
+    )>,
+) {
+    let mut tick = tokio::time::interval(STATION_SWEEP_INTERVAL);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let host = inner.station.clone();
+                match tokio::task::spawn_blocking(move || host.sweep(now_millis())).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::warn!(error = %e, "station sweep failed"),
+                    Err(e) => tracing::warn!(error = %e, "station sweep task failed"),
+                }
+            }
+            ch = changes.recv() => match ch {
+                Ok((station, _)) => {
+                    let _ = inner.events.send(Event::StationUpdated { station: station.to_hex() });
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                // 落后时丢了若干通知：界面刷新一次即可，无需逐条补发。
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            },
+            _ = inner.conns.wait_shutdown() => break,
+        }
+    }
+}
+
+/// 中转站巡检间隔。
+const STATION_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 地址簿定时推送间隔。
 const ADDRESS_BOOK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
