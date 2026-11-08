@@ -232,20 +232,6 @@ async fn uninitialized_service_rejects_send() {
     assert_eq!(err.code, ErrorCode::NotInitialized);
 }
 
-/// 未实现的请求返回 Unimplemented 错误码，而不是 Internal。
-#[tokio::test]
-async fn unimplemented_request_returns_unimplemented_code() {
-    let dir = tempfile::tempdir().unwrap();
-    let s = make_service(None, &dir).await;
-    let err = s.handle(Request::WebStart).await.unwrap_err();
-    assert_eq!(err.code, ErrorCode::Unimplemented);
-    assert!(
-        err.message.starts_with("unimplemented: "),
-        "message: {}",
-        err.message
-    );
-}
-
 #[tokio::test]
 async fn list_interfaces_returns_ok() {
     let dir = tempfile::tempdir().unwrap();

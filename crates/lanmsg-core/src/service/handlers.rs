@@ -1,5 +1,5 @@
 // 请求处理器：把 `Request` 各变体分派到消息、信任、配对、文件等模块（C5 全部变体）。
-// 仍未实现的变体（若有）统一返回 `ErrorCode::Unimplemented`（message 为 `unimplemented: <变体名>`），见文件末尾 `variant_name`。
+// P5 起全部变体均已实现；新增变体时 match 不穷尽会直接编译失败。
 // 注释中文，标识符英文。
 
 use std::str::FromStr;
@@ -114,6 +114,17 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
                 value: id.to_string(),
             })
         }
+        Request::WebStart => Ok(Response::WebSession {
+            value: inner.web.start().await?,
+        }),
+        Request::WebStop => {
+            inner.web.stop().await;
+            Ok(Response::Ok)
+        }
+        Request::WebRespond { request, allow } => {
+            inner.web.respond(&request, allow)?;
+            Ok(Response::Ok)
+        }
         Request::StationCreate { name } => station_create(inner, &name),
         Request::StationList => station_list(inner),
         Request::StationItems { station } => station_items(inner, &station),
@@ -134,10 +145,6 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
             inner.conns.shutdown().await;
             Ok(Response::Ok)
         }
-        other => Err(ApiError {
-            code: ErrorCode::Unimplemented,
-            message: format!("unimplemented: {}", variant_name(&other)),
-        }),
     }
 }
 
@@ -425,6 +432,12 @@ async fn open_dm(inner: &Inner, user: String) -> Result<Response, ApiError> {
 
 async fn send_text(inner: &Inner, conv: String, text: String) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
+    if inner.web.is_guest_conv(&conv) {
+        let id = inner.web.send_text(&conv, &text).await?;
+        return Ok(Response::MsgId {
+            value: id.to_string(),
+        });
+    }
     let msg_id = inner.msg.send(&conv, MsgBody::Text { text }).await?;
     Ok(Response::MsgId {
         value: msg_id.to_string(),
@@ -434,7 +447,13 @@ async fn send_text(inner: &Inner, conv: String, text: String) -> Result<Response
 /// SendFiles：发送文件消息，返回预留的 MsgId（后台完成哈希后入库投递）。
 async fn send_files(inner: &Inner, conv: String, paths: Vec<String>) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
-    let paths = paths.into_iter().map(std::path::PathBuf::from).collect();
+    let paths: Vec<std::path::PathBuf> = paths.into_iter().map(std::path::PathBuf::from).collect();
+    if inner.web.is_guest_conv(&conv) {
+        let id = inner.web.send_files(&conv, &paths).await?;
+        return Ok(Response::MsgId {
+            value: id.to_string(),
+        });
+    }
     let msg_id = inner.msg.send_files(&conv, paths).await?;
     Ok(Response::MsgId {
         value: msg_id.to_string(),
@@ -444,6 +463,9 @@ async fn send_files(inner: &Inner, conv: String, paths: Vec<String>) -> Result<R
 /// SendFolder：发送文件夹消息。
 async fn send_folder(inner: &Inner, conv: String, path: String) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
+    if inner.web.is_guest_conv(&conv) {
+        return Err(invalid_arg("web transfer does not support folders".into()));
+    }
     let msg_id = inner
         .msg
         .send_folder(&conv, std::path::PathBuf::from(path))
@@ -1311,62 +1333,6 @@ pub(crate) fn default_device_type() -> DeviceType {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         DeviceType::Desktop
-    }
-}
-
-/// 请求变体名（未实现响应用）。
-fn variant_name(req: &Request) -> &'static str {
-    match req {
-        Request::GetSelf => "GetSelf",
-        Request::Init { .. } => "Init",
-        Request::SetStatus { .. } => "SetStatus",
-        Request::SetProfile { .. } => "SetProfile",
-        Request::ListPeers => "ListPeers",
-        Request::ListConversations => "ListConversations",
-        Request::ListMessages { .. } => "ListMessages",
-        Request::OpenDm { .. } => "OpenDm",
-        Request::SendText { .. } => "SendText",
-        Request::SendFiles { .. } => "SendFiles",
-        Request::SendFolder { .. } => "SendFolder",
-        Request::Recall { .. } => "Recall",
-        Request::MarkRead { .. } => "MarkRead",
-        Request::DeleteLocal { .. } => "DeleteLocal",
-        Request::DownloadBlob { .. } => "DownloadBlob",
-        Request::CancelTransfer { .. } => "CancelTransfer",
-        Request::ListContacts => "ListContacts",
-        Request::RequestContact { .. } => "RequestContact",
-        Request::ListRequests => "ListRequests",
-        Request::RespondRequest { .. } => "RespondRequest",
-        Request::SetContactPolicy { .. } => "SetContactPolicy",
-        Request::ListMyDevices => "ListMyDevices",
-        Request::RemoveDevice { .. } => "RemoveDevice",
-        Request::PairStart { .. } => "PairStart",
-        Request::PairJoin { .. } => "PairJoin",
-        Request::PairConfirm { .. } => "PairConfirm",
-        Request::PairCancel { .. } => "PairCancel",
-        Request::QueryFiles { .. } => "QueryFiles",
-        Request::DeliveredLocalPaths { .. } => "DeliveredLocalPaths",
-        Request::SearchMessages { .. } => "SearchMessages",
-        Request::ForwardFiles { .. } => "ForwardFiles",
-        Request::GetSettings => "GetSettings",
-        Request::SetSettings { .. } => "SetSettings",
-        Request::AddManualPeer { .. } => "AddManualPeer",
-        Request::RemoveManualPeer { .. } => "RemoveManualPeer",
-        Request::ListManualPeers => "ListManualPeers",
-        Request::ScanSubnet { .. } => "ScanSubnet",
-        Request::ListInterfaces => "ListInterfaces",
-        Request::NetworkChanged => "NetworkChanged",
-        Request::StationCreate { .. } => "StationCreate",
-        Request::StationList => "StationList",
-        Request::StationPut { .. } => "StationPut",
-        Request::StationSetPinned { .. } => "StationSetPinned",
-        Request::StationItems { .. } => "StationItems",
-        Request::StationRemove { .. } => "StationRemove",
-        Request::WebStart => "WebStart",
-        Request::WebStop => "WebStop",
-        Request::WebRespond { .. } => "WebRespond",
-        Request::SetUiFocus { .. } => "SetUiFocus",
-        Request::Shutdown => "Shutdown",
     }
 }
 
