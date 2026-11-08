@@ -134,9 +134,10 @@ fn run() -> Result<()> {
     let env = |k: &str| std::env::var(k).ok();
     if runtime::is_headless(&env, args.headless) {
         tracing::info!("running in headless mode");
-        // 规则缺失只记日志：无头模式没有界面提示入口，IPC 客户端连接时会补发事件
-        std::thread::spawn(|| {
-            if firewall_cmd::check_missing() {
+        // 规则缺失只记日志：无头模式没有托盘入口，IPC 客户端会收到事件
+        #[cfg(windows)]
+        firewall_cmd::spawn_monitor(rt.firewall_tx(), |missing| {
+            if missing {
                 tracing::warn!("firewall rule for lanmsgd is missing");
             }
         });

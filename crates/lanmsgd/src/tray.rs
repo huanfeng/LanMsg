@@ -35,7 +35,10 @@ enum UiMsg {
 /// 点击托盘提示 / 菜单项后在后台线程提权添加规则：成功后复查并通知托盘线程。
 /// 提权会阻塞到 UAC 与命令完成，不能占用托盘消息线程。
 #[cfg(windows)]
-fn start_firewall_elevation(tx: Option<Sender<UiMsg>>) {
+fn start_firewall_elevation(
+    tx: Option<Sender<UiMsg>>,
+    firewall: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+) {
     std::thread::spawn(move || {
         let exe = match std::env::current_exe() {
             Ok(p) => p,
@@ -47,6 +50,7 @@ fn start_firewall_elevation(tx: Option<Sender<UiMsg>>) {
         match lanmsg_core::firewall::elevate_add_rule(&exe) {
             Ok(true) => {
                 let missing = crate::firewall_cmd::check_missing();
+                firewall.send_replace(missing);
                 if let Some(tx) = tx {
                     let _ = tx.send(UiMsg::Firewall { missing });
                 }
@@ -167,6 +171,10 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     #[cfg(windows)]
     let tx_slot: TxSlot = Default::default();
     #[cfg(windows)]
+    let fw_state = rt.firewall_tx();
+    #[cfg(windows)]
+    let fw_click = fw_state.clone();
+    #[cfg(windows)]
     let fw_missing = signal(false);
     #[cfg(windows)]
     let slot_click = tx_slot.clone();
@@ -177,7 +185,7 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
             #[cfg(windows)]
             if tag.as_deref() == Some(FIREWALL_TAG) {
                 let tx = slot_click.lock().ok().and_then(|g| g.clone());
-                start_firewall_elevation(tx);
+                start_firewall_elevation(tx, fw_click.clone());
                 return;
             }
             // tag 为空 / None 时只激活界面；否则尽力定位会话（Windows 的 tag 可能不对应被点的那条）。
@@ -214,11 +222,12 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
             #[cfg(windows)]
             {
                 let slot_menu = tx_slot.clone();
+                let fw_menu = fw_state.clone();
                 items.insert(
                     2,
                     TrayMenuItem::item(strings::TRAY_FIREWALL, move |_ctx| {
                         let tx = slot_menu.lock().ok().and_then(|g| g.clone());
-                        start_firewall_elevation(tx);
+                        start_firewall_elevation(tx, fw_menu.clone());
                     })
                     .enabled(fw_missing),
                 );
@@ -271,12 +280,10 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
         if let Ok(mut g) = tx_slot.lock() {
             *g = Some(tx.clone());
         }
-        // 启动检查：netsh 较慢，放后台线程
+        // 后台检查（netsh 较慢）：结果写入共享状态并通知托盘；缺失期间定期复查
         let check_tx = tx.clone();
-        std::thread::spawn(move || {
-            if crate::firewall_cmd::check_missing() {
-                let _ = check_tx.send(UiMsg::Firewall { missing: true });
-            }
+        crate::firewall_cmd::spawn_monitor(rt.firewall_tx(), move |missing| {
+            let _ = check_tx.send(UiMsg::Firewall { missing });
         });
     }
     let ev_tx = tx.clone();

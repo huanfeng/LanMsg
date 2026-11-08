@@ -43,6 +43,9 @@ pub struct DaemonRuntime {
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// IPC 接入循环任务；退出时等它结束以便监听器 Drop 清理 socket。
     accept_task: tokio::task::JoinHandle<()>,
+    /// 防火墙规则缺失状态（仅 Windows 的后台检查会写入）：IPC 连接据此补发/推送 `FirewallMissing`。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    firewall_tx: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 /// 写“主动退出”标记（托盘“退出”或 IPC Shutdown 路径调用）：界面进程见到它就不再自动拉起后台。
@@ -64,6 +67,7 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
         .context("failed to create tokio runtime")?;
 
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+    let (firewall_tx, firewall_rx) = tokio::sync::watch::channel(false);
     let (service, accept_task) = rt.block_on(async {
         // 信号处理器最先安装（早于 IPC 绑定），并由常驻任务统一转成退出通知，
         // 无头与托盘两种模式共用：收到信号后走正常收尾（清理 IPC socket）。
@@ -126,6 +130,7 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
                                 tx.clone(),
                                 data_dir.clone(),
                                 focus_owner.clone(),
+                                firewall_rx.clone(),
                             ));
                         }
                         Err(e) => {
@@ -165,10 +170,17 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
         rt,
         shutdown_tx,
         accept_task,
+        firewall_tx: Arc::new(firewall_tx),
     })
 }
 
 impl DaemonRuntime {
+    /// 防火墙缺失状态的写端（Windows 后台检查与托盘使用）。
+    #[cfg(windows)]
+    pub fn firewall_tx(&self) -> Arc<tokio::sync::watch::Sender<bool>> {
+        self.firewall_tx.clone()
+    }
+
     /// 阻塞当前线程直到收到 Ctrl-C / SIGTERM（Unix）/ `Request::Shutdown`（信号已由
     /// `start_runtime` 注册的任务转成退出通知），然后关闭服务。
     /// 返回后 IPC 监听器已 Drop（socket 文件被清理）。
