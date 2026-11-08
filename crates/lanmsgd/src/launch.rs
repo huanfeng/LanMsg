@@ -24,12 +24,18 @@ pub fn conv_from_tag(tag: Option<String>) -> Option<String> {
     tag.filter(|t| !t.is_empty())
 }
 
-fn gui_command(exe: &Path, data_dir: &Path, open_conv: Option<&str>) -> Command {
+fn gui_command(
+    exe: &Path,
+    data_dir: &Path,
+    open_conv: Option<&str>,
+    extra_args: &[&str],
+) -> Command {
     let mut cmd = Command::new(exe);
     cmd.arg("--data-dir").arg(data_dir);
     if let Some(conv) = open_conv {
         cmd.arg("--open-conv").arg(conv);
     }
+    cmd.args(extra_args);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -51,7 +57,16 @@ fn gui_command(exe: &Path, data_dir: &Path, open_conv: Option<&str>) -> Command 
 
 /// 分离启动界面进程；不等待其退出（子进程由系统回收，退出后无需 wait）。
 pub fn open_gui(data_dir: &Path, open_conv: Option<&str>) -> std::io::Result<()> {
-    let mut child = gui_command(&gui_exe(), data_dir, open_conv).spawn()?;
+    spawn_gui(data_dir, open_conv, &[])
+}
+
+/// 带附加参数分离启动界面进程（如托盘“开启网页传输”传 `--web`）。
+pub fn open_gui_with(data_dir: &Path, extra_args: &[&str]) -> std::io::Result<()> {
+    spawn_gui(data_dir, None, extra_args)
+}
+
+fn spawn_gui(data_dir: &Path, open_conv: Option<&str>, extra_args: &[&str]) -> std::io::Result<()> {
+    let mut child = gui_command(&gui_exe(), data_dir, open_conv, extra_args).spawn()?;
     // 后台回收，避免 Unix 下留僵尸进程。
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -70,14 +85,20 @@ mod tests {
 
     #[test]
     fn gui_command_args_without_conv() {
-        let cmd = gui_command(Path::new("lanmsg"), Path::new("/d"), None);
+        let cmd = gui_command(Path::new("lanmsg"), Path::new("/d"), None, &[]);
         assert_eq!(args(&cmd), ["--data-dir", "/d"]);
     }
 
     #[test]
     fn gui_command_args_with_conv() {
-        let cmd = gui_command(Path::new("lanmsg"), Path::new("/d"), Some("abc"));
+        let cmd = gui_command(Path::new("lanmsg"), Path::new("/d"), Some("abc"), &[]);
         assert_eq!(args(&cmd), ["--data-dir", "/d", "--open-conv", "abc"]);
+    }
+
+    #[test]
+    fn gui_command_appends_extra_args() {
+        let cmd = gui_command(Path::new("lanmsg"), Path::new("/d"), None, &["--web"]);
+        assert_eq!(args(&cmd), ["--data-dir", "/d", "--web"]);
     }
 
     #[test]

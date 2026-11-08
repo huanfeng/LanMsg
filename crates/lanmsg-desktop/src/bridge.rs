@@ -90,6 +90,16 @@ pub enum ReplyTag {
     DeviceRemoved,
     /// 手动添加对端地址。
     ManualPeer,
+    /// 手动添加的对端列表。
+    ManualPeers,
+    /// 删除手动对端：成功后刷新列表。
+    ManualPeerRemoved,
+    /// 本机网卡列表。
+    Interfaces,
+    /// `ScanSubnet` 的受理回复（结果经 `ScanFinished` 事件到达）。
+    Scan,
+    /// 开启网页传输（`WebStart`）。
+    Web,
     /// `draft` 是发送文字时的原文：失败时用来回填输入框。
     Sent {
         conv: String,

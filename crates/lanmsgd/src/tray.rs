@@ -9,7 +9,7 @@ use lanmsg_api::{Event, Request, Response, StatusDto};
 use windui::platform::{resident_available, tray_supported};
 use windui::prelude::*;
 
-use crate::launch::{conv_from_tag, open_gui};
+use crate::launch::{conv_from_tag, open_gui, open_gui_with};
 use crate::notify::{notice_for, Notice, TitleCache};
 use crate::runtime::DaemonRuntime;
 use crate::strings;
@@ -122,6 +122,7 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     }
     let dir_left = data_dir.clone();
     let dir_menu = data_dir.clone();
+    let dir_web = data_dir.clone();
     let dir_click = data_dir.clone();
     let service_quit = rt.service.clone();
     let handle_quit = handle.clone();
@@ -138,6 +139,11 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
         .menu(vec![
             TrayMenuItem::item(strings::TRAY_OPEN, move |_ctx| {
                 open_gui_logged(&dir_menu, None)
+            }),
+            TrayMenuItem::item(strings::TRAY_WEB, move |_ctx| {
+                if let Err(e) = open_gui_with(&dir_web, &["--web"]) {
+                    tracing::warn!("failed to launch UI for web transfer: {e}");
+                }
             }),
             TrayMenuItem::separator(),
             status_item(strings::TRAY_ONLINE, StatusDto::Online, status, &rt),

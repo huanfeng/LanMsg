@@ -18,6 +18,7 @@ use crate::style;
 use crate::ui_state::UiState;
 use crate::views::confirm::ConfirmState;
 use crate::views::devices::{devices_panel, remove_confirm_host};
+use crate::views::network::{localsend_busy_note, network_section};
 
 /// 页面内容最大宽度。
 const CONTENT_MAX_W: i32 = 760;
@@ -179,7 +180,7 @@ fn group(title: &'static str, content: Element) -> Element {
 }
 
 /// 分组卡片：行与行之间 1px 分隔线。
-fn card(rows: Vec<Element>) -> Element {
+pub(crate) fn card(rows: Vec<Element>) -> Element {
     let mut col = Element::col()
         .width_match()
         .bg_role(Role::Surface)
@@ -195,7 +196,7 @@ fn card(rows: Vec<Element>) -> Element {
 }
 
 /// 说明文字（meta 字号）。
-fn note(text: &'static str) -> Element {
+pub(crate) fn note(text: &'static str) -> Element {
     Element::label(text)
         .font_size(style::FONT_META)
         .fg_role(Role::TextMuted)
@@ -212,7 +213,7 @@ fn error_note(text: impl Into<TextContent>, bad: Signal<bool>) -> Element {
 }
 
 /// 表单行：左标签、右控件，控件下方放说明与错误提示。
-fn field(label: &'static str, control: Element, below: Vec<Element>) -> Element {
+pub(crate) fn field(label: &'static str, control: Element, below: Vec<Element>) -> Element {
     let right = Element::col()
         .weight(1.0)
         .spacing(style::SPACE_XS)
@@ -317,6 +318,29 @@ fn group_footer(
                 .enabled_when(move || state() == GroupState::Dirty)
                 .on_click(on_save),
         )
+}
+
+/// 网页传输入口：未开启时“开启”，已开启时“查看”（重新显示窗口）。
+fn web_card(ui: &UiState) -> Element {
+    let on = ui.derive(|m| m.web.as_ref().is_some_and(|w| !w.is_placeholder()));
+    let off = on.map(|v| !*v);
+    let (ui_start, ui_show) = (ui.clone(), ui.clone());
+    card(vec![switch_row(
+        strings::SETTINGS_WEB,
+        strings::SETTINGS_WEB_HINT,
+        Element::row()
+            .child(
+                Element::button(strings::SETTINGS_WEB_START)
+                    .on_click(move |_| ui_start.act(|m| m.web_start()))
+                    .visible_signal(off),
+            )
+            .child(
+                Element::button(strings::SETTINGS_WEB_SHOW)
+                    .outline()
+                    .on_click(move |_| ui_show.act(|m| m.web_start()))
+                    .visible_signal(on),
+            ),
+    )])
 }
 
 /// 设置表单。控件的草稿值放在本函数创建的信号里，只在设置首次到达时创建一次；
@@ -525,6 +549,7 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
             strings::SETTINGS_LOCALSEND_HINT,
             Element::switch(localsend),
         ),
+        localsend_busy_note(ui),
         field(
             strings::SETTINGS_TARGETS,
             Element::text_input(targets, strings::SETTINGS_TARGETS_PLACEHOLDER)
@@ -604,7 +629,15 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
             devices_panel(ui, remove_confirm),
         ))
         .child(group(strings::SETTINGS_GROUP_STORAGE, storage))
-        .child(group(strings::SETTINGS_GROUP_NETWORK, network))
+        .child(group(
+            strings::SETTINGS_GROUP_NETWORK,
+            Element::col()
+                .width_match()
+                .spacing(style::SPACE_MD)
+                .child(network)
+                .child(network_section(ui)),
+        ))
+        .child(group(strings::SETTINGS_GROUP_WEB, web_card(ui)))
         .child(group(strings::SETTINGS_GROUP_GENERAL, general))
         .child(group(strings::SETTINGS_GROUP_ABOUT, about))
 }

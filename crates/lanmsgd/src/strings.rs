@@ -28,6 +28,7 @@ pub fn notify_request_body(from_name: &str, what: &str) -> String {
 
 /// 托盘菜单。
 pub const TRAY_OPEN: &str = "打开 LanMsg";
+pub const TRAY_WEB: &str = "开启网页传输";
 pub const TRAY_ONLINE: &str = "在线";
 pub const TRAY_INVISIBLE: &str = "隐身";
 pub const TRAY_BUSY: &str = "忙碌";

@@ -7,7 +7,9 @@ use crate::model::Page;
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
-use crate::views::{chats, contacts, files, pair, preview, settings, stations, wizard};
+use crate::views::{
+    chats, contacts, files, pair, preview, settings, stations, web_transfer, wizard,
+};
 
 /// 页面内容。
 fn page_view(ui: &UiState, p: Page) -> Element {
@@ -201,5 +203,6 @@ pub fn shell(ui: &UiState) -> Element {
         .fill()
         .child(main)
         .child(pair::pair_host(ui))
+        .child(web_transfer::web_transfer_host(ui))
         .child(preview::preview_host(ui))
 }

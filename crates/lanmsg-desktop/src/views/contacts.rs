@@ -13,7 +13,8 @@ use crate::style;
 use crate::ui_state::UiState;
 use crate::views::chats::avatar;
 use crate::views::confirm::{confirm_host, Confirm, ConfirmState};
-use crate::views::devices::{device_row, devices_panel, path_label, remove_confirm_host};
+use crate::views::devices::{device_row, devices_panel, remove_confirm_host};
+use crate::views::network::path_badge_text;
 
 /// 分类导航栏宽度。
 const NAV_W: i32 = 200;
@@ -54,7 +55,7 @@ pub fn nearby_people(peers: &[PeerView]) -> Vec<Nearby> {
                 n.devices.push(p.device_name.clone());
                 if rank < *best {
                     *best = rank;
-                    n.badge = path_label(&p.path);
+                    n.badge = path_badge_text(&p.path);
                 }
             }
             None => out.push((
@@ -63,7 +64,7 @@ pub fn nearby_people(peers: &[PeerView]) -> Vec<Nearby> {
                     name: p.display_name.clone(),
                     devices: vec![p.device_name.clone()],
                     short: p.device_short.clone(),
-                    badge: path_label(&p.path),
+                    badge: path_badge_text(&p.path),
                 },
                 rank,
             )),

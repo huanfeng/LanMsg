@@ -1,5 +1,5 @@
 // LanMsg 界面进程入口。
-// 参数：`--data-dir <PATH>`、`--open-conv <CONV>`、`--demo <页>`（离线演示，不连后台服务）、
+// 参数：`--data-dir <PATH>`、`--open-conv <CONV>`、`--web`（连上后开启网页传输）、`--demo <页>`（离线演示，不连后台服务）、
 // `--station-put <PATH>...`（不开窗口，放入本机中转站）、`--theme dark|light`，
 // 以及 windui 自带的 `--screenshot <PNG>` 等截图参数（由 windui 自行解析，这里忽略）。
 // 注释中文，标识符英文。
@@ -50,6 +50,8 @@ struct Cli {
     station_put: Option<Vec<PathBuf>>,
     /// `--theme dark|light`：强制明暗主题（截图与排查用），缺省跟随系统。
     theme_dark: Option<bool>,
+    /// `--web`：连上后台服务后开启网页传输（托盘“开启网页传输”拉起界面时带上）。
+    web: bool,
 }
 
 /// 从 argv 里挑出自有参数，其余原样忽略（单实例转发的 argv 同样走这里）。
@@ -61,6 +63,7 @@ fn parse_cli(args: &[String]) -> Cli {
             "--data-dir" => cli.data_dir = it.next().map(PathBuf::from),
             "--open-conv" => cli.open_conv = it.next().cloned(),
             "--demo" => cli.demo = it.next().cloned(),
+            "--web" => cli.web = true,
             "--theme" => {
                 cli.theme_dark = match it.next().map(String::as_str) {
                     Some("dark") => Some(true),
@@ -148,6 +151,13 @@ fn main() {
         }
     });
     let slot_open = slot.clone();
+    let slot_web = slot.clone();
+    let web_tx = app.channel::<()>(move |_ctx, ()| {
+        let ui = slot_web.borrow().clone();
+        if let Some(ui) = ui {
+            ui.request_web();
+        }
+    });
     let open_tx = app.channel::<String>(move |_ctx, conv| {
         let ui = slot_open.borrow().clone();
         if let Some(ui) = ui {
@@ -179,6 +189,9 @@ fn main() {
         if let Some(conv) = cli.open_conv {
             ui.request_open_conv(conv);
         }
+        if cli.web {
+            ui.request_web();
+        }
     }
 
     let ui_focus = ui.clone();
@@ -194,6 +207,7 @@ fn main() {
             ui_tick.tick_search();
             ui_tick.tick_paste();
             ui_tick.tick_pair();
+            ui_tick.tick_web();
             ui_tick.tick_files();
             ui_tick.preview.tick();
         })
@@ -208,8 +222,12 @@ fn main() {
     if demo.is_none() {
         app = app.single_instance(instance_id(&data_dir), move |argv| {
             // 第二个实例把 --open-conv 带过来；解析不到就只是激活窗口
-            if let Some(conv) = parse_cli(&argv).open_conv {
+            let cli = parse_cli(&argv);
+            if let Some(conv) = cli.open_conv {
                 let _ = open_tx.send(conv);
+            }
+            if cli.web {
+                let _ = web_tx.send(());
             }
         });
     }
@@ -278,6 +296,12 @@ mod tests {
             Some(false)
         );
         assert_eq!(parse_cli(&argv(&["lanmsg"])).theme_dark, None);
+    }
+
+    #[test]
+    fn web_arg_starts_web_on_connect() {
+        assert!(parse_cli(&argv(&["lanmsg", "--web"])).web);
+        assert!(!parse_cli(&argv(&["lanmsg", "--data-dir", "/d"])).web);
     }
 
     #[test]
