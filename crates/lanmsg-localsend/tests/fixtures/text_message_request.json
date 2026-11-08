@@ -1,0 +1,21 @@
+{
+  "info": {
+    "alias": "Nice Orange",
+    "version": "2.0",
+    "deviceModel": "Samsung",
+    "deviceType": "mobile",
+    "fingerprint": "random string",
+    "port": 53317,
+    "protocol": "https",
+    "download": false
+  },
+  "files": {
+    "text-id-1": {
+      "id": "text-id-1",
+      "fileName": "message.txt",
+      "size": 5,
+      "fileType": "text/plain",
+      "preview": "hello"
+    }
+  }
+}

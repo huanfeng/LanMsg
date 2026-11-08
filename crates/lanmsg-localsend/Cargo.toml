@@ -1,0 +1,20 @@
+[package]
+name = "lanmsg-localsend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+socket2 = { version = "0.5", features = ["all"] }
+rcgen = "0.13"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+[dev-dependencies]
+tempfile = "3"
