@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=LanMsg
+Comment=Chat-style file sharing on the local network
+Comment[zh_CN]=局域网聊天式文件互传
+Exec=lanmsg %U
+Icon=lanmsg
+Categories=Network;FileTransfer;
+MimeType=x-scheme-handler/lanmsg;
+Terminal=false

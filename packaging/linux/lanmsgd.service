@@ -1,0 +1,11 @@
+[Unit]
+Description=LanMsg background service
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/lanmsgd @HEADLESS@
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
