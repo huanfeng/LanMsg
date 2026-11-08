@@ -59,7 +59,7 @@ object Fixtures {
         )
 
     fun stationView(station: String = "s1", name: String = "桌面中转站", hostOnline: Boolean = true, count: UInt = 0u): StationView =
-        StationView(station = station, name = name, hostDevice = "d9", hostOnline = hostOnline, itemCount = count)
+        StationView(station = station, name = name, hostDevice = "d9", hostOnline = hostOnline, isLocal = false, itemCount = count)
 
     fun stationTextItem(item: String, text: String, pinned: Boolean = false): StationItemView =
         StationItemView(item = item, addedBy = "d9", addedAt = 1000, expiresAt = null, text = text, file = null, pinned = pinned, unavailable = null)
