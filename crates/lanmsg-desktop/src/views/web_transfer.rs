@@ -85,59 +85,89 @@ fn qr_card(url: &str) -> Element {
         )
 }
 
-/// 地址行：当前地址 + 复制按钮。
-fn url_row(url: String) -> Element {
-    let copy = url.clone();
+/// 屏幕上显示的地址：去掉 `#k=` 之后的密钥片段（密钥只进二维码和复制内容，不得显示）。
+pub fn display_url(full: &str) -> String {
+    full.split_once('#')
+        .map_or(full, |(head, _)| head)
+        .to_string()
+}
+
+/// 第 `i` 个地址的（显示文本，完整地址）；越界取空串。
+fn url_pair(urls: &[String], i: usize) -> (String, String) {
+    let full = urls.get(i).cloned().unwrap_or_default();
+    (display_url(&full), full)
+}
+
+/// 复制按钮：复制 `full`（含密钥）。
+fn copy_button(full: String) -> Element {
+    Element::button(strings::WEB_COPY)
+        .outline()
+        .small()
+        .on_click(move |ctx| {
+            ctx.clipboard_set(&full);
+            ctx.toast(strings::WEB_COPIED);
+        })
+}
+
+/// 单个地址：显示文本 + 复制按钮。
+fn url_row(display: String, full: String) -> Element {
     Element::row()
         .width_match()
         .spacing(style::SPACE_SM)
         .cross(Align::Center)
         .child(
-            Element::label(url)
+            Element::label(display)
                 .font_size(style::FONT_BODY)
                 .fg_role(Role::Text)
                 .max_lines(1)
                 .truncate(Truncate::Middle)
                 .weight(1.0),
         )
-        .child(
-            Element::button(strings::WEB_COPY)
-                .outline()
-                .small()
-                .on_click(move |ctx| {
-                    ctx.clipboard_set(&copy);
-                    ctx.toast(strings::WEB_COPIED);
-                }),
-        )
+        .child(copy_button(full))
 }
 
-/// 会话信息区：左侧二维码，右侧地址（多个时可切换）、复制与配对码。
-fn session_block(w: &WebUi) -> Element {
+/// 会话信息区：左侧二维码，右侧地址（多个时为下拉 + 复制）和配对码。
+/// `sel` 是当前选中的地址下标，由 `UiState` 持有，窗口或会话信息重建后保持。
+fn session_block(w: &WebUi, sel: Signal<usize>) -> Element {
     let urls = w.urls();
-    let sel = signal(w.url_index.min(urls.len().saturating_sub(1)));
-    let urls_view = urls.clone();
-    // 切换地址只重建二维码与地址行，配对码不变
-    let qr = Element::switcher(sel, move |i| {
-        qr_card(urls_view.get(i).map_or("", String::as_str))
-    });
-    let urls_row = urls.clone();
-    let url = Element::switcher(sel, move |i| {
-        url_row(urls_row.get(i).cloned().unwrap_or_default())
-    })
-    .width_match();
+    if sel.get() >= urls.len() {
+        sel.set(0);
+    }
+    let urls_qr = urls.clone();
+    // 切换地址只重建二维码，配对码不变
+    let qr = Element::switcher(sel, move |i| qr_card(&url_pair(&urls_qr, i).1));
     let mut right = Element::col()
         .weight(1.0)
         .spacing(style::SPACE_SM)
         .child(muted(strings::WEB_SCAN_HINT));
     if urls.len() > 1 {
+        let shown: Vec<String> = urls.iter().map(|u| display_url(u)).collect();
+        let urls_copy = urls.clone();
         right = right.child(
-            Element::dropdown(urls, sel)
+            Element::row()
                 .width_match()
-                .height(style::CONTROL_H),
+                .spacing(style::SPACE_SM)
+                .cross(Align::Center)
+                .child(
+                    Element::dropdown(shown, sel)
+                        .height(style::CONTROL_H)
+                        .weight(1.0),
+                )
+                .child(
+                    Element::button(strings::WEB_COPY)
+                        .outline()
+                        .small()
+                        .on_click(move |ctx| {
+                            ctx.clipboard_set(&url_pair(&urls_copy, sel.get()).1);
+                            ctx.toast(strings::WEB_COPIED);
+                        }),
+                ),
         );
+    } else {
+        let (display, full) = url_pair(&urls, 0);
+        right = right.child(url_row(display, full));
     }
     let right = right
-        .child(url)
         .child(
             Element::label(group_code(&w.info.code))
                 .font_size(CODE_FONT)
@@ -276,7 +306,7 @@ pub fn web_transfer_window(ui: &UiState) -> Element {
     let info = Element::switcher(
         ui.digest(|m| m.web.as_ref().map(|w| w.info.clone())),
         move |_| match ui_info.read(|m| m.web.clone()) {
-            Some(w) if !w.is_placeholder() => session_block(&w),
+            Some(w) if !w.is_placeholder() => session_block(&w, ui_info.web_url_sel),
             _ => muted(strings::WEB_STARTING),
         },
     )
@@ -339,6 +369,19 @@ pub fn web_transfer_window(ui: &UiState) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_url_hides_key_but_full_url_keeps_it() {
+        let full = "http://192.168.1.2:53330/#k=Zm9v".to_string();
+        assert_eq!(display_url(&full), "http://192.168.1.2:53330/");
+        assert_eq!(display_url("http://10.0.0.1:1/"), "http://10.0.0.1:1/");
+        // 二维码与复制取完整地址，显示取去密钥的地址
+        let urls = vec![full.clone(), "http://10.8.0.2:53330/#k=Zm9v".to_string()];
+        let (shown, copied) = url_pair(&urls, 1);
+        assert!(!shown.contains("#k="));
+        assert!(copied.contains("#k="));
+        assert_eq!(url_pair(&urls, 9), (String::new(), String::new()));
+    }
 
     #[test]
     fn group_code_4_4() {

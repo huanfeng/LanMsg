@@ -829,15 +829,15 @@ pub fn demo_model(p: DemoPage) -> Model {
             m.web_open = true;
             m.web = Some(WebUi {
                 info: WebSessionInfo {
-                    url: "http://192.168.1.2:53330/".into(),
+                    url: "http://192.168.1.2:53330/#k=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2Q".into(),
                     code: "K7QM3XAP".into(),
-                    qr_uri: "http://192.168.1.2:53330/".into(),
+                    qr_uri: "http://192.168.1.2:53330/#k=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2Q"
+                        .into(),
                     urls: Some(vec![
-                        "http://192.168.1.2:53330/".into(),
-                        "http://10.8.0.2:53330/".into(),
+                        "http://192.168.1.2:53330/#k=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2Q".into(),
+                        "http://10.8.0.2:53330/#k=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2Q".into(),
                     ]),
                 },
-                url_index: 0,
                 pending: vec![WebRequestUi {
                     request: "req-1".into(),
                     user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 \

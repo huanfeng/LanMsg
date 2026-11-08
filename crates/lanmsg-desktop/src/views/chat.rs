@@ -11,6 +11,7 @@ use crate::style;
 use crate::tz;
 use crate::ui_state::UiState;
 use crate::views::chats::{format_time, now_millis};
+use crate::views::network::path_badge_text;
 use crate::views::{composer, forward, message_row};
 
 /// 超过此间隔插入时间分隔行（规范第 8 节）。
@@ -149,12 +150,7 @@ pub fn header_info(m: &Model) -> Option<HeaderInfo> {
             .iter()
             .map(|p| &p.path)
             .min_by_key(|p| path_rank(p))
-            .and_then(|p| match p {
-                PathClassDto::Lan => None,
-                PathClassDto::Vpn => Some(strings::PATH_VPN),
-                PathClassDto::Internet => Some(strings::PATH_INTERNET),
-                PathClassDto::Relay => Some(strings::PATH_RELAY),
-            })
+            .and_then(path_badge_text)
     } else {
         None
     };

@@ -33,12 +33,16 @@ pub fn tunnel_label(kind: &str) -> &'static str {
     }
 }
 
-/// “扫描此网段”要提交的网段：前缀不小于 /22 用网卡自身网段，否则取本机地址所在 /24
-/// （core 只接受 IPv4 且前缀不小于 /22）。非 IPv4 网卡返回空串。
+/// 网卡行扫描按钮要提交的网段：前缀在 /22 到 /30 之间用网卡自身网段，前缀更小（网段过大）
+/// 取本机地址所在 /24；/31、/32 没有可探测的邻居，返回空串（不显示按钮）。
+/// core 只接受 IPv4 且前缀不小于 /22，非 IPv4 网卡同样返回空串。
 pub fn scan_cidr_for(iface: &InterfaceView) -> String {
     let Ok(addr) = iface.addr.parse::<Ipv4Addr>() else {
         return String::new();
     };
+    if iface.prefix > 30 {
+        return String::new();
+    }
     let prefix = if iface.prefix >= lanmsg_proto::consts::SCAN_MIN_PREFIX {
         iface.prefix
     } else {
@@ -236,7 +240,7 @@ fn iface_row(ui: &UiState, i: &InterfaceView) -> Element {
         )));
     if !cidr.is_empty() {
         row = row.child(
-            Element::button(strings::NET_SCAN_THIS)
+            Element::button(strings::net_scan_cidr_button(&cidr))
                 .outline()
                 .small()
                 .enabled_when(move || idle.get())
@@ -298,6 +302,13 @@ mod tests {
         assert_eq!(scan_cidr_for(&iface("10.1.4.5", 22)), "10.1.4.0/22");
         // 前缀恰在边界：/21 比下限大一档，退到 /24
         assert_eq!(scan_cidr_for(&iface("10.1.4.5", 21)), "10.1.4.0/24");
+        // /25–/30 用自身网段；/31、/32（点对点隧道）没有邻居，不提供扫描
+        assert_eq!(
+            scan_cidr_for(&iface("192.168.1.130", 25)),
+            "192.168.1.128/25"
+        );
+        assert_eq!(scan_cidr_for(&iface("10.8.0.2", 31)), "");
+        assert_eq!(scan_cidr_for(&iface("100.101.102.103", 32)), "");
         // core 只接受 IPv4
         assert_eq!(scan_cidr_for(&iface("fe80::1", 64)), "");
     }

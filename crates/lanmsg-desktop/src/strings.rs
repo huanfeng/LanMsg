@@ -460,12 +460,11 @@ pub const NET_MANUAL_REMOVE: &str = "删除";
 pub const NET_MANUAL_LINKED: &str = "已连接过";
 pub const NET_SCAN_TITLE: &str = "网段扫描";
 pub const NET_SCAN_HINT: &str =
-    "组播到不了的网段，可扫描后自动发现设备（仅支持 /22 及更小的 IPv4 网段）";
-pub const NET_SCAN_THIS: &str = "扫描此网段";
+    "组播到不了的网络，可扫描网段发现设备（仅支持 IPv4，网段不大于 /22）";
 pub const NET_SCAN_BUTTON: &str = "扫描";
 pub const NET_SCAN_PLACEHOLDER: &str = "例如 192.168.2.0/24";
 pub const NET_SCAN_CIDR_INVALID: &str =
-    "网段格式不对，需要 IPv4 网段且不大于 /22 的范围，如 192.168.2.0/24";
+    "网段不合法：仅支持 IPv4，网段不大于 /22，如 192.168.2.0/24";
 pub const NET_IFACES_TITLE: &str = "本机网卡";
 pub const NET_IFACES_EMPTY: &str = "没有可用的网卡";
 pub const TUNNEL_TAILSCALE: &str = "Tailscale";
@@ -483,4 +482,9 @@ pub fn net_scanning(cidr: &str) -> String {
 /// 扫描结束的结果。
 pub fn net_scan_result(probed: u32, found: u32) -> String {
     format!("已探测 {probed} 个地址，发现 {found} 台设备")
+}
+
+/// 网卡行的扫描按钮：直接写出实际扫描的网段（网卡前缀过大时会回退到所在 /24）。
+pub fn net_scan_cidr_button(cidr: &str) -> String {
+    format!("扫描 {cidr}")
 }

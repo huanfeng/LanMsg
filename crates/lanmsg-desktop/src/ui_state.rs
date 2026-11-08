@@ -50,6 +50,8 @@ pub struct UiState {
     pair_show: Rc<RefCell<Option<Signal<bool>>>>,
     /// 网页传输窗口的显隐信号：ESC 只隐藏面板，由 `tick_web` 发现后把 `web_open` 置假。
     web_show: Rc<RefCell<Option<Signal<bool>>>>,
+    /// 网页传输窗口里当前选中的访问地址下标；放在这里，窗口重建后选择不丢。
+    pub web_url_sel: Signal<usize>,
     /// `--web` 带来的待办：连接上后台服务后开启网页传输。
     pending_web: Rc<RefCell<bool>>,
     /// 配对完成（Done）后开始计时的时刻，用于 1.5 秒后自动关闭。
@@ -105,6 +107,7 @@ impl UiState {
             composer: Rc::new(RefCell::new(None)),
             pair_show: Rc::new(RefCell::new(None)),
             web_show: Rc::new(RefCell::new(None)),
+            web_url_sel: signal(0usize),
             pending_web: Rc::new(RefCell::new(false)),
             pair_done_since: Rc::new(RefCell::new(None)),
             pair_refresh_at: Rc::new(RefCell::new(None)),
@@ -168,6 +171,19 @@ impl UiState {
             self.act(|m| m.web_start());
         } else {
             *self.pending_web.borrow_mut() = true;
+        }
+    }
+
+    /// 周期调用：扫描迟迟没有结束事件时兜底复位。
+    pub fn tick_scan(&self) {
+        if self.read(|m| m.scanning.is_some()) {
+            let now = crate::views::chats::now_millis();
+            if self.read(|m| now - m.scanning_since_millis > crate::model::SCAN_TIMEOUT_MS) {
+                self.act(|m| {
+                    m.scan_expire(now);
+                    Vec::new()
+                });
+            }
         }
     }
 
