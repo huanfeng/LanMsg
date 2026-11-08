@@ -115,6 +115,8 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
             })
         }
         Request::StationCreate { name } => station_create(inner, &name),
+        Request::StationList => station_list(inner),
+        Request::StationItems { station } => station_items(inner, &station),
         Request::StationPut {
             station,
             item,
@@ -126,7 +128,7 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
             station,
             item,
             pinned,
-        } => station_set_pinned(inner, &station, &item, pinned),
+        } => station_set_pinned(inner, &station, &item, pinned).await,
         Request::Shutdown => {
             inner.discovery.shutdown();
             inner.conns.shutdown().await;
@@ -914,7 +916,64 @@ async fn mark_read(inner: &Inner, conv: String, upto: String) -> Result<Response
 async fn download_blob(inner: &Inner, hash: String) -> Result<Response, ApiError> {
     let h =
         BlobHash::from_hex(&hash).map_err(|_| invalid_arg(format!("invalid blob hash: {hash}")))?;
-    let id = inner.transfer.clone().download(h).await?;
+    // 消息引用优先；否则看是否属于某个中转站条目。
+    if !inner
+        .store
+        .message_blobs_by_hash(&h)
+        .map_err(CoreError::from)?
+        .is_empty()
+    {
+        let id = inner.transfer.clone().download(h).await?;
+        return Ok(Response::TransferId { value: id });
+    }
+    let Some(row) = inner
+        .store
+        .station_items_with_blob(&h)
+        .map_err(CoreError::from)?
+        .into_iter()
+        .next()
+    else {
+        return Err(
+            CoreError::NotFound("no message or station item references this file".into()).into(),
+        );
+    };
+    if inner
+        .store
+        .get_local(&h)
+        .map_err(CoreError::from)?
+        .is_some()
+    {
+        return Err(invalid_arg("already downloaded".into()));
+    }
+    let station_name = inner
+        .store
+        .get_station(&row.station)
+        .map_err(CoreError::from)?
+        .map(|s| s.name)
+        .unwrap_or_default();
+    // 找到该哈希对应的 Blob 与它在文件夹里的子目录。
+    let mut sub_dirs: Vec<String> = Vec::new();
+    let meta = match &row.item.content {
+        lanmsg_proto::station::StationContent::File { blob } => blob.clone(),
+        lanmsg_proto::station::StationContent::Folder { name, entries } => {
+            let Some(e) = entries.iter().find(|e| e.blob.hash == h) else {
+                return Err(CoreError::NotFound(hash).into());
+            };
+            sub_dirs.push(name.clone());
+            let mut segs: Vec<&str> = e.rel_path.split('/').collect();
+            segs.pop();
+            sub_dirs.extend(segs.into_iter().map(str::to_string));
+            e.blob.clone()
+        }
+        lanmsg_proto::station::StationContent::Text { .. } => {
+            return Err(CoreError::NotFound(hash).into())
+        }
+    };
+    let settings = crate::settings::load_settings(&inner.store)?;
+    let dir = inner
+        .transfer
+        .station_dest_dir(&settings, &station_name, &sub_dirs);
+    let id = inner.transfer.clone().download_to(meta, &dir).await?;
     Ok(Response::TransferId { value: id })
 }
 
@@ -1057,28 +1116,32 @@ async fn delete_local(
 /// 创建中转站（只有桌面 / 笔记本 / 无界面设备能当主机，由 `StationHost::create` 判定）。
 fn station_create(inner: &Arc<Inner>, name: &str) -> Result<Response, ApiError> {
     let info = inner.station.create(name, now_millis())?;
+    // 通知在线的自己设备（后台发送）。
+    let announce = inner.clone();
+    tokio::spawn(async move { crate::station::client::announce_all(&announce).await });
     Ok(Response::ConvId {
         value: info.station.to_hex(),
     })
 }
 
-/// 校验站点在本机托管：远程站点的写入由拉取端（Task 6）处理，此处尚未支持。
-fn local_station(inner: &Arc<Inner>, station: &str) -> Result<ConvId, ApiError> {
+/// 站点所在位置：本机托管，或由另一台设备托管（经连接代理）。
+enum StationHome {
+    Local(ConvId),
+    Remote(ConvId),
+}
+
+fn station_home(inner: &Arc<Inner>, station: &str) -> Result<StationHome, ApiError> {
     let station = parse_conv(station)?;
     let self_device = inner
         .identity
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .device_id();
-    if let Some(info) = inner.store.get_station(&station).map_err(CoreError::from)? {
-        if info.host != self_device {
-            return Err(ApiError {
-                code: ErrorCode::Unimplemented,
-                message: "unimplemented: remote station".into(),
-            });
-        }
+    match inner.store.get_station(&station).map_err(CoreError::from)? {
+        Some(info) if info.host != self_device => Ok(StationHome::Remote(station)),
+        // 不存在的站点交给主机端按 InvalidArgument 拒绝。
+        _ => Ok(StationHome::Local(station)),
     }
-    Ok(station)
 }
 
 async fn station_put(
@@ -1090,7 +1153,13 @@ async fn station_put(
 ) -> Result<Response, ApiError> {
     use crate::store::StoreModeRow;
     use lanmsg_api::types::{StationPutItem, StoreMode};
-    let station = local_station(inner, station)?;
+    let station = match station_home(inner, station)? {
+        StationHome::Remote(s) => {
+            crate::station::client::remote_put(inner, &s, item, expires_at).await?;
+            return Ok(Response::Ok);
+        }
+        StationHome::Local(s) => s,
+    };
     let now = now_millis();
     let me = inner
         .identity
@@ -1134,25 +1203,72 @@ async fn station_remove(
     station: &str,
     item: &str,
 ) -> Result<Response, ApiError> {
-    let station = local_station(inner, station)?;
-    inner
-        .station
-        .remove(&station, &parse_item(item)?, now_millis())
-        .await?;
+    let item = parse_item(item)?;
+    match station_home(inner, station)? {
+        StationHome::Local(s) => inner.station.remove(&s, &item, now_millis()).await?,
+        StationHome::Remote(s) => crate::station::client::remote_remove(inner, &s, item).await?,
+    }
     Ok(Response::Ok)
 }
 
-fn station_set_pinned(
+async fn station_set_pinned(
     inner: &Arc<Inner>,
     station: &str,
     item: &str,
     pinned: bool,
 ) -> Result<Response, ApiError> {
-    let station = local_station(inner, station)?;
-    inner
-        .station
-        .set_pinned(&station, &parse_item(item)?, pinned, now_millis())?;
+    let item = parse_item(item)?;
+    match station_home(inner, station)? {
+        StationHome::Local(s) => inner.station.set_pinned(&s, &item, pinned, now_millis())?,
+        StationHome::Remote(s) => {
+            crate::station::client::remote_set_pinned(inner, &s, item, pinned).await?
+        }
+    }
     Ok(Response::Ok)
+}
+
+/// 全部中转站（本机托管的与同步而来的）。
+fn station_list(inner: &Arc<Inner>) -> Result<Response, ApiError> {
+    let value = inner
+        .store
+        .list_stations()
+        .map_err(CoreError::from)?
+        .iter()
+        .filter(|s| !s.deleted)
+        .map(|s| crate::service::views::station_view(inner, s))
+        .collect();
+    Ok(Response::Stations { value })
+}
+
+/// 站点条目：置顶在前，其余按添加时间降序。
+fn station_items(inner: &Arc<Inner>, station: &str) -> Result<Response, ApiError> {
+    let station = parse_conv(station)?;
+    if inner
+        .store
+        .get_station(&station)
+        .map_err(CoreError::from)?
+        .is_none()
+    {
+        return Err(ApiError {
+            code: ErrorCode::NotFound,
+            message: format!("station not found: {}", station.to_hex()),
+        });
+    }
+    let mut rows = inner
+        .store
+        .station_items(&station, 0, false)
+        .map_err(CoreError::from)?;
+    rows.sort_by(|a, b| {
+        b.item
+            .pinned
+            .cmp(&a.item.pinned)
+            .then(b.item.added_at.cmp(&a.item.added_at))
+    });
+    let value = rows
+        .iter()
+        .map(|r| crate::service::views::station_item_view(inner, r))
+        .collect();
+    Ok(Response::StationItems { value })
 }
 
 fn parse_conv(s: &str) -> Result<ConvId, ApiError> {

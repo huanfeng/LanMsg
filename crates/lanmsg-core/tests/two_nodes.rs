@@ -237,7 +237,7 @@ async fn uninitialized_service_rejects_send() {
 async fn unimplemented_request_returns_unimplemented_code() {
     let dir = tempfile::tempdir().unwrap();
     let s = make_service(None, &dir).await;
-    let err = s.handle(Request::StationList).await.unwrap_err();
+    let err = s.handle(Request::WebStart).await.unwrap_err();
     assert_eq!(err.code, ErrorCode::Unimplemented);
     assert!(
         err.message.starts_with("unimplemented: "),

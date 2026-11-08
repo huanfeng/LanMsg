@@ -85,6 +85,10 @@ pub(crate) struct Inner {
     pub(crate) transfer: Arc<crate::blob::transfer::TransferEngine>,
     /// 文件中转站主机端（P5 Task 5）。
     pub(crate) station: Arc<crate::station::StationHost>,
+    /// 中转站同步的拉取端状态与请求等待表。
+    pub(crate) station_client: crate::station::client::StationClient,
+    /// 数据目录（中转站副本目录等）。
+    pub(crate) data_dir: std::path::PathBuf,
     /// 平台钩子：自动下载策略查询网络状态（P2 Task 13）。
     pub(crate) platform: PlatformHooks,
     /// 界面当前正在看的会话（SetUiFocus 设置，只存内存不落库）。
@@ -313,6 +317,8 @@ impl Service {
             blob,
             transfer,
             station,
+            station_client: crate::station::client::StationClient::new(),
+            data_dir: data_dir.clone(),
             platform,
             ui_focus: StdMutex::new(None),
             static_peers: StdMutex::new(HashSet::new()),
@@ -556,7 +562,13 @@ async fn routing_task(
                     let (tx, rx) = mpsc::channel(SYNC_JOB_QUEUE);
                     tokio::spawn(sync_worker(inner.clone(), rx));
                     sync_workers.insert(peer.device, tx.clone());
+                    let up_peer = peer.clone();
                     on_up(&inner, peer, &tx).await;
+                    // 自己的设备上线：通告本机托管的中转站（后台发送，不阻塞路由）。
+                    let announce_inner = inner.clone();
+                    tokio::spawn(async move {
+                        crate::station::client::on_peer_up(&announce_inner, &up_peer).await;
+                    });
                 }
                 Some(ConnEvent::Down(device)) => {
                     sync_workers.remove(&device);
@@ -713,6 +725,10 @@ async fn routing_task(
                     // Blob 持有者查询/应答分派给 BlobServer（P2 Task 11）。
                     Frame::BlobQuery(q) => inner.blob.handle_blob_query(&inner, d, q).await,
                     Frame::BlobHave(h) => inner.blob.handle_blob_have(d, h).await,
+                    // 中转站同步帧：处理可能涉及写库与发送，放到后台任务。
+                    Frame::Station(m) => {
+                        tokio::spawn(crate::station::client::on_message(inner.clone(), d, m));
+                    }
                     _ => {
                         let _ = inner.msg.on_frame(d, f).await;
                     }
@@ -905,10 +921,16 @@ async fn station_task(
                     Ok(Err(e)) => tracing::warn!(error = %e, "station sweep failed"),
                     Err(e) => tracing::warn!(error = %e, "station sweep task failed"),
                 }
+                crate::station::client::retry_pulls(&inner);
             }
             ch = changes.recv() => match ch {
-                Ok((station, _)) => {
+                Ok((station, items)) => {
                     let _ = inner.events.send(Event::StationUpdated { station: station.to_hex() });
+                    // 推给在线的自己设备（后台发送，慢对端不阻塞本任务）。
+                    let push_inner = inner.clone();
+                    tokio::spawn(async move {
+                        crate::station::client::push_delta(&push_inner, station, items).await;
+                    });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 // 落后时丢了若干通知：界面刷新一次即可，无需逐条补发。

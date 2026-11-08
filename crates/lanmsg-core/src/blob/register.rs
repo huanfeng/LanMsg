@@ -17,6 +17,7 @@ use crate::platform::ThumbnailProvider;
 use crate::store::{BlobLocalKind, BlobLocalRow, Store};
 
 /// 登记一个本地文件为本机持有的 Blob。路径不存在或不是普通文件 → InvalidArgument。
+/// `keep_existing_local` 为 true 时，该哈希已有指向仍可读文件的本地行则不覆盖。
 pub async fn register_local_file(
     store: Arc<Store>,
     self_device: DeviceId,
@@ -24,6 +25,7 @@ pub async fn register_local_file(
     path: PathBuf,
     kind: BlobLocalKind,
     now: i64,
+    keep_existing_local: bool,
 ) -> Result<BlobMeta, CoreError> {
     let p = path.clone();
     let hashed = tokio::task::spawn_blocking(move || {
@@ -82,7 +84,14 @@ pub async fn register_local_file(
     let s = store.clone();
     let m = meta.clone();
     tokio::task::spawn_blocking(move || {
-        s.register_local_blob(&m, &hashed.segment_hashes, &local, &self_device, now)
+        s.register_local_blob(
+            &m,
+            &hashed.segment_hashes,
+            &local,
+            &self_device,
+            now,
+            keep_existing_local,
+        )
     })
     .await
     .map_err(|e| CoreError::Proto(format!("register task failed: {e}")))??;
@@ -107,6 +116,7 @@ mod tests {
             path.clone(),
             BlobLocalKind::Source,
             10,
+            false,
         )
         .await
         .unwrap();
@@ -132,6 +142,7 @@ mod tests {
                 p,
                 BlobLocalKind::Source,
                 1,
+                false,
             )
             .await
             .unwrap_err();
