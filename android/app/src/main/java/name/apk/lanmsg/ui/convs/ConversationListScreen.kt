@@ -34,16 +34,17 @@ import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.ui.common.EmptyState
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import name.apk.lanmsg.ui.theme.LanMsgControls
+import uniffi.lanmsg_api.ConvKind
 
 @Composable
-fun ConversationListScreen(onOpenChat: (String) -> Unit, onSearch: () -> Unit) {
+fun ConversationListScreen(onOpenChat: (String) -> Unit, onOpenStation: (String) -> Unit, onSearch: () -> Unit) {
     val vm: ConversationListViewModel = viewModel(
         factory = viewModelFactory {
             initializer { ConversationListViewModel(ServiceLocator.coreHolder.api, ServiceLocator.localPrefs) }
         },
     )
     val state by vm.state.collectAsStateWithLifecycle()
-    ConversationListContent(state, onOpenChat, vm::toggleMute, onSearch, vm::clearError)
+    ConversationListContent(state, onOpenChat, vm::toggleMute, onSearch, vm::clearError, onOpenStation)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -52,7 +53,9 @@ fun ConversationListContent(
     state: ConversationListViewModel.UiState,
     onOpenChat: (String) -> Unit,
     onToggleMute: (String) -> Unit,
-    onSearch: () -> Unit,    onDismissError: () -> Unit = {},
+    onSearch: () -> Unit,
+    onDismissError: () -> Unit = {},
+    onOpenStation: (String) -> Unit = {},
 ) {
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
@@ -84,7 +87,12 @@ fun ConversationListContent(
                 state.rows.isEmpty() -> EmptyState(stringResource(R.string.convs_empty), Icons.AutoMirrored.Outlined.Chat)
                 else -> LazyColumn(Modifier.fillMaxSize()) {
                     items(state.rows, key = { it.summary.conv }) { row ->
-                        ConversationRow(row, onClick = { onOpenChat(row.summary.conv) }, onToggleMute = { onToggleMute(row.summary.conv) })
+                        ConversationRow(
+                            row,
+                            // 中转站会话进入中转站页面，其余进入聊天页
+                            onClick = { if (row.summary.kind == ConvKind.STATION) onOpenStation(row.summary.conv) else onOpenChat(row.summary.conv) },
+                            onToggleMute = { onToggleMute(row.summary.conv) },
+                        )
                     }
                 }
             }

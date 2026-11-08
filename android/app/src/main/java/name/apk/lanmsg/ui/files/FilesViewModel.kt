@@ -23,6 +23,9 @@ import uniffi.lanmsg_api.FileKindFilter
 import uniffi.lanmsg_api.FileView
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
+import uniffi.lanmsg_api.StationPutItem
+import uniffi.lanmsg_api.StationView
+import uniffi.lanmsg_api.StoreMode
 
 class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewModel() {
     /** 来源设备筛选的候选项；[self] 为本机（界面显示 devices_this）；[subLabel] 为他人设备的显示名。 */
@@ -40,12 +43,19 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
         val devices: List<DeviceOption> = emptyList(),
         /** hash -> (已完成, 总量)。 */
         val progress: Map<String, Pair<ULong, ULong>> = emptyMap(),
+        /** 「放入中转站」成功的一次性提示；界面提示后调用 [clearPutToStationDone]。 */
+        val putToStationDone: Boolean = false,
     )
 
     private val _state = MutableStateFlow(
         UiState(FileFilter(FileKindFilter.ALL, initialConv, null, null, null, null, LIMIT)),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    private val _stations = MutableStateFlow<List<StationView>>(emptyList())
+
+    /** 可放入的中转站；由 [loadStations] 填充。 */
+    val stations: StateFlow<List<StationView>> = _stations.asStateFlow()
 
     private var queryJob: Job? = null
     private var debounceJob: Job? = null
@@ -103,6 +113,31 @@ class FilesViewModel(private val core: CoreApi, initialConv: String?) : ViewMode
             }
         }
     }
+
+    /** 取中转站列表供“放入中转站”选择；失败按下载失败同一通道提示。 */
+    fun loadStations() {
+        viewModelScope.launch {
+            try {
+                _stations.value = core.call<Response.Stations>(Request.StationList).value
+            } catch (e: ApiException) {
+                _state.update { it.copy(downloadError = errorTextRes(e.code)) }
+            }
+        }
+    }
+
+    /** 以引用方式放入已有 Blob（不复制文件）。 */
+    fun putToStation(station: String, hash: String) {
+        viewModelScope.launch {
+            try {
+                core.call<Response.Ok>(Request.StationPut(station, StationPutItem.Blobs(listOf(hash)), StoreMode.REFERENCE, null))
+                _state.update { it.copy(putToStationDone = true) }
+            } catch (e: ApiException) {
+                _state.update { it.copy(downloadError = errorTextRes(e.code)) }
+            }
+        }
+    }
+
+    fun clearPutToStationDone() = _state.update { it.copy(putToStationDone = false) }
 
     fun clearError() = _state.update { it.copy(error = null) }
 

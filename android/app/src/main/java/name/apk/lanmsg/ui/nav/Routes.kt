@@ -18,11 +18,13 @@ object Routes {
     const val SEARCH = "search"
     const val FORWARD = "forward/{hashes}"
     const val CHAT = "chat/{conv}"
+    const val STATION = "station/{conv}"
     const val IMAGE = "image/{conv}/{hash}"
     const val CONTACT = "contact/{user}"
     const val TEXT = "text?path={path}&name={name}&mime={mime}"
 
     fun chat(conv: String) = "chat/${Uri.encode(conv)}"
+    fun station(conv: String) = "station/${Uri.encode(conv)}"
     fun image(conv: String, hash: String) = "image/${Uri.encode(conv)}/${Uri.encode(hash)}"
     fun text(path: String, name: String, mime: String) =
         "text?path=${Uri.encode(path)}&name=${Uri.encode(name)}&mime=${Uri.encode(mime)}"

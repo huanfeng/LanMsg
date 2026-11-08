@@ -225,4 +225,22 @@
     <string name="action_forward">转发</string>
     <string name="forward_title">转发到</string>
     <string name="toast_forwarded">已转发</string>
+    <string name="files_put_station">放入中转站</string>
+    <string name="files_no_station">还没有中转站，请先在电脑上新建</string>
+    <string name="toast_put_station">已放入中转站</string>
+    <string name="station_host_offline_banner">主机离线，暂时无法下载</string>
+    <string name="station_item_unavailable">已失效</string>
+    <string name="station_pin">置顶</string>
+    <string name="station_unpin">取消置顶</string>
+    <string name="station_remove">删除</string>
+    <string name="station_expiry">保留时间</string>
+    <string name="station_expiry_never">不过期</string>
+    <string name="station_expiry_1d">1 天</string>
+    <string name="station_expiry_7d">7 天</string>
+    <string name="station_expiry_30d">30 天</string>
+    <string name="station_add">添加</string>
+    <string name="station_add_file">选择文件</string>
+    <string name="station_add_text">输入文字</string>
+    <string name="station_items_empty">中转站里还没有东西</string>
+    <string name="toast_copied">已复制</string>
 </resources>

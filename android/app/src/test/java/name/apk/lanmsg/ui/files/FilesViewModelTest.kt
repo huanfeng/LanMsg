@@ -28,6 +28,8 @@ import uniffi.lanmsg_api.Event
 import uniffi.lanmsg_api.FileKindFilter
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
+import uniffi.lanmsg_api.StationPutItem
+import uniffi.lanmsg_api.StoreMode
 
 @RunWith(AndroidJUnit4::class)
 class FilesViewModelTest {
@@ -264,5 +266,40 @@ class FilesViewModelTest {
         assertEquals(listOf("d1", "d2", "d3"), devices.map { it.deviceId })
         assertTrue(devices[0].self)
         assertNotNull(devices.firstOrNull { it.deviceId == "d3" && it.subLabel == "老王" })
+    }
+
+    @Test fun put_to_station_sends_blobs_item() = runTest {
+        val fake = fake()
+        val vm = FilesViewModel(fake, null)
+        advanceUntilIdle()
+        vm.putToStation("s1", "h1")
+        advanceUntilIdle()
+        assertEquals(
+            Request.StationPut("s1", StationPutItem.Blobs(listOf("h1")), StoreMode.REFERENCE, null),
+            fake.requests.last(),
+        )
+        assertEquals(true, vm.state.value.putToStationDone)
+    }
+
+    @Test fun put_to_station_failure_is_reported_by_error_code() = runTest {
+        val fake = fake()
+        val ok = fake.handler
+        fake.handler = { req -> if (req is Request.StationPut) throw ApiException(ErrorCode.PEER_OFFLINE, "x") else ok(req) }
+        val vm = FilesViewModel(fake, null)
+        advanceUntilIdle()
+        vm.putToStation("s1", "h1")
+        advanceUntilIdle()
+        assertEquals(errorTextRes(ErrorCode.PEER_OFFLINE), vm.state.value.downloadError)
+    }
+
+    @Test fun load_stations_requests_station_list_once_and_exposes_it() = runTest {
+        val fake = fake()
+        val ok = fake.handler
+        fake.handler = { req -> if (req === Request.StationList) Response.Stations(listOf(Fixtures.stationView("s1"))) else ok(req) }
+        val vm = FilesViewModel(fake, null)
+        advanceUntilIdle()
+        vm.loadStations()
+        advanceUntilIdle()
+        assertEquals(listOf("s1"), vm.stations.value.map { it.station })
     }
 }
