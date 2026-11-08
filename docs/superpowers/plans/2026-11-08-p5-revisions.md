@@ -61,6 +61,12 @@
     - `accept_remote` 重复投递已删除的条目会让它复活。需要定墓碑语义：已删除的条目不因旧投递复活。
     - `put_paths` 中途失败时可能留下孤儿副本目录，可由 `sweep` 清理。
 - **T6**：`TransferEngine::download` 是 `self: Arc<Self>`，`spawn_download` 绑定 `MessageBlobRow`（transfer.rs:142、287）。先把下载来源抽象出来，再加 `download_to`。权限错误用稳定的英文键。
+  - 实施结果（7083eac 及收尾提交）：
+    - 签名：`TransferEngine::download_to(meta: BlobMeta, dest_dir: &Path)`（不是计划的 `(hash, name, size, dest_dir)`，下载过程要把分段表写回 `blobs`）；不检查本地是否已有该 Blob，`DownloadBlob` 在调用前自行返回 `already downloaded`。`station_dest_dir` 给出 `<下载目录>/Station/<站点名>/<子目录>`，目录名用英文。
+    - `synced_until` 语义：只由 Snapshot 推进（取收到条目的最大 `updated_at`，不是 `now`），Delta 不推进；重连 Subscribe 的 `since` 回退 1 秒，重复项靠「updated_at 取新者」和「墓碑不可逆」去重。
+    - 应答错误文本：主机对 `Rejected/InvalidArgument/NotFound` 只发内层文本，拉取端统一包成 `Rejected(文本)`，最终 `ApiError.message` 不带变体前缀。
+    - 复制条目由主机顺序拉取，失败由 60 秒周期任务重试（重试失败只记 debug）；孤儿副本目录一小时后由 `sweep` 清理。
+    - 未测：文件夹条目的端到端拉取与按哈希下载（子目录注入）、站点名含特殊字符时的落地目录；联系人 Subscribe 只能验证「看不到站点」，拒绝应答本身无法在测试里观察。
 - **T7**：文案全部进 `strings.rs`；`--station-put` 加到 `parse_cli`（main.rs:50）；`Effect` 以现有定义为准。
 - **T8**：错误状态存 `ErrorCode`。Android outbox 的 7 天清理不得删除中转站引用、主机尚未拉取的副本，要补测试。
 - **T9 / T10**：照原计划，日志和错误改英文。LocalSend 协议字段以官方 v2 协议文档为准，需要联网核对。

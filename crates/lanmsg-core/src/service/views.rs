@@ -182,11 +182,7 @@ pub(crate) fn station_view(inner: &Inner, s: &StationInfo) -> StationView {
         name: s.name.clone(),
         host_device: host_name,
         host_online: s.host == me || inner.conns.is_connected(&s.host),
-        item_count: inner
-            .store
-            .station_items(&s.station, 0, false)
-            .map(|v| v.len() as u32)
-            .unwrap_or(0),
+        item_count: inner.store.station_item_count(&s.station).unwrap_or(0),
     }
 }
 

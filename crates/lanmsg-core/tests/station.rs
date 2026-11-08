@@ -416,3 +416,65 @@ async fn contact_cannot_write_to_station() {
     // 联系人也看不到该站点。
     assert!(stations(&c).await.is_empty());
 }
+
+#[tokio::test]
+async fn remote_rejection_message_is_not_double_wrapped() {
+    let (h, p, station) = setup().await;
+    put_text(&h, &station, "a").await;
+    wait_until(|| item_count_is(&p, &station, 1), 10).await;
+    // 主机端报 NotFound(条目 id)，拉取端看到 Rejected 且文本恰为内层文本。
+    let missing = "00".repeat(16);
+    let err = p
+        .try_call(Request::StationRemove {
+            station: station.clone(),
+            item: missing.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, lanmsg_api::types::ErrorCode::Rejected);
+    assert_eq!(err.message, missing);
+}
+
+#[tokio::test]
+async fn contact_cannot_remove_or_pin_station_items() {
+    let bus = MemoryBus::new();
+    let mut h = node(&bus).await;
+    h.init_first("host").await;
+    let mut c = node(&bus).await;
+    c.init_first("contact").await;
+    common::befriend(&mut h, &mut c).await;
+    let st = match h.call(Request::StationCreate { name: "s".into() }).await {
+        Response::ConvId { value } => value,
+        other => panic!("expected ConvId, got {other:?}"),
+    };
+    put_text(&h, &st, "keep").await;
+    let item = items(&h, &st).await[0].item.clone();
+    let h_dev = DeviceId::from_hex(&h.device_id().await).unwrap();
+    let station = ConvId::from_hex(&st).unwrap();
+    let id = ItemId::from_hex(&item).unwrap();
+    for msg in [
+        StationMsg::Remove {
+            station,
+            req: 1,
+            item: id,
+        },
+        StationMsg::SetPinned {
+            station,
+            req: 2,
+            item: id,
+            pinned: true,
+        },
+        StationMsg::Subscribe { station, since: 0 },
+    ] {
+        c.svc
+            .send_frame_for_test(&h_dev, Frame::Station(msg))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let v = items(&h, &st).await;
+    assert_eq!(v.len(), 1);
+    assert!(!v[0].pinned);
+    // 联系人没有收到快照，看不到该站点。
+    assert!(stations(&c).await.is_empty());
+}

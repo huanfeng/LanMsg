@@ -241,10 +241,20 @@ fn owned_station(
     Ok(info)
 }
 
+/// 应答里的错误文本：带固定前缀的变体只发内层文本，拉取端再包成 Rejected 时不会叠前缀。
+fn error_text(e: &CoreError) -> String {
+    match e {
+        CoreError::Rejected(s) | CoreError::InvalidArgument(s) | CoreError::NotFound(s) => {
+            s.clone()
+        }
+        other => other.to_string(),
+    }
+}
+
 async fn reply(inner: &Inner, to: &DeviceId, req: u64, r: Result<(), CoreError>) {
     let (ok, error) = match r {
         Ok(()) => (true, None),
-        Err(e) => (false, Some(e.to_string())),
+        Err(e) => (false, Some(error_text(&e))),
     };
     send_station(inner, to, StationMsg::Result { req, ok, error }).await;
 }
@@ -274,7 +284,7 @@ async fn on_announce(inner: &Arc<Inner>, peer: &PeerInfo, stations: Vec<StationI
             title: Some(info.name.clone()),
             created_at: info.created_at,
         });
-        let since = inner.store.synced_until(&info.station).unwrap_or(0);
+        let since = subscribe_since(inner.store.synced_until(&info.station).unwrap_or(0));
         send_station(
             inner,
             &peer.device,
@@ -288,8 +298,13 @@ async fn on_announce(inner: &Arc<Inner>, peer: &PeerInfo, stations: Vec<StationI
     }
 }
 
+/// Subscribe 的起点：水位回退 1 秒，边界上的重复项靠「取新者」去重。
+fn subscribe_since(water: i64) -> i64 {
+    water.saturating_sub(1_000).max(0)
+}
+
 fn on_snapshot(inner: &Arc<Inner>, peer: &PeerInfo, info: StationInfo, items: Vec<StationItem>) {
-    if !is_own(inner, peer) || info.host != peer.device {
+    if !is_own(inner, peer) || info.host != peer.device || Some(info.owner) != self_user(inner) {
         return;
     }
     // 只更新已通告过的站点。
@@ -304,7 +319,7 @@ fn on_snapshot(inner: &Arc<Inner>, peer: &PeerInfo, info: StationInfo, items: Ve
     if inner.store.upsert_station(&info).is_err() {
         return;
     }
-    apply_items(inner, peer.device, &info.station, items);
+    apply_items(inner, peer.device, &info.station, items, true);
 }
 
 fn on_delta(inner: &Arc<Inner>, peer: &PeerInfo, station: ConvId, items: Vec<StationItem>) {
@@ -315,12 +330,19 @@ fn on_delta(inner: &Arc<Inner>, peer: &PeerInfo, station: ConvId, items: Vec<Sta
         Ok(Some(old)) if old.host == peer.device => {}
         _ => return,
     }
-    apply_items(inner, peer.device, &station, items);
+    // Delta 不推进水位：水位只由快照推进，重连后的 Subscribe 会补上期间漏掉的增量。
+    apply_items(inner, peer.device, &station, items, false);
 }
 
 /// 镜像主机发来的条目：按 updated_at 取新者（迟到的旧版本和墓碑都不会倒退），
 /// 并记录主机为文件的持有者。
-fn apply_items(inner: &Arc<Inner>, host: DeviceId, station: &ConvId, items: Vec<StationItem>) {
+fn apply_items(
+    inner: &Arc<Inner>,
+    host: DeviceId,
+    station: &ConvId,
+    items: Vec<StationItem>,
+    advance_water: bool,
+) {
     let now = now_millis();
     let mut newest = inner.store.synced_until(station).unwrap_or(0);
     for item in items.into_iter().take(MAX_ITEMS_PER_MSG) {
@@ -328,13 +350,20 @@ fn apply_items(inner: &Arc<Inner>, host: DeviceId, station: &ConvId, items: Vec<
             continue;
         }
         match inner.store.get_station_item(&item.item) {
-            Ok(Some(old)) if old.station != *station || old.item.updated_at > item.updated_at => {
+            Ok(Some(old))
+                if old.station != *station
+                    || old.item.updated_at > item.updated_at
+                    // 墓碑不可逆：本地已删除的条目不被非删除版本复活。
+                    || (old.item.removed && !item.removed) =>
+            {
                 continue
             }
             Err(_) => continue,
             _ => {}
         }
-        newest = newest.max(item.updated_at);
+        if advance_water {
+            newest = newest.max(item.updated_at);
+        }
         let row = StationItemRow {
             item,
             station: *station,
@@ -353,7 +382,9 @@ fn apply_items(inner: &Arc<Inner>, host: DeviceId, station: &ConvId, items: Vec<
             }
         }
     }
-    let _ = inner.store.set_synced_until(station, newest);
+    if advance_water {
+        let _ = inner.store.set_synced_until(station, newest);
+    }
     station_updated(inner, station);
 }
 
@@ -429,7 +460,7 @@ async fn on_put(
             reply(inner, &peer.device, req, Ok(())).await;
             // 复制模式且内容尚未拉取：后台向放入者拉取。
             if !accepted.available && !accepted.removed {
-                spawn_pull(inner.clone(), station, accepted.item);
+                spawn_pull(inner.clone(), station, accepted.item, false);
             }
         }
         Err(e) => reply(inner, &peer.device, req, Err(e)).await,
@@ -437,7 +468,7 @@ async fn on_put(
 }
 
 /// 后台拉取一个复制模式条目（同一条目同时只拉一个）。
-pub(crate) fn spawn_pull(inner: Arc<Inner>, station: ConvId, item: ItemId) {
+pub(crate) fn spawn_pull(inner: Arc<Inner>, station: ConvId, item: ItemId, retry: bool) {
     {
         let mut set = inner
             .station_client
@@ -458,6 +489,10 @@ pub(crate) fn spawn_pull(inner: Arc<Inner>, station: ConvId, item: ItemId) {
             .remove(&item);
         match r {
             Ok(()) => {}
+            // 周期重试时放入者多半离线：只记 debug，避免每分钟刷警告。
+            Err(e) if retry => {
+                debug!(item = %item, error = %e, "retrying station item pull failed")
+            }
             Err(e) => warn!(item = %item, error = %e, "pulling station item failed"),
         }
     });
@@ -472,7 +507,7 @@ pub(crate) fn retry_pulls(inner: &Arc<Inner>) {
             .unwrap_or_default();
         for row in rows {
             if row.store_mode == Some(crate::store::StoreModeRow::Copy) && !row.item.available {
-                spawn_pull(inner.clone(), info.station, row.item.item);
+                spawn_pull(inner.clone(), info.station, row.item.item, true);
             }
         }
     }
@@ -509,7 +544,11 @@ async fn pull_item(inner: &Arc<Inner>, station: &ConvId, item: &ItemId) -> Resul
         wait_transfer(inner, &id).await?;
         // 并入了同哈希的其他传输时，目标位置可能没有文件：从本地行补一份。
         if !dest.exists() {
-            if let Some(local) = inner.store.get_local(&meta.hash)? {
+            let local = inner
+                .store
+                .get_local(&meta.hash)?
+                .ok_or_else(|| CoreError::NotFound("downloaded file has no local record".into()))?;
+            {
                 let (from, to) = (local.path, dest.clone());
                 tokio::task::spawn_blocking(move || {
                     if let Some(p) = to.parent() {
@@ -520,6 +559,9 @@ async fn pull_item(inner: &Arc<Inner>, station: &ConvId, item: &ItemId) -> Resul
                 .await
                 .map_err(|e| CoreError::Proto(format!("copy task failed: {e}")))??;
             }
+        }
+        if !dest.exists() {
+            return Err(CoreError::NotFound("copied file is missing".into()));
         }
     }
     // 拉取期间条目可能被删除：墓碑优先。
@@ -721,4 +763,27 @@ pub(crate) async fn remote_set_pinned(
         pinned,
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_text_has_no_variant_prefix() {
+        assert_eq!(
+            error_text(&CoreError::Rejected("access denied".into())),
+            "access denied"
+        );
+        assert_eq!(error_text(&CoreError::NotFound("x".into())), "x");
+        assert_eq!(error_text(&CoreError::InvalidArgument("y".into())), "y");
+        assert_eq!(error_text(&CoreError::PeerOffline), "peer device offline");
+    }
+
+    #[test]
+    fn subscribe_since_backs_off_one_second() {
+        assert_eq!(subscribe_since(10_000), 9_000);
+        assert_eq!(subscribe_since(500), 0);
+        assert_eq!(subscribe_since(0), 0);
+    }
 }
