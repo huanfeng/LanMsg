@@ -88,5 +88,51 @@ CREATE TRIGGER message_text_ai AFTER INSERT ON message_text_index BEGIN
   INSERT INTO message_text_fts(rowid, text) VALUES (new.id, new.text); END;
 CREATE TRIGGER message_text_ad AFTER DELETE ON message_text_index BEGIN
   INSERT INTO message_text_fts(message_text_fts, rowid, text) VALUES('delete', old.id, old.text); END;
+",    // 迁移 4（P5）：地址簿、手动设备、中转站、LocalSend 对端、Web 访客。
+    "
+CREATE TABLE known_addresses(device_id BLOB NOT NULL, addr TEXT NOT NULL, path TEXT NOT NULL,
+  last_ok INTEGER NOT NULL, source TEXT NOT NULL, PRIMARY KEY(device_id, addr));
+CREATE TABLE manual_peers(addr TEXT PRIMARY KEY, added_at INTEGER NOT NULL, device_id BLOB);
+CREATE TABLE stations(station_id BLOB PRIMARY KEY, name TEXT NOT NULL, host_device BLOB NOT NULL,
+  owner_user BLOB NOT NULL, acl BLOB NOT NULL, created_at INTEGER NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT 0, synced_until INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE station_items(item_id BLOB PRIMARY KEY, station_id BLOB NOT NULL, added_by BLOB NOT NULL,
+  added_at INTEGER NOT NULL, expires_at INTEGER, content BLOB NOT NULL, pinned INTEGER NOT NULL DEFAULT 0,
+  removed INTEGER NOT NULL DEFAULT 0, available INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL,
+  store_mode TEXT, local_path TEXT, local_size INTEGER, local_mtime INTEGER);
+CREATE INDEX station_items_by_station ON station_items(station_id, updated_at);
+CREATE TABLE station_blobs(item_id BLOB NOT NULL, hash BLOB NOT NULL, name TEXT NOT NULL,
+  size INTEGER NOT NULL, mime TEXT NOT NULL, rel_path TEXT, meta BLOB NOT NULL, PRIMARY KEY(item_id, hash));
+CREATE INDEX station_blobs_by_hash ON station_blobs(hash);
+CREATE TABLE localsend_peers(fingerprint TEXT PRIMARY KEY, pseudo_device BLOB NOT NULL, alias TEXT NOT NULL,
+  device_model TEXT, device_type TEXT, last_addr TEXT, protocol TEXT NOT NULL, port INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL, trusted INTEGER NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE web_guests(conv_id BLOB PRIMARY KEY, pseudo_device BLOB NOT NULL, user_agent TEXT NOT NULL,
+  ip TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER);
 ",
 ];
+
+#[cfg(test)]
+mod tests {
+    use crate::store::Store;
+
+    #[test]
+    fn p5_migration_creates_tables() {
+        let s = Store::open_in_memory().unwrap();
+        let conn = s.conn().unwrap();
+        for table in [
+            "known_addresses",
+            "manual_peers",
+            "stations",
+            "station_items",
+            "station_blobs",
+            "localsend_peers",
+            "web_guests",
+        ] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table}");
+        }
+    }
+}
