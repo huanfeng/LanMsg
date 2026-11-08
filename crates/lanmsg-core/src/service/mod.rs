@@ -411,6 +411,13 @@ impl Service {
         redial::force_off_subnet_for_tests(on);
     }
 
+    /// 测试辅助：覆盖本端看到的某对端 dial_addr（模拟对端在 NAT 后，直拨不通）。
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn override_dial_addr_for_test(&self, device: DeviceId, addr: SocketAddr) {
+        self.inner.conns.override_dial_addr_for_tests(device, addr);
+    }
+
     /// 测试辅助：重连任务循环迭代总数（检测空转）。
     #[doc(hidden)]
     pub fn redial_loop_iterations_for_test(&self) -> u64 {
@@ -621,6 +628,15 @@ async fn routing_task(
                         } else {
                             tracing::debug!(peer = %d, "connection no longer registered when frame arrived, dropped");
                         }
+                    }
+                    // 对端直拨不通，请求我们向它拨回一条数据连接（NAT 场景）。
+                    Frame::DataDialBack { token } => {
+                        let inner = inner.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = inner.conns.serve_dial_back(&d, token).await {
+                                tracing::warn!(peer = %d, error = %e, "serving dial-back request failed");
+                            }
+                        });
                     }
                     // 地址簿：限速后放到阻塞线程合并（批量写库），再唤醒相关设备的重连任务。
                     Frame::AddressBook(book) => {
@@ -978,18 +994,13 @@ impl Drop for DialingGuard {
 /// `connected`：调用方刚连上该地址，任务先等一个周期再拨，避免与刚建立的连接并发重复拨号。
 pub(crate) fn register_static_peer(inner: &Arc<Inner>, addr: SocketAddr, connected: bool) {
     if inner.static_peers.lock().unwrap().insert(addr) {
-        tokio::spawn(static_peer_task(inner.clone(), addr, connected, None));
+        tokio::spawn(static_peer_task(inner.clone(), addr, connected));
     }
 }
 
 /// 静态对端后台拨号：失败按 RETRY_MIN..RETRY_MAX 指数退避，连上后断开再重试。
 /// 退避睡眠与进行中的拨号都会被关停信号打断。
-async fn static_peer_task(
-    inner: Arc<Inner>,
-    addr: SocketAddr,
-    connected: bool,
-    manual_key: Option<String>,
-) {
+async fn static_peer_task(inner: Arc<Inner>, addr: SocketAddr, connected: bool) {
     let mut delay = RETRY_MIN;
     if connected && sleep_or_shutdown(&inner, RETRY_MIN).await {
         return;
@@ -1000,13 +1011,7 @@ async fn static_peer_task(
             _ = inner.conns.wait_shutdown() => return,
         };
         match result {
-            Ok(device) => {
-                // 手动对端（尤其是主机名条目）按存储键绑定到连上的设备。
-                if let Some(key) = &manual_key {
-                    if let Err(e) = inner.store.bind_manual_peer(key, &device) {
-                        tracing::warn!(error = %e, "binding manual peer failed");
-                    }
-                }
+            Ok(_) => {
                 delay = RETRY_MIN;
                 if sleep_or_shutdown(&inner, RETRY_MIN).await {
                     return;
@@ -1023,7 +1028,7 @@ async fn static_peer_task(
 }
 
 /// 睡眠 `d`；期间收到关停信号则提前返回 true。
-async fn sleep_or_shutdown(inner: &Inner, d: std::time::Duration) -> bool {
+pub(crate) async fn sleep_or_shutdown(inner: &Inner, d: std::time::Duration) -> bool {
     tokio::select! {
         _ = tokio::time::sleep(d) => false,
         _ = inner.conns.wait_shutdown() => true,

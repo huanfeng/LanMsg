@@ -451,17 +451,13 @@ async fn add_manual_peer(inner: &Arc<Inner>, addr: String) -> Result<Response, A
         return Err(invalid_arg("too many manual peers".into()));
     }
     // 先解析再落库：解析不了的地址不留记录。
-    let resolved = manual::resolve(&key).await?;
+    manual::resolve_all(&key).await?;
     inner
         .store
         .add_manual_peer(&key, now_millis())
         .map_err(crate::error::CoreError::from)?;
-    match inner.conns.connect(resolved, false).await {
-        Ok(device) => {
-            inner
-                .store
-                .bind_manual_peer(&key, &device)
-                .map_err(crate::error::CoreError::from)?;
+    match manual::connect_any(inner, &key).await {
+        Ok(_) => {
             // 断线（含对端重启、无 FIN 消失）后按退避自动重连；重启后也会恢复。
             manual::start(inner, key, true);
             Ok(Response::Ok)

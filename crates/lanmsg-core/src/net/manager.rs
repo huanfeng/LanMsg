@@ -12,9 +12,10 @@ use tokio::sync::{mpsc, watch};
 use crate::net::conn::{
     Accepted, ConnEvent, Connection, DataHandler, DataStream, ExitCleanup, HelloInfo, PeerInfo,
 };
+use crate::net::dialback::{DialBackTable, DIAL_BACK_WAIT};
 use crate::net::timing;
-use crate::net::tls::{make_tls_configs, TLS_SNI};
-use lanmsg_proto::consts::{CHANNEL_DATA, DUP_DIAL_GRACE_MS};
+use crate::net::tls::{make_tls_configs_expecting, TLS_SNI};
+use lanmsg_proto::consts::{CHANNEL_DATA, CHANNEL_DATA_DIAL_BACK, DUP_DIAL_GRACE_MS};
 use lanmsg_proto::data::{write_data_frame, DataFrame};
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::DeviceId;
@@ -39,6 +40,11 @@ struct ConnectionEntry {
     conn_id: u64,
 }
 
+/// 数据通道直拨超时：超过则改为请求对端拨回。
+const DIRECT_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// 拨回时的连接超时。
+const DIAL_BACK_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// 控制连接管理器（Clone，内部 Arc）。
 #[derive(Clone)]
 pub struct ConnManager {
@@ -62,6 +68,11 @@ struct Inner {
     cert_overrides: std::sync::Mutex<HashMap<DeviceId, DeviceCert>>,
     /// 已 shutdown：握手中的连接此后到达不得再登记（否则成为关不掉的僵尸连接）。
     closed: bool,
+    /// 反向数据通道的等待者表。
+    dial_back: Arc<DialBackTable>,
+    /// 测试钩子：覆盖对端的 dial_addr（模拟对端在 NAT 后、直拨不通）。
+    #[cfg(feature = "test-hooks")]
+    dial_addr_overrides: std::sync::Mutex<HashMap<DeviceId, SocketAddr>>,
 }
 
 impl ConnManager {
@@ -109,6 +120,9 @@ impl ConnManager {
             device_key: Arc::new(device_key),
             cert_overrides: std::sync::Mutex::new(HashMap::new()),
             closed: false,
+            dial_back: Arc::new(DialBackTable::default()),
+            #[cfg(feature = "test-hooks")]
+            dial_addr_overrides: std::sync::Mutex::new(HashMap::new()),
         };
 
         let manager = ConnManager {
@@ -429,24 +443,58 @@ impl ConnManager {
         self.write_inner().data_handler = Some(h);
     }
 
-    /// 数据连接：向 `peer.dial_addr` 拨号（不用 `addr`：被拨方看到的是对端
-    /// 临时源端口），TLS 后写通道字节 CHANNEL_DATA 与 DataHello。
+    /// 数据连接：先向 `peer.dial_addr` 直拨（不用 `addr`：被拨方看到的是对端
+    /// 临时源端口）；直拨失败（出错或 3 秒超时，例如对端在 NAT 后）时改为经控制连接
+    /// 请求对端拨回（见 [`ConnManager::open_data_via_dial_back`]）。
     pub async fn open_data(&self, device: &DeviceId) -> Result<DataStream, CoreError> {
         let peer = self.peer(device).ok_or(CoreError::PeerOffline)?;
-        let addr = peer.dial_addr;
-        let device_key = self.device_key();
         // 未初始化设备没有证书，无法自证身份，数据通道不可用。
-        let own_cert = {
-            let inner = self.read_inner();
-            let cert = inner.hello_rx.borrow().cert.clone();
-            cert
+        let own_cert = self.own_cert()?;
+        let direct = tokio::time::timeout(
+            DIRECT_DIAL_TIMEOUT,
+            self.dial_data(
+                self.direct_dial_addr(&peer),
+                None,
+                own_cert,
+                CHANNEL_DATA,
+                None,
+            ),
+        )
+        .await;
+        match direct {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(e)) => {
+                tracing::debug!(peer = %device, error = %e, "direct data dial failed, requesting dial-back");
+                self.open_data_via_dial_back(device).await
+            }
+            Err(_) => {
+                tracing::debug!(peer = %device, "direct data dial timed out, requesting dial-back");
+                self.open_data_via_dial_back(device).await
+            }
         }
-        .ok_or_else(|| {
-            CoreError::Rejected("local identity not initialized, data channel unavailable".into())
-        })?;
+    }
 
+    /// 本机设备证书（未初始化返回 Rejected）。
+    fn own_cert(&self) -> Result<DeviceCert, CoreError> {
+        let inner = self.read_inner();
+        let cert = inner.hello_rx.borrow().cert.clone();
+        cert.ok_or_else(|| {
+            CoreError::Rejected("local identity not initialized, data channel unavailable".into())
+        })
+    }
+
+    /// 建立一条数据连接：TCP → TLS（可校验对端设备）→ 通道字节 → DataHello →（可选）DialBack。
+    async fn dial_data(
+        &self,
+        addr: SocketAddr,
+        expect: Option<DeviceId>,
+        own_cert: DeviceCert,
+        channel: u8,
+        token: Option<[u8; 16]>,
+    ) -> Result<DataStream, CoreError> {
         let stream = TcpStream::connect(addr).await.map_err(CoreError::Io)?;
-        let (_server_config, client_config) = make_tls_configs(&device_key)?;
+        let (_server_config, client_config) =
+            make_tls_configs_expecting(&self.device_key(), expect)?;
         let domain = ServerName::try_from(TLS_SNI.as_bytes())
             .map_err(|e| CoreError::Tls(format!("invalid SNI: {e}")))?;
         let mut tls_stream = tokio_rustls::TlsStream::from(
@@ -456,13 +504,119 @@ impl ConnManager {
                 .map_err(|e| CoreError::Tls(e.to_string()))?,
         );
         tls_stream
-            .write_all(&[CHANNEL_DATA])
+            .write_all(&[channel])
             .await
             .map_err(CoreError::Io)?;
         write_data_frame(&mut tls_stream, &DataFrame::DataHello { cert: own_cert })
             .await
             .map_err(|e| CoreError::Tls(e.to_string()))?;
+        if let Some(token) = token {
+            write_data_frame(&mut tls_stream, &DataFrame::DialBack { token })
+                .await
+                .map_err(|e| CoreError::Tls(e.to_string()))?;
+        }
         Ok(tls_stream)
+    }
+
+    /// 反向建立：登记一次性令牌 → 经控制连接发 DataDialBack → 最多等 10 秒对端拨回。
+    /// 超时返回 `PeerOffline`。返回的流虽由对方拨入（TLS 服务端角色），
+    /// 逻辑上仍是请求方（先发 GetMeta/GetRange）。
+    pub(crate) async fn open_data_via_dial_back(
+        &self,
+        device: &DeviceId,
+    ) -> Result<DataStream, CoreError> {
+        let table = self.read_inner().dial_back.clone();
+        let (token, rx) = table.register(*device, DIAL_BACK_WAIT);
+        if let Err(e) = self.send(device, Frame::DataDialBack { token }).await {
+            table.cancel(&token);
+            return Err(e);
+        }
+        match tokio::time::timeout(DIAL_BACK_WAIT, rx).await {
+            Ok(Ok(stream)) => Ok(stream),
+            _ => {
+                table.cancel(&token);
+                Err(CoreError::PeerOffline)
+            }
+        }
+    }
+
+    /// 收到对端的 DataDialBack：向其监听地址（控制连接远端 IP + Hello.listen_port）
+    /// 建数据连接并出示令牌，随后按普通入站数据连接交给数据处理器（本端仍是服务方）。
+    /// 只拨对端自己的地址，不会被诱导去连第三方。
+    pub(crate) async fn serve_dial_back(
+        &self,
+        device: &DeviceId,
+        token: [u8; 16],
+    ) -> Result<(), CoreError> {
+        let peer = self.peer(device).ok_or(CoreError::PeerOffline)?;
+        let stream = self.dial_back_stream(device, token).await?;
+        let handler = {
+            let inner = self.read_inner();
+            if inner.closed {
+                return Err(CoreError::PeerOffline);
+            }
+            inner.data_handler.clone()
+        };
+        match handler {
+            Some(h) => {
+                h(peer, stream);
+                Ok(())
+            }
+            None => Err(CoreError::Rejected("data channel not enabled".into())),
+        }
+    }
+
+    /// 拨回并出示令牌，返回已就绪的数据流（不交给处理器）。
+    pub(crate) async fn dial_back_stream(
+        &self,
+        device: &DeviceId,
+        token: [u8; 16],
+    ) -> Result<DataStream, CoreError> {
+        let peer = self.peer(device).ok_or(CoreError::PeerOffline)?;
+        let own_cert = self.own_cert()?;
+        tokio::time::timeout(
+            DIAL_BACK_DIAL_TIMEOUT,
+            self.dial_data(
+                peer.dial_addr,
+                Some(*device),
+                own_cert,
+                CHANNEL_DATA_DIAL_BACK,
+                Some(token),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "dial-back connect timed out",
+            ))
+        })?
+    }
+
+    /// 直拨地址：生产环境即对端的 dial_addr；测试钩子可覆盖以模拟直拨不通。
+    fn direct_dial_addr(&self, peer: &PeerInfo) -> SocketAddr {
+        #[cfg(feature = "test-hooks")]
+        if let Some(a) = self
+            .read_inner()
+            .dial_addr_overrides
+            .lock()
+            .unwrap()
+            .get(&peer.device)
+        {
+            return *a;
+        }
+        peer.dial_addr
+    }
+
+    /// 测试辅助：覆盖本端看到的某对端 dial_addr（模拟该对端在 NAT 后，直拨不通）。
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn override_dial_addr_for_tests(&self, device: DeviceId, addr: SocketAddr) {
+        self.read_inner()
+            .dial_addr_overrides
+            .lock()
+            .unwrap()
+            .insert(device, addr);
     }
 
     /// 查询已上线对端的信息（含 tls_exporter 与 dial_addr；应用证书覆盖）。
@@ -544,7 +698,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
 
         let inner_clone = inner.clone();
         tokio::spawn(async move {
-            let (self_device, device_key, accept_filter, data_handler, events, cleanup) = {
+            let (self_device, device_key, accept_filter, data_handler, events, cleanup, dial_back) = {
                 let guard = inner_clone.read().unwrap();
                 (
                     guard.self_device,
@@ -553,6 +707,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                     guard.data_handler.clone(),
                     guard.events.clone(),
                     make_exit_cleanup(&inner_clone),
+                    guard.dial_back.clone(),
                 )
             };
 
@@ -588,6 +743,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
                     accept_filter.as_ref(),
                     events,
                     data_handler,
+                    dial_back.as_ref(),
                     cleanup,
                 ),
             )
@@ -688,6 +844,7 @@ async fn accept_loop(listener: TcpListener, listen_port: u16, inner: Arc<RwLock<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::tls::make_tls_configs;
     use std::time::Duration;
     use tokio::sync::{mpsc, watch};
 
@@ -1357,5 +1514,62 @@ mod tests {
         }
         expect_no_up(&mut events_b).await;
         expect_no_up(&mut events_a).await;
+    }
+
+    /// 两个已互连、带证书的管理器（A 拨 B）。
+    async fn connected_pair() -> (ConnManager, ConnManager, DeviceId, DeviceId) {
+        let (mgr_a, mut events_a, dev_a, _ca) = make_manager_with_cert().await;
+        let (mgr_b, mut events_b, dev_b, _cb) = make_manager_with_cert().await;
+        mgr_a.connect(mgr_b.local_addr(), false).await.unwrap();
+        expect_up(&mut events_a, dev_b).await;
+        expect_up(&mut events_b, dev_a).await;
+        // 事件通道不再被读取时发送端会阻塞，后台持续排空。
+        tokio::spawn(async move { while events_a.recv().await.is_some() {} });
+        tokio::spawn(async move { while events_b.recv().await.is_some() {} });
+        (mgr_a, mgr_b, dev_a, dev_b)
+    }
+
+    /// 令牌由设备 A 登记，等待者交给 A；B 拨回出示令牌后 A 拿到数据流，令牌随即作废。
+    #[tokio::test]
+    async fn dial_back_token_single_use() {
+        let (mgr_a, mgr_b, dev_a, dev_b) = connected_pair().await;
+        let table = mgr_a.read_inner().dial_back.clone();
+        let (token, rx) = table.register(dev_b, DIAL_BACK_WAIT);
+
+        // 第一次：B 拨回，A 的等待者收到流。
+        let _stream = mgr_b.dial_back_stream(&dev_a, token).await.unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(5), rx).await;
+        assert!(matches!(got, Ok(Ok(_))), "waiter should receive the stream");
+
+        // 第二次：同一令牌已作废，A 关闭连接，B 读不到数据。
+        let mut stream2 = mgr_b.dial_back_stream(&dev_a, token).await.unwrap();
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0u8; 1];
+        let r = tokio::time::timeout(Duration::from_secs(5), stream2.read(&mut buf)).await;
+        assert!(
+            matches!(r, Ok(Ok(0)) | Ok(Err(_))),
+            "reused token must be rejected, got {r:?}"
+        );
+    }
+
+    /// 令牌登记给另一台设备时，B 出示该令牌被拒绝，且不消耗令牌。
+    #[tokio::test]
+    async fn dial_back_rejects_wrong_device() {
+        let (mgr_a, mgr_b, dev_a, _dev_b) = connected_pair().await;
+        let table = mgr_a.read_inner().dial_back.clone();
+        let other = DeviceId([0x55; 32]);
+        let (token, mut rx) = table.register(other, DIAL_BACK_WAIT);
+
+        let mut stream = mgr_b.dial_back_stream(&dev_a, token).await.unwrap();
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0u8; 1];
+        let r = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
+        assert!(
+            matches!(r, Ok(Ok(0)) | Ok(Err(_))),
+            "foreign token must be rejected, got {r:?}"
+        );
+        assert!(rx.try_recv().is_err(), "waiter must not receive a stream");
+        // 令牌仍属于原设备（未被第三方烧掉）。
+        assert!(table.claim(&token, &other).is_some());
     }
 }

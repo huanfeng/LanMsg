@@ -21,6 +21,7 @@ pub const TYPE_CONTACT_REQUEST: u16 = 40;
 pub const TYPE_CONTACT_RESPONSE: u16 = 41;
 pub const TYPE_REVOCATION: u16 = 42;
 pub const TYPE_CERT_UPDATE: u16 = 43;
+pub const TYPE_DATA_DIAL_BACK: u16 = 44;
 pub const TYPE_ADDRESS_BOOK: u16 = 50;
 pub const TYPE_STATION: u16 = 60;
 pub const TYPE_ERROR: u16 = 99;
@@ -42,6 +43,7 @@ pub enum Frame {
     ContactResponse(crate::types::ContactResponse), // 41
     Revocation(crate::types::Revocation),           // 42
     CertUpdate(Vec<DeviceCert>),                    // 43
+    DataDialBack { token: [u8; 16] },               // 44
     AddressBook(crate::addrbook::AddressBook),      // 50
     Station(crate::station::StationMsg),            // 60
     Error { code: u16, message: String },           // 99
@@ -124,6 +126,7 @@ impl Frame {
             Frame::ContactResponse(_) => TYPE_CONTACT_RESPONSE,
             Frame::Revocation(_) => TYPE_REVOCATION,
             Frame::CertUpdate(_) => TYPE_CERT_UPDATE,
+            Frame::DataDialBack { .. } => TYPE_DATA_DIAL_BACK,
             Frame::AddressBook(_) => TYPE_ADDRESS_BOOK,
             Frame::Station(_) => TYPE_STATION,
             Frame::Error { .. } => TYPE_ERROR,
@@ -148,6 +151,7 @@ impl Frame {
             Frame::ContactResponse(r) => to_cbor(r),
             Frame::Revocation(r) => to_cbor(r),
             Frame::CertUpdate(certs) => to_cbor(certs),
+            Frame::DataDialBack { token } => to_cbor(token),
             Frame::AddressBook(b) => to_cbor(b),
             Frame::Station(m) => to_cbor(m),
             Frame::Error { code, message } => to_cbor(&ErrorPayload {
@@ -238,6 +242,11 @@ impl Frame {
                 let certs: Vec<DeviceCert> =
                     ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
                 Ok(Frame::CertUpdate(certs))
+            }
+            TYPE_DATA_DIAL_BACK => {
+                let token: [u8; 16] =
+                    ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
+                Ok(Frame::DataDialBack { token })
             }
             TYPE_ADDRESS_BOOK => {
                 let b: crate::addrbook::AddressBook =
@@ -409,6 +418,10 @@ mod tests {
             99
         );
         assert_eq!(Frame::Unknown(777).type_id(), 777);
+        assert_eq!(TYPE_DATA_DIAL_BACK, 44);
+        assert_eq!(Frame::DataDialBack { token: [1; 16] }.type_id(), 44);
+        let f = Frame::DataDialBack { token: [7; 16] };
+        assert_eq!(Frame::decode(44, &f.encode_payload()).unwrap(), f);
         assert_eq!(TYPE_ADDRESS_BOOK, 50);
         assert_eq!(TYPE_STATION, 60);
         assert_eq!(

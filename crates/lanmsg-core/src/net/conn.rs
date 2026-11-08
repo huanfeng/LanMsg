@@ -21,7 +21,9 @@ use tokio_rustls::TlsConnector;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use lanmsg_proto::codec::FrameCodec;
-use lanmsg_proto::consts::{CHANNEL_CONTROL, CHANNEL_DATA, PAIR_TLS_EXPORTER_LABEL, PROTO_VERSION};
+use lanmsg_proto::consts::{
+    CHANNEL_CONTROL, CHANNEL_DATA, CHANNEL_DATA_DIAL_BACK, PAIR_TLS_EXPORTER_LABEL, PROTO_VERSION,
+};
 use lanmsg_proto::data::{read_data_frame, DataFrame};
 use lanmsg_proto::frame::{Frame, Hello};
 use lanmsg_proto::ids::DeviceId;
@@ -315,6 +317,7 @@ impl Connection {
         accept_filter: &(dyn Fn(&PeerInfo) -> bool + Send + Sync),
         event_tx: mpsc::Sender<ConnEvent>,
         data_handler: Option<DataHandler>,
+        dial_back: &crate::net::dialback::DialBackTable,
         cleanup: ExitCleanup,
     ) -> Result<Accepted, CoreError> {
         let peer_addr = stream.peer_addr().map_err(CoreError::Io)?;
@@ -372,6 +375,33 @@ impl Connection {
                     // 未设置处理器：直接关闭。
                     None => Err(CoreError::Rejected("data channel not enabled".into())),
                 }
+            }
+            // 反向建立的数据通道：DataHello 之后必须是 DialBack{token}，
+            // 令牌须由同一设备登记过且未过期；数据流交给等待者，不交给数据处理器。
+            CHANNEL_DATA_DIAL_BACK => {
+                let peer_info = accept_data(
+                    &mut tls_stream,
+                    peer_addr,
+                    peer_device,
+                    tls_exporter,
+                    accept_filter,
+                )
+                .await?;
+                let frame = read_data_frame(&mut tls_stream)
+                    .await
+                    .map_err(|e| CoreError::Tls(e.to_string()))?;
+                let DataFrame::DialBack { token } = frame else {
+                    return Err(CoreError::Proto(
+                        "DataHello on a dial-back channel must be followed by DialBack".into(),
+                    ));
+                };
+                let Some(waiter) = dial_back.claim(&token, &peer_info.device) else {
+                    tracing::warn!(peer = %peer_info.device, "unknown, expired or foreign dial-back token");
+                    return Err(CoreError::Rejected("invalid dial-back token".into()));
+                };
+                // 等待者已放弃（超时）时流随之丢弃。
+                let _ = waiter.send(tls_stream);
+                Ok(Accepted::Data(peer_info))
             }
             other => Err(CoreError::Rejected(format!(
                 "unknown channel byte {other:#x}"

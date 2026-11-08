@@ -35,7 +35,9 @@
   - 实施补充：`merge` 增加 `self_user` 参数（判断来源是否为自己的设备），另有 `merge_devices` 返回被写入地址的设备供唤醒重连；`add_manual_peer` 存解析后的 `ip:port`，连接失败返回 `PeerOffline` 但保留记录；地址簿除上线时发送外，联系人变化 1 秒后与每 30 秒再推一次（设备记录与地址到达顺序不固定）；`on_up` 对已吊销设备补一道断开（出站连接不经 accept_filter）。
   - 防滥用与准入（第 2 轮）：出站连接也经 accept_filter（`connect_outbound` 读到对端 Hello 后、等待确认前；准入查询出错一律拒绝），`on_up` 吊销检查保留为兜底。地址簿最多 256 个条目、每条目 8 个地址，同一对端 10 秒内最多处理 5 个，合并在 `spawn_blocking` 里单事务完成；只收私网/CGNAT/ULA 地址（测试钩子 `allow_loopback_for_tests` 例外），路径用本机网卡重判；每设备 Exchanged 最多 4 条且最先淘汰。手动对端记录规范化的 host:port（主机名启动时重新解析），上限 32，新增 `RemoveManualPeer`、`ListManualPeers`（C5 追加，Android 需重新生成 uniffi 绑定）。
   - 已知限制与行为变化（第 3 轮）：地址簿白名单（私网/CGNAT/ULA）不传播全局 IPv6、公网段 VPN、fe80 链路本地与 `::ffff:` 映射地址（这些仍可经发现、直连或手动添加使用）；手动添加公网 IP 的陌生人，出站也被规则 7 拒绝（v1 预期，公网/DDNS 留待后续）；出站准入对称后，我方 Hello 在过滤前已发出（协议顺序决定，过滤需要对端 Hello 里的证书）。主机名条目由后台任务连上后按存储键绑定设备；CLI 增加 `remove-peer`、`list-manual-peers`。
+  - 手动对端主机名解析优先 IPv4，解析出的多个地址逐个尝试、失败回退下一个（每轮重连重新解析）。
 - **T3B（新增）：NAT 下数据通道反向建立**。问题：`open_data` 固定向 `peer.dial_addr` 拨号（manager.rs:430），对端在 NAT 或端口转发后面、只能由它连进来时，文件传输失败。
+  - 实施补充：反向数据连接使用新的通道字节 `CHANNEL_DATA_DIAL_BACK = 0x03`（DataHello 之后紧跟 `DataFrame::DialBack`，类型号 7），原因是普通数据连接在 DataHello 之后直接进入请求/应答，接受方无法预读下一帧来区分；令牌设备不符时不消耗令牌；拨回只拨对端自己的监听地址，不会被诱导去连第三方；测试钩子 `override_dial_addr_for_test` 模拟直拨不通。
   - 新帧 `Frame::DataDialBack { token: [u8; 16] }`，`TYPE_DATA_DIAL_BACK = 44`。
   - 新数据帧 `DataFrame::DialBack { token }`，在 `DataHello` 之后发送。
   - `open_data`：直拨失败（连接错误，或 3 秒超时）时，生成随机 token，登记一个 oneshot 等待者，经控制连接发出 `DataDialBack`，最多等 10 秒，超时返回 `PeerOffline`。

@@ -129,6 +129,10 @@ pub const CHANNEL_CONTROL: u8 = 0x01;
 /// TLS 握手后拨号方写的首字节：数据通道。
 pub const CHANNEL_DATA: u8 = 0x02;
 
+/// TLS 握手后拨号方写的首字节：反向建立的数据通道（NAT 下由被请求方拨回，
+/// 首帧 DataHello 之后紧跟 DialBack 帧）。
+pub const CHANNEL_DATA_DIAL_BACK: u8 = 0x03;
+
 /// 数据通道空闲超时。
 pub const DATA_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 

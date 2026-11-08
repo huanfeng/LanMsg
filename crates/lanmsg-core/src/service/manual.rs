@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use lanmsg_proto::consts::{RETRY_MAX, RETRY_MIN, SERVICE_PORT};
 
+use lanmsg_proto::ids::DeviceId;
+
 use super::Inner;
 use crate::error::CoreError;
 
@@ -79,25 +81,47 @@ pub(crate) fn parse_manual_target(input: &str) -> Result<ManualTarget, CoreError
     Ok(ManualTarget::Host(host.to_ascii_lowercase(), port))
 }
 
-/// 把存储键解析成可拨号的地址（主机名走 DNS）。
-pub(crate) async fn resolve(key: &str) -> Result<SocketAddr, CoreError> {
+/// 把存储键解析成可拨号的地址列表（主机名走 DNS），IPv4 在前、IPv6 在后。
+pub(crate) async fn resolve_all(key: &str) -> Result<Vec<SocketAddr>, CoreError> {
     if let Ok(a) = key.parse::<SocketAddr>() {
-        return Ok(a);
+        return Ok(vec![a]);
     }
+    let fail = || CoreError::InvalidArgument(format!("cannot resolve address: {key}"));
     // IPv4 优先：监听端口默认绑定 IPv4，而 localhost 之类可能先解析出 ::1。
     let mut found: Vec<SocketAddr> = tokio::net::lookup_host(key)
         .await
-        .map_err(|_| CoreError::InvalidArgument(format!("cannot resolve address: {key}")))?
+        .map_err(|_| fail())?
         .collect();
     found.sort_by_key(|a| a.is_ipv6());
-    found
-        .into_iter()
-        .next()
-        .ok_or_else(|| CoreError::InvalidArgument(format!("cannot resolve address: {key}")))
+    if found.is_empty() {
+        return Err(fail());
+    }
+    Ok(found)
 }
 
-/// 启动某个手动对端的后台任务：先（重复）解析，再按退避持续重连；同一键只启动一次。
-/// `connected`：调用方刚连上，先等一个周期再拨。
+/// 依次尝试解析出的地址，第一个连上的为准，并按存储键绑定设备。
+pub(crate) async fn connect_any(inner: &Inner, key: &str) -> Result<DeviceId, CoreError> {
+    let mut last = CoreError::PeerOffline;
+    for addr in resolve_all(key).await? {
+        let result = tokio::select! {
+            r = inner.conns.connect(addr, false) => r,
+            _ = inner.conns.wait_shutdown() => return Err(CoreError::PeerOffline),
+        };
+        match result {
+            Ok(device) => {
+                if let Err(e) = inner.store.bind_manual_peer(key, &device) {
+                    tracing::warn!(error = %e, "binding manual peer failed");
+                }
+                return Ok(device);
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// 启动某个手动对端的后台任务：每轮重新解析并依次尝试各地址，失败按退避重试；
+/// 同一键只启动一次。`connected`：调用方刚连上，先等一个周期再拨。
 pub(crate) fn start(inner: &Arc<Inner>, key: String, connected: bool) {
     let mut tasks = inner.manual_tasks.lock().unwrap();
     if tasks.contains_key(&key) {
@@ -106,19 +130,24 @@ pub(crate) fn start(inner: &Arc<Inner>, key: String, connected: bool) {
     let task_inner = inner.clone();
     let task_key = key.clone();
     let handle = tokio::spawn(async move {
+        let inner = task_inner;
         let mut delay = RETRY_MIN;
-        let addr = loop {
-            match resolve(&task_key).await {
-                Ok(a) => break a,
-                Err(_) => {
-                    if super::sleep_or_shutdown(&task_inner, delay).await {
-                        return;
-                    }
-                    delay = (delay * 2).min(RETRY_MAX);
+        if connected && super::sleep_or_shutdown(&inner, RETRY_MIN).await {
+            return;
+        }
+        while !inner.conns.is_shut_down() {
+            if connect_any(&inner, &task_key).await.is_ok() {
+                delay = RETRY_MIN;
+                if super::sleep_or_shutdown(&inner, RETRY_MIN).await {
+                    return;
                 }
+            } else {
+                if super::sleep_or_shutdown(&inner, delay).await {
+                    return;
+                }
+                delay = (delay * 2).min(RETRY_MAX);
             }
-        };
-        super::static_peer_task(task_inner, addr, connected, Some(task_key)).await;
+        }
     });
     tasks.insert(key, handle.abort_handle());
 }

@@ -22,6 +22,7 @@ pub const TYPE_META: u16 = 3;
 pub const TYPE_NOT_FOUND: u16 = 4;
 pub const TYPE_GET_RANGE: u16 = 5;
 pub const TYPE_RANGE_START: u16 = 6;
+pub const TYPE_DIAL_BACK: u16 = 7;
 pub const TYPE_DATA_ERROR: u16 = 99;
 
 /// 数据连接帧（独立于控制连接的 `Frame` 类型号空间）。
@@ -47,6 +48,8 @@ pub enum DataFrame {
     }, // 5
     /// 段开始；之后紧跟 len 个原始字节（不经过帧）。
     RangeStart { offset: u64, len: u64 }, // 6
+    /// 反向建立的数据连接：在 DataHello 之后出示请求方给的一次性令牌。
+    DialBack { token: [u8; 16] }, // 7
     /// 错误。
     Error { code: u16, message: String }, // 99
 }
@@ -61,6 +64,7 @@ impl DataFrame {
             DataFrame::NotFound { .. } => TYPE_NOT_FOUND,
             DataFrame::GetRange { .. } => TYPE_GET_RANGE,
             DataFrame::RangeStart { .. } => TYPE_RANGE_START,
+            DataFrame::DialBack { .. } => TYPE_DIAL_BACK,
             DataFrame::Error { .. } => TYPE_DATA_ERROR,
         }
     }
@@ -78,6 +82,7 @@ impl DataFrame {
             DataFrame::NotFound { hash } => to_cbor(hash),
             DataFrame::GetRange { hash, offset, len } => to_cbor(&(hash, offset, len)),
             DataFrame::RangeStart { offset, len } => to_cbor(&(*offset, *len)),
+            DataFrame::DialBack { token } => to_cbor(token),
             DataFrame::Error { code, message } => to_cbor(&(code, message)),
         }
     }
@@ -111,6 +116,9 @@ impl DataFrame {
                 let (offset, len) = from_cbor(payload).map_err(|_| fail())?;
                 DataFrame::RangeStart { offset, len }
             }
+            TYPE_DIAL_BACK => DataFrame::DialBack {
+                token: from_cbor(payload).map_err(|_| fail())?,
+            },
             TYPE_DATA_ERROR => {
                 let (code, message) = from_cbor(payload).map_err(|_| fail())?;
                 DataFrame::Error { code, message }
@@ -184,6 +192,7 @@ mod tests {
                 size: 42,
                 segment_hashes: vec![[1u8; 32], [2u8; 32]],
             },
+            DataFrame::DialBack { token: [9u8; 16] },
             DataFrame::Error {
                 code: 5,
                 message: "出错".into(),
