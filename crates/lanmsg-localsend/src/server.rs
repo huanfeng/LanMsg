@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
-use std::net::{SocketAddr, TcpListener};
+use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,6 +32,11 @@ const PREPARE_BODY_LIMIT: usize = 1024 * 1024;
 const DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 /// 会话无活动超过该时长后，允许被新的 prepare-upload 取代。
 const SESSION_IDLE: Duration = Duration::from_secs(300);
+/// 已发现对端的保留数量上限与存活时间。
+const PEERS_MAX: usize = 256;
+const PEER_TTL: Duration = Duration::from_secs(30 * 60);
+/// 落盘文件名的 UTF-8 字节上限。
+const FILE_NAME_MAX_BYTES: usize = 200;
 
 /// 启动配置。
 pub struct LsConfig {
@@ -107,8 +112,6 @@ struct SessionFile {
 struct Session {
     id: String,
     peer: LsPeer,
-    /// 审批中占位：尚无文件，不接受 upload。
-    pending: bool,
     files: HashMap<String, SessionFile>,
     last_activity: Instant,
 }
@@ -119,7 +122,7 @@ pub(crate) struct Inner {
     pub(crate) client: reqwest::Client,
     download_dir: PathBuf,
     events: mpsc::Sender<LsEvent>,
-    peers: Mutex<HashMap<String, LsPeer>>,
+    peers: Mutex<HashMap<(IpAddr, String), (LsPeer, Instant)>>,
     session: Mutex<Option<Session>>,
     handle: axum_server::Handle,
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -227,7 +230,12 @@ impl LocalSend {
 
     /// 已发现的对端。
     pub fn peers(&self) -> Vec<LsPeer> {
-        lock(&self.inner.peers).values().cloned().collect()
+        let now = Instant::now();
+        lock(&self.inner.peers)
+            .values()
+            .filter(|(_, t)| now.duration_since(*t) < PEER_TTL)
+            .map(|(p, _)| p.clone())
+            .collect()
     }
 
     /// 停止服务与发现。
@@ -240,19 +248,21 @@ impl LocalSend {
     }
 }
 
-/// 显式指定 ring 作为密码库，不依赖进程级默认 provider（依赖树里同时存在 ring 与 aws-lc-rs）。
+/// 显式指定 aws-lc-rs 作为密码库，不依赖进程级默认 provider（与 core 保持同一个密码库）。
 fn server_tls_config(c: &cert::LsCert) -> Result<rustls::ServerConfig, LsError> {
     let tls_err = |e: rustls::Error| LsError::Tls(e.to_string());
     let key = rustls::pki_types::PrivatePkcs8KeyDer::from(c.key_der.clone());
-    rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(tls_err)?
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![rustls::pki_types::CertificateDer::from(c.cert_der.clone())],
-            key.into(),
-        )
-        .map_err(tls_err)
+    rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(tls_err)?
+    .with_no_client_auth()
+    .with_single_cert(
+        vec![rustls::pki_types::CertificateDer::from(c.cert_der.clone())],
+        key.into(),
+    )
+    .map_err(tls_err)
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -263,7 +273,25 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl Inner {
     /// 记录对端并上报 `PeerSeen`（通道满则丢弃）。
     fn note_peer(&self, peer: LsPeer) {
-        lock(&self.peers).insert(peer.info.fingerprint.clone(), peer.clone());
+        {
+            let now = Instant::now();
+            let mut peers = lock(&self.peers);
+            let key = (peer.ip, peer.info.fingerprint.clone());
+            if !peers.contains_key(&key) {
+                peers.retain(|_, (_, t)| now.duration_since(*t) < PEER_TTL);
+                if peers.len() >= PEERS_MAX {
+                    // 容量满：淘汰最久未见的
+                    if let Some(oldest) = peers
+                        .iter()
+                        .min_by_key(|(_, (_, t))| *t)
+                        .map(|(k, _)| k.clone())
+                    {
+                        peers.remove(&oldest);
+                    }
+                }
+            }
+            peers.insert(key, (peer.clone(), now));
+        }
         let _ = self.events.try_send(LsEvent::PeerSeen(peer));
     }
 }
@@ -297,6 +325,12 @@ fn new_token() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
+/// 当前会话是否禁止被新的 prepare-upload 取代：有文件正在接收，或仍在无活动窗口内。
+fn session_blocks_takeover(sess: &Session) -> bool {
+    sess.files.values().any(|f| f.state == FileState::Receiving)
+        || sess.last_activity.elapsed() < SESSION_IDLE
+}
+
 async fn prepare_upload(
     State(s): State<Arc<Inner>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -314,28 +348,13 @@ async fn prepare_upload(
     };
     s.note_peer(peer.clone());
 
-    // 占位：同一时刻只允许一个会话
+    // 提前拒绝，避免对用户弹出注定失败的请求
+    if lock(&s.session)
+        .as_ref()
+        .is_some_and(session_blocks_takeover)
     {
-        let mut g = lock(&s.session);
-        if let Some(cur) = g.as_ref() {
-            if cur.last_activity.elapsed() < SESSION_IDLE {
-                return StatusCode::CONFLICT.into_response();
-            }
-        }
-        *g = Some(Session {
-            id: String::new(),
-            peer: peer.clone(),
-            pending: true,
-            files: HashMap::new(),
-            last_activity: Instant::now(),
-        });
+        return StatusCode::CONFLICT.into_response();
     }
-    let release_pending = |s: &Inner| {
-        let mut g = lock(&s.session);
-        if g.as_ref().is_some_and(|x| x.pending) {
-            *g = None;
-        }
-    };
 
     let (reply, rx) = oneshot::channel();
     let text_only = req.files.len() == 1
@@ -361,16 +380,13 @@ async fn prepare_upload(
         }
     };
     if s.events.send(event).await.is_err() {
-        release_pending(&s);
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     let decision = tokio::time::timeout(DECISION_TIMEOUT, rx).await;
     if !matches!(decision, Ok(Ok(LsDecision::Accept))) {
-        release_pending(&s);
         return StatusCode::FORBIDDEN.into_response();
     }
     if text_only {
-        release_pending(&s);
         return StatusCode::NO_CONTENT.into_response();
     }
 
@@ -392,13 +408,22 @@ async fn prepare_upload(
             )
         })
         .collect();
-    *lock(&s.session) = Some(Session {
-        id: session_id.clone(),
-        peer,
-        pending: false,
-        files: session_files,
-        last_activity: Instant::now(),
-    });
+    // 审批通过后才替换；审批期间可能已有别的会话建立，再判一次
+    let superseded = {
+        let mut g = lock(&s.session);
+        if g.as_ref().is_some_and(session_blocks_takeover) {
+            return StatusCode::CONFLICT.into_response();
+        }
+        g.replace(Session {
+            id: session_id.clone(),
+            peer,
+            files: session_files,
+            last_activity: Instant::now(),
+        })
+    };
+    if let Some(old) = superseded {
+        discard_session(&s, old, "superseded by a new session").await;
+    }
     Json(PrepareUploadResponse {
         session_id,
         files: tokens,
@@ -406,16 +431,72 @@ async fn prepare_upload(
     .into_response()
 }
 
-/// 去掉路径分隔符、`..` 与控制字符，得到可安全落盘的单个文件名。
+/// 清理被丢弃会话遗留的 `.part` 并上报结束。
+async fn discard_session(s: &Inner, sess: Session, reason: &str) {
+    for f in sess.files.values() {
+        if let Some(p) = &f.part {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    let _ = s
+        .events
+        .send(LsEvent::SessionFinished {
+            session: sess.id,
+            ok: false,
+            error: Some(reason.into()),
+        })
+        .await;
+}
+
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// 去掉路径分隔符、非法字符、控制与 bidi 字符，规避 Windows 保留名，并限制长度。
 pub(crate) fn sanitize_file_name(name: &str) -> String {
     let last = name.rsplit(['/', '\\']).next().unwrap_or("");
-    let cleaned: String = last.chars().filter(|c| !c.is_control()).collect();
-    let cleaned = cleaned.trim().trim_matches('.').to_string();
+    let cleaned: String = last
+        .chars()
+        .filter(|c| !c.is_control() && !is_bidi_control(*c))
+        .map(|c| {
+            if matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_matches('.').trim().to_string();
     if cleaned.is_empty() {
-        "file".to_string()
-    } else {
-        cleaned
+        return "file".to_string();
     }
+    let mut out = truncate_keep_ext(&cleaned, FILE_NAME_MAX_BYTES);
+    let base = out.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((base.len() == 4)
+            && (base.starts_with("COM") || base.starts_with("LPT"))
+            && base.as_bytes()[3].is_ascii_digit()
+            && base.as_bytes()[3] != b'0');
+    if reserved {
+        out.insert(0, '_');
+    }
+    out
+}
+
+/// 按 UTF-8 字节数截断主名，尽量保留扩展名。
+fn truncate_keep_ext(name: &str, max: usize) -> String {
+    if name.len() <= max {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 && name.len() - i <= 16 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    let mut keep = max.saturating_sub(ext.len());
+    while !stem.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    format!("{}{}", &stem[..keep], ext)
 }
 
 /// 在目录中为文件名预留不重名的路径：创建 `.part` 文件占位，返回 (最终路径, part 路径, 已打开的 part)。
@@ -453,13 +534,54 @@ pub(crate) fn reserve_path(
     ))
 }
 
-/// 把文件状态退回 Waiting（让发送方可重试），并清理 part。
-fn reset_file(s: &Inner, sid: &str, fid: &str, part: &Path) {
-    let _ = std::fs::remove_file(part);
-    if let Some(sess) = lock(&s.session).as_mut().filter(|x| x.id == sid) {
-        if let Some(f) = sess.files.get_mut(fid) {
-            f.state = FileState::Waiting;
-            f.part = None;
+/// 一次文件上传的现场守卫：只要没有 `disarm`（出错、客户端断开导致 handler 被 drop），
+/// 就把文件状态退回 Waiting 并删除 `.part`，让发送方可以重试。
+struct UploadGuard {
+    inner: Arc<Inner>,
+    sid: String,
+    fid: String,
+    part: Option<PathBuf>,
+    armed: bool,
+}
+
+impl UploadGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UploadGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Some(sess) = lock(&self.inner.session)
+            .as_mut()
+            .filter(|x| x.id == self.sid)
+        {
+            if let Some(f) = sess.files.get_mut(&self.fid) {
+                if f.state == FileState::Receiving {
+                    f.state = FileState::Waiting;
+                    f.part = None;
+                }
+            }
+        }
+        if let Some(part) = self.part.take() {
+            // 写盘线程可能尚未释放文件（Windows 下删除会失败），放到阻塞线程里重试
+            let remove = move || {
+                for _ in 0..20 {
+                    if std::fs::remove_file(&part).is_ok() || !part.exists() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            };
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => {
+                    h.spawn_blocking(remove);
+                }
+                Err(_) => remove(),
+            }
         }
     }
 }
@@ -478,7 +600,7 @@ async fn upload(
         let mut g = lock(&s.session);
         let Some(sess) = g
             .as_mut()
-            .filter(|x| !x.pending && &x.id == sid && x.peer.ip == addr.ip())
+            .filter(|x| &x.id == sid && x.peer.ip == addr.ip())
         else {
             return StatusCode::FORBIDDEN;
         };
@@ -495,18 +617,21 @@ async fn upload(
         sess.last_activity = Instant::now();
         (file.meta.clone(), sess.peer.clone())
     };
+    let mut guard = UploadGuard {
+        inner: s.clone(),
+        sid: sid.clone(),
+        fid: fid.clone(),
+        part: None,
+        armed: true,
+    };
 
     let dir = s.download_dir.clone();
     let name = sanitize_file_name(&meta.file_name);
     let reserved = tokio::task::spawn_blocking(move || reserve_path(&dir, &name)).await;
     let Ok(Ok((final_path, part, file))) = reserved else {
-        if let Some(sess) = lock(&s.session).as_mut() {
-            if let Some(f) = sess.files.get_mut(fid) {
-                f.state = FileState::Waiting;
-            }
-        }
         return StatusCode::INTERNAL_SERVER_ERROR;
     };
+    guard.part = Some(part.clone());
     if let Some(sess) = lock(&s.session).as_mut() {
         if let Some(f) = sess.files.get_mut(fid) {
             f.part = Some(part.clone());
@@ -531,16 +656,24 @@ async fn upload(
     });
     let mut stream = body.into_data_stream();
     let mut done = 0u64;
-    let mut stream_ok = true;
+    let mut failure: Option<StatusCode> = None;
     while let Some(chunk) = stream.next().await {
         let Ok(chunk) = chunk else {
-            stream_ok = false;
+            failure = Some(StatusCode::INTERNAL_SERVER_ERROR);
             break;
         };
         done += chunk.len() as u64;
-        if tx.send(chunk).await.is_err() {
-            stream_ok = false;
+        if done > meta.size {
+            // 超出声明大小：立即中止
+            failure = Some(StatusCode::PAYLOAD_TOO_LARGE);
             break;
+        }
+        if tx.send(chunk).await.is_err() {
+            failure = Some(StatusCode::INTERNAL_SERVER_ERROR);
+            break;
+        }
+        if let Some(sess) = lock(&s.session).as_mut().filter(|x| &x.id == sid) {
+            sess.last_activity = Instant::now();
         }
         let _ = s.events.try_send(LsEvent::Progress {
             session: sid.clone(),
@@ -551,24 +684,25 @@ async fn upload(
     }
     drop(tx);
     let digest = writer.await;
+    if let Some(code) = failure {
+        return code;
+    }
     let Ok(Ok(digest)) = digest else {
-        reset_file(&s, sid, fid, &part);
         return StatusCode::INTERNAL_SERVER_ERROR;
     };
-    if !stream_ok {
-        reset_file(&s, sid, fid, &part);
-        return StatusCode::INTERNAL_SERVER_ERROR;
+    if done != meta.size {
+        return StatusCode::BAD_REQUEST;
     }
     if let Some(expected) = &meta.sha256 {
         if !expected.eq_ignore_ascii_case(&digest) {
-            reset_file(&s, sid, fid, &part);
             return StatusCode::UNPROCESSABLE_ENTITY;
         }
     }
     if tokio::fs::rename(&part, &final_path).await.is_err() {
-        reset_file(&s, sid, fid, &part);
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
+    guard.part = None;
+    guard.disarm();
 
     // 会话可能在传输期间被取消
     let all_done = {
@@ -621,7 +755,7 @@ async fn cancel(
     let removed = {
         let mut g = lock(&s.session);
         match g.as_ref() {
-            Some(x) if !x.pending && &x.id == sid && x.peer.ip == addr.ip() => g.take(),
+            Some(x) if &x.id == sid && x.peer.ip == addr.ip() => g.take(),
             _ => None,
         }
     };
@@ -656,6 +790,29 @@ mod tests {
         assert_eq!(sanitize_file_name(""), "file");
         assert_eq!(sanitize_file_name("dir/"), "file");
         assert_eq!(sanitize_file_name("ok name.tar.gz"), "ok name.tar.gz");
+    }
+
+    #[test]
+    fn sanitize_handles_windows_and_unicode_hazards() {
+        assert_eq!(
+            sanitize_file_name("a:b*c?d\"e<f>g|h.txt"),
+            "a_b_c_d_e_f_g_h.txt"
+        );
+        assert_eq!(sanitize_file_name("CON.txt"), "_CON.txt");
+        assert_eq!(sanitize_file_name("lpt1"), "_lpt1");
+        assert_eq!(sanitize_file_name("COM0.txt"), "COM0.txt");
+        assert_eq!(sanitize_file_name("a\u{202E}txt.exe"), "atxt.exe");
+        assert_eq!(sanitize_file_name("trailing. "), "trailing");
+    }
+
+    #[test]
+    fn sanitize_limits_length_and_keeps_extension() {
+        let long = format!("{}.jpeg", "字".repeat(100));
+        let out = sanitize_file_name(&long);
+        assert!(out.len() <= FILE_NAME_MAX_BYTES);
+        assert!(out.ends_with(".jpeg"));
+        let long = "a".repeat(500);
+        assert_eq!(sanitize_file_name(&long).len(), FILE_NAME_MAX_BYTES);
     }
 
     #[test]

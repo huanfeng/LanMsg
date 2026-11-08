@@ -322,3 +322,118 @@ async fn port_busy_disables_announce_but_keeps_sending() {
     };
     assert_eq!(text, "from busy");
 }
+
+fn upload_query(resp: &PrepareUploadResponse) -> [(&'static str, &str); 3] {
+    [
+        ("sessionId", resp.session_id.as_str()),
+        ("fileId", "f1"),
+        ("token", resp.files["f1"].as_str()),
+    ]
+}
+
+/// 发起一个可由测试控制何时送出字节的上传。
+fn streaming_upload(
+    client: &reqwest::Client,
+    url: &str,
+    resp: &PrepareUploadResponse,
+) -> (
+    mpsc::Sender<std::io::Result<Vec<u8>>>,
+    tokio::task::JoinHandle<u16>,
+) {
+    let (tx, rx) = mpsc::channel(4);
+    let req = client
+        .post(format!("{url}/upload"))
+        .query(&upload_query(resp))
+        .body(reqwest::Body::wrap_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ));
+    let h = tokio::spawn(async move { req.send().await.unwrap().status().as_u16() });
+    (tx, h)
+}
+
+#[tokio::test]
+async fn receiving_session_cannot_be_taken_over() {
+    let a = node(LsDecision::Accept).await;
+    let b = node(LsDecision::Accept).await;
+    let (client, url, resp) = raw_prepare(&a, &b, "x.txt", None).await;
+    let (tx, h) = streaming_upload(&client, &url, &resp);
+    tx.send(Ok(b"a".to_vec())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let req = raw_request(&b.peer(), &a.peer(), "y.txt", None);
+    let r = client
+        .post(format!("{url}/prepare-upload"))
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    tx.send(Ok(b"bc".to_vec())).await.unwrap();
+    drop(tx);
+    assert_eq!(h.await.unwrap(), 200);
+}
+
+#[tokio::test]
+async fn client_disconnect_releases_file_for_retry() {
+    let a = node(LsDecision::Accept).await;
+    let b = node(LsDecision::Accept).await;
+    let (client, url, resp) = raw_prepare(&a, &b, "x.txt", None).await;
+    let (tx, h) = streaming_upload(&client, &url, &resp);
+    tx.send(Ok(b"a".to_vec())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    h.abort();
+    drop(tx);
+    // 服务端发现断开后应允许用同一 token 重传
+    let mut status = 0;
+    for _ in 0..40 {
+        let r = client
+            .post(format!("{url}/upload"))
+            .query(&upload_query(&resp))
+            .body("abc")
+            .send()
+            .await
+            .unwrap();
+        status = r.status().as_u16();
+        if status != 409 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(status, 200);
+    assert_eq!(
+        std::fs::read(b.download_dir().join("x.txt")).unwrap(),
+        b"abc"
+    );
+    let names: Vec<_> = std::fs::read_dir(b.download_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+}
+
+#[tokio::test]
+async fn body_exceeding_declared_size_is_rejected_and_cleaned() {
+    let a = node(LsDecision::Accept).await;
+    let b = node(LsDecision::Accept).await;
+    let (client, url, resp) = raw_prepare(&a, &b, "x.txt", None).await;
+    let r = client
+        .post(format!("{url}/upload"))
+        .query(&upload_query(&resp))
+        .body("0123456789")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 413);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(std::fs::read_dir(b.download_dir()).unwrap().count(), 0);
+    // 声明 3 字节却只给 2 字节
+    let r = client
+        .post(format!("{url}/upload"))
+        .query(&upload_query(&resp))
+        .body("ab")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(std::fs::read_dir(b.download_dir()).unwrap().count(), 0);
+}
