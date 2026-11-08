@@ -30,4 +30,9 @@ class BackgroundPolicyTest {
         assertTrue(BackgroundPolicy.shouldScheduleWorker(BackgroundMode.POWER_SAVING))
         assertFalse(BackgroundPolicy.shouldScheduleWorker(BackgroundMode.OFF))
     }
+
+    @Test fun web_hosting_forces_service_even_when_off() {
+        assertTrue(BackgroundPolicy.shouldRunService(BackgroundMode.OFF, off.copy(webHosting = true)))
+        assertTrue(BackgroundPolicy.shouldRunService(BackgroundMode.POWER_SAVING, off.copy(webHosting = true)))
+    }
 }

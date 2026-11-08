@@ -121,6 +121,11 @@ class SettingsViewModel(
         null
     }
 
+    /** 从其他页面返回后重新读取，避免用过期的快照整体回写。 */
+    fun reload() {
+        if (pendingWrites > 0) reloadAfterWrites = true else viewModelScope.launch { loadSettings() }
+    }
+
     fun setNotifications(v: Boolean) {
         viewModelScope.launch { prefs.setNotificationsEnabled(v) }
     }

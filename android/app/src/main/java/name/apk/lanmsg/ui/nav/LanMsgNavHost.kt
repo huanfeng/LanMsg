@@ -47,9 +47,11 @@ import name.apk.lanmsg.ui.onboarding.OnboardingScreen
 import name.apk.lanmsg.ui.onboarding.OnboardingViewModel
 import name.apk.lanmsg.ui.search.SearchScreen
 import name.apk.lanmsg.ui.preview.TextPreviewScreen
+import name.apk.lanmsg.ui.settings.NetworkSettingsScreen
 import name.apk.lanmsg.ui.settings.SettingsScreen
 import name.apk.lanmsg.ui.share.SharePickScreen
 import name.apk.lanmsg.ui.station.StationScreen
+import name.apk.lanmsg.ui.web.WebHostScreen
 import name.apk.lanmsg.ui.share.SharePickViewModel
 import name.apk.lanmsg.ui.theme.LanMsgColors
 
@@ -166,7 +168,11 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
             }
             composable(Routes.REQUESTS) { RequestsScreen(onBack = { nav.popBackStack() }) }
             composable(Routes.ME) {
-                MeScreen(onOpenDevices = { nav.navigate(Routes.DEVICES) }, onOpenSettings = { nav.navigate(Routes.SETTINGS) })
+                MeScreen(
+                    onOpenDevices = { nav.navigate(Routes.DEVICES) },
+                    onOpenWeb = { nav.navigate(Routes.WEB_HOST) },
+                    onOpenSettings = { nav.navigate(Routes.SETTINGS) },
+                )
             }
             composable(Routes.DEVICES) {
                 DevicesScreen(
@@ -189,7 +195,13 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                     },
                 )
             }
-            composable(Routes.SETTINGS) { SettingsScreen(onBack = { nav.popBackStack() }) }
+            composable(Routes.SETTINGS) {
+                SettingsScreen(onBack = { nav.popBackStack() }, onOpenNetwork = { nav.navigate(Routes.NETWORK) })
+            }
+            composable(Routes.NETWORK) { NetworkSettingsScreen(onBack = { nav.popBackStack() }) }
+            composable(Routes.WEB_HOST) {
+                WebHostScreen(onBack = { nav.popBackStack() }, onOpenGuest = { nav.navigate(Routes.chat(it)) })
+            }
             composable(Routes.SHARE) {
                 val vm = shareVm()
                 SharePickScreen(

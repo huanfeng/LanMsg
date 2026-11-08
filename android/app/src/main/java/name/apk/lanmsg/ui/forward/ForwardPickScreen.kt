@@ -43,10 +43,10 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import name.apk.lanmsg.R
 import name.apk.lanmsg.ServiceLocator
+import name.apk.lanmsg.ui.common.convTitle
 import name.apk.lanmsg.ui.common.EmptyState
 import name.apk.lanmsg.ui.common.ConversationAvatar
 import name.apk.lanmsg.ui.theme.LanMsgColors
-import uniffi.lanmsg_api.ConvKind
 import uniffi.lanmsg_api.ConversationSummary
 
 /** 转发：选择目标会话。[hashes] 为空时直接返回。成功后 [onDone] 收到目标会话。 */
@@ -123,7 +123,7 @@ fun ForwardPickContent(
 @Composable
 private fun PickRow(s: ConversationSummary, onClick: () -> Unit) {
     val c = LanMsgColors.current
-    val title = if (s.kind == ConvKind.SELF_DEVICES) stringResource(R.string.conv_self_title) else s.title
+    val title = convTitle(s.kind, s.title)
     Column(Modifier.fillMaxWidth().background(c.surface).clickable(onClick = onClick)) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             ConversationAvatar(s, size = 40.dp, online = s.peerOnline)

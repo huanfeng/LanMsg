@@ -51,6 +51,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
@@ -71,19 +72,24 @@ import name.apk.lanmsg.ui.theme.LanMsgControls
 import uniffi.lanmsg_api.BackgroundMode
 
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onOpenNetwork: () -> Unit) {
     val vm: SettingsViewModel = viewModel(
         factory = viewModelFactory {
             initializer { SettingsViewModel(ServiceLocator.coreHolder.api, ServiceLocator.localPrefs, ServiceLocator.importer) }
         },
     )
     val state by vm.state.collectAsStateWithLifecycle()
-    SettingsContent(state, vm, onBack)
+    // 从网络设置页返回时，LocalSend 等设置可能已被改写，重新读取避免整体回写时覆盖
+    LifecycleResumeEffect(Unit) {
+        vm.reload()
+        onPauseOrDispose {}
+    }
+    SettingsContent(state, vm, onBack, onOpenNetwork)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onBack: () -> Unit) {
+fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onBack: () -> Unit, onOpenNetwork: () -> Unit) {
     val c = LanMsgColors.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -163,7 +169,7 @@ fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onB
                 Divider()
                 SwitchRow(stringResource(R.string.settings_wifi_only), settings.autoFileWifiOnly, { v -> vm.update { it.copy(autoFileWifiOnly = v) } })
                 Divider()
-                SwitchRow(stringResource(R.string.settings_localsend), settings.localsendEnabled, { v -> vm.update { it.copy(localsendEnabled = v) } })
+                ValueRow(stringResource(R.string.settings_network), "", onOpenNetwork)
             }
 
             SectionHeader(stringResource(R.string.settings_bg_mode))
