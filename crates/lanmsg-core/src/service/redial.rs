@@ -154,6 +154,7 @@ pub(crate) fn network_changed(inner: &Arc<Inner>) {
     if inner.redial.net_pending.swap(true, Ordering::SeqCst) {
         return; // 窗口内已有待触发的通知，合并
     }
+    crate::net::path::invalidate_ifaces_cache();
     let inner = inner.clone();
     tokio::spawn(async move {
         tokio::time::sleep(NET_DEBOUNCE).await;

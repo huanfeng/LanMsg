@@ -2,6 +2,8 @@
 // 注释中文，标识符英文。
 
 use std::net::IpAddr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use if_addrs::{get_if_addrs, IfAddr};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
@@ -30,6 +32,7 @@ impl TunnelKind {
 }
 
 /// 本地网卡信息。
+#[derive(Debug, Clone)]
 pub struct LocalIface {
     pub name: String,
     pub addr: IpAddr,
@@ -116,18 +119,24 @@ pub fn classify(peer: IpAddr, ifaces: &[LocalIface], via_multicast: bool) -> Pat
         return PathClass::Lan;
     }
 
-    // peer 与任一普通网卡同网段 → 局域网；只与隧道网卡同网段 → VPN。
-    let mut on_tunnel = false;
-    for iface in ifaces {
-        if same_subnet(peer, iface.addr, iface.prefix) {
-            if iface.tunnel.is_none() {
-                return PathClass::Lan;
-            }
-            on_tunnel = true;
-        }
+    // 取与 peer 同网段且前缀最长的网卡（前缀相同时普通网卡优先）：
+    // 该网卡是隧道 → VPN，否则 → 局域网。
+    let best = ifaces
+        .iter()
+        .filter(|i| same_subnet(peer, i.addr, i.prefix))
+        .max_by_key(|i| (i.prefix, i.tunnel.is_none()));
+    if let Some(iface) = best {
+        return if iface.tunnel.is_some() {
+            PathClass::Vpn
+        } else {
+            PathClass::Lan
+        };
     }
-    if on_tunnel {
-        return PathClass::Vpn;
+
+    // 枚举不到网卡（例如 Android 11+ 限制 netlink）时，私网地址按局域网处理，
+    // 否则陌生人配对会全部被拒。
+    if ifaces.is_empty() && is_private_lan_addr(peer) {
+        return PathClass::Lan;
     }
 
     // 私有 IPv4 / CGNAT / IPv6 ULA / 链路本地 → VPN。
@@ -168,6 +177,45 @@ fn same_subnet(peer: IpAddr, addr: IpAddr, prefix: u8) -> bool {
             net.contains(&IpAddr::V6(p))
         }
         _ => false,
+    }
+}
+
+/// 网卡枚举失败时用于回退为局域网的地址：RFC1918、ULA fd00::/8、回环、链路本地。
+fn is_private_lan_addr(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xff00) == 0xfd00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// 网卡列表缓存的有效期；网络变化时由 `invalidate_ifaces_cache` 立即作废。
+const IFACE_CACHE_TTL: Duration = Duration::from_secs(30);
+
+static IFACE_CACHE: Mutex<Option<(Instant, Vec<LocalIface>)>> = Mutex::new(None);
+
+/// 带短 TTL 缓存的网卡列表，供握手时判定路径，避免每次连接都枚举网卡。
+pub fn cached_ifaces() -> Vec<LocalIface> {
+    if let Ok(mut guard) = IFACE_CACHE.lock() {
+        if let Some((at, list)) = guard.as_ref() {
+            if at.elapsed() < IFACE_CACHE_TTL {
+                return list.clone();
+            }
+        }
+        let list = local_ifaces();
+        *guard = Some((Instant::now(), list.clone()));
+        return list;
+    }
+    local_ifaces()
+}
+
+/// 网络变化时作废缓存。
+pub fn invalidate_ifaces_cache() {
+    if let Ok(mut guard) = IFACE_CACHE.lock() {
+        *guard = None;
     }
 }
 
@@ -260,6 +308,12 @@ mod tests {
             Some(TunnelKind::WireGuard)
         );
         assert_eq!(detect_tunnel("eth0", ip("192.168.1.2")), None);
+        assert_eq!(detect_tunnel("ppp0", ip("10.0.0.1")), Some(TunnelKind::Tun));
+        assert_eq!(detect_tunnel("tap0", ip("10.0.0.1")), Some(TunnelKind::Tun));
+        assert_eq!(
+            detect_tunnel("Tailscale", ip("100.64.0.9")),
+            Some(TunnelKind::Tailscale)
+        );
         assert_eq!(detect_tunnel("zt", ip("10.0.0.1")), None);
     }
 
@@ -299,6 +353,60 @@ mod tests {
         assert_eq!(
             classify("192.168.1.20".parse().unwrap(), &ifaces, false),
             PathClass::Lan
+        );
+    }
+
+    #[test]
+    fn longest_prefix_decides_between_overlapping_ifaces() {
+        let ifaces = vec![
+            LocalIface {
+                name: "eth0".into(),
+                addr: "192.168.1.10".parse().unwrap(),
+                prefix: 16,
+                tunnel: None,
+            },
+            LocalIface {
+                name: "wg0".into(),
+                addr: "192.168.1.5".parse().unwrap(),
+                prefix: 24,
+                tunnel: Some(TunnelKind::WireGuard),
+            },
+        ];
+        assert_eq!(
+            classify("192.168.1.20".parse().unwrap(), &ifaces, false),
+            PathClass::Vpn
+        );
+        assert_eq!(
+            classify("192.168.2.20".parse().unwrap(), &ifaces, false),
+            PathClass::Lan
+        );
+    }
+
+    #[test]
+    fn empty_ifaces_private_addr_is_lan() {
+        let none: Vec<LocalIface> = Vec::new();
+        for a in [
+            "10.1.2.3",
+            "172.20.0.1",
+            "192.168.5.5",
+            "127.0.0.1",
+            "fd12::1",
+            "fe80::1",
+        ] {
+            assert_eq!(
+                classify(a.parse().unwrap(), &none, false),
+                PathClass::Lan,
+                "{a}"
+            );
+        }
+        // CGNAT 与公网在没有网卡信息时仍不是局域网。
+        assert_eq!(
+            classify("100.80.0.1".parse().unwrap(), &none, false),
+            PathClass::Vpn
+        );
+        assert_eq!(
+            classify("8.8.8.8".parse().unwrap(), &none, false),
+            PathClass::Internet
         );
     }
 }
