@@ -3,6 +3,12 @@
 // 缺失状态写入运行时共享的 watch（见 `runtime.rs`），IPC 连接据此补发与推送 `FirewallMissing`。
 // 注释中文，标识符英文。
 
+/// 托盘是否要弹“防火墙可能阻止发现”通知：只在由“已放行”变为“缺失”时提示一次。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn should_notify(was_missing: bool, missing: bool) -> bool {
+    missing && !was_missing
+}
+
 /// 检查放行规则是否缺失（阻塞，会运行 netsh；调用方放在后台线程）。
 #[cfg(windows)]
 pub(crate) fn check_missing() -> bool {
@@ -65,4 +71,18 @@ pub(crate) fn run_add_rule() -> i32 {
 pub(crate) fn run_add_rule() -> i32 {
     println!("The firewall rule is only needed on Windows");
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notify_only_on_transition_to_missing() {
+        assert!(should_notify(false, true));
+        // 重复上报缺失、恢复放行、一直放行都不提示
+        assert!(!should_notify(true, true));
+        assert!(!should_notify(true, false));
+        assert!(!should_notify(false, false));
+    }
 }

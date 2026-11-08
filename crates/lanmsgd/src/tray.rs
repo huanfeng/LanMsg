@@ -27,44 +27,41 @@ enum UiMsg {
     Event(Event),
     /// 服务已被外部关闭（IPC Shutdown / SIGTERM），托盘需退出。
     Quit,
-    /// 防火墙放行规则的状态：`true` = 缺失（启动检查结果），`false` = 已放行（提权成功后）。
+    /// 防火墙放行规则的状态（来自共享的 watch）：`true` = 缺失，`false` = 已放行。
     #[cfg(windows)]
     Firewall { missing: bool },
 }
 
-/// 点击托盘提示 / 菜单项后在后台线程提权添加规则：成功后复查并通知托盘线程。
-/// 提权会阻塞到 UAC 与命令完成，不能占用托盘消息线程。
+/// 提权正在进行：连点菜单或通知只弹一个 UAC。
 #[cfg(windows)]
-fn start_firewall_elevation(
-    tx: Option<Sender<UiMsg>>,
-    firewall: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
-) {
+static ELEVATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 点击托盘提示 / 菜单项后在后台线程提权添加规则：成功后复查并写入共享状态，
+/// 托盘菜单与通知随共享状态统一更新。提权会阻塞到 UAC 与命令完成，不能占用托盘消息线程。
+#[cfg(windows)]
+fn start_firewall_elevation(firewall: std::sync::Arc<tokio::sync::watch::Sender<bool>>) {
+    use std::sync::atomic::Ordering;
+    if ELEVATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
     std::thread::spawn(move || {
-        let exe = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("cannot locate own executable: {e}");
-                return;
-            }
-        };
-        match lanmsg_core::firewall::elevate_add_rule(&exe) {
-            Ok(true) => {
-                let missing = crate::firewall_cmd::check_missing();
-                firewall.send_replace(missing);
-                if let Some(tx) = tx {
-                    let _ = tx.send(UiMsg::Firewall { missing });
+        match std::env::current_exe() {
+            Ok(exe) => match lanmsg_core::firewall::elevate_add_rule(&exe) {
+                Ok(true) => {
+                    firewall.send_replace(crate::firewall_cmd::check_missing());
                 }
-            }
-            // 用户取消 UAC：保持现状
-            Ok(false) => tracing::info!("firewall elevation cancelled or failed"),
-            Err(e) => tracing::warn!("failed to elevate firewall rule command: {e}"),
+                // 用户取消 UAC：保持现状
+                Ok(false) => tracing::info!("firewall elevation cancelled or failed"),
+                Err(e) => tracing::warn!("failed to elevate firewall rule command: {e}"),
+            },
+            Err(e) => tracing::warn!("cannot locate own executable: {e}"),
         }
+        ELEVATING.store(false, Ordering::SeqCst);
     });
 }
-
-/// 电脑退出前一直有效的发送端槽位：托盘菜单在应用创建前构建，回调经它取到事件通道。
-#[cfg(windows)]
-type TxSlot = std::sync::Arc<std::sync::Mutex<Option<Sender<UiMsg>>>>;
 
 /// 解码托盘图标为 RGBA；失败返回 None（托盘用系统默认图标）。
 fn tray_icon_rgba() -> Option<(u32, u32, Vec<u8>)> {
@@ -169,23 +166,18 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     let handle_quit = handle.clone();
     let dir_quit = data_dir.clone();
     #[cfg(windows)]
-    let tx_slot: TxSlot = Default::default();
-    #[cfg(windows)]
     let fw_state = rt.firewall_tx();
     #[cfg(windows)]
     let fw_click = fw_state.clone();
     #[cfg(windows)]
     let fw_missing = signal(false);
-    #[cfg(windows)]
-    let slot_click = tx_slot.clone();
     let tray = tray
         .on_left_click(move |_ctx| open_gui_logged(&dir_left, None))
         .on_notification_click(move |_ctx, tag| {
             // 防火墙提示：不开界面，直接提权放行
             #[cfg(windows)]
             if tag.as_deref() == Some(FIREWALL_TAG) {
-                let tx = slot_click.lock().ok().and_then(|g| g.clone());
-                start_firewall_elevation(tx, fw_click.clone());
+                start_firewall_elevation(fw_click.clone());
                 return;
             }
             // tag 为空 / None 时只激活界面；否则尽力定位会话（Windows 的 tag 可能不对应被点的那条）。
@@ -221,13 +213,11 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
             // 仅 Windows：规则缺失时可用的放行入口，位于“开启网页传输”之后
             #[cfg(windows)]
             {
-                let slot_menu = tx_slot.clone();
                 let fw_menu = fw_state.clone();
                 items.insert(
                     2,
                     TrayMenuItem::item(strings::TRAY_FIREWALL, move |_ctx| {
-                        let tx = slot_menu.lock().ok().and_then(|g| g.clone());
-                        start_firewall_elevation(tx, fw_menu.clone());
+                        start_firewall_elevation(fw_menu.clone());
                     })
                     .enabled(fw_missing),
                 );
@@ -248,7 +238,7 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
             let was_missing = fw_missing.get();
             fw_missing.set(missing);
             // 只在由“已放行”变为“缺失”时提示一次
-            if missing && !was_missing {
+            if crate::firewall_cmd::should_notify(was_missing, missing) {
                 tray_handle.notify_tagged(
                     strings::NOTIFY_FIREWALL_TITLE,
                     strings::NOTIFY_FIREWALL_BODY,
@@ -277,14 +267,20 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
 
     #[cfg(windows)]
     {
-        if let Ok(mut g) = tx_slot.lock() {
-            *g = Some(tx.clone());
-        }
-        // 后台检查（netsh 较慢）：结果写入共享状态并通知托盘；缺失期间定期复查
-        let check_tx = tx.clone();
-        crate::firewall_cmd::spawn_monitor(rt.firewall_tx(), move |missing| {
-            let _ = check_tx.send(UiMsg::Firewall { missing });
+        // 托盘菜单与通知跟随共享状态：后台检查、提权成功都只写这一处
+        let mut fw_rx = rt.firewall_tx().subscribe();
+        let fw_ui_tx = tx.clone();
+        handle.spawn(async move {
+            loop {
+                let missing = *fw_rx.borrow_and_update();
+                let _ = fw_ui_tx.send(UiMsg::Firewall { missing });
+                if fw_rx.changed().await.is_err() {
+                    break;
+                }
+            }
         });
+        // 后台检查（netsh 较慢）：缺失期间定期复查
+        crate::firewall_cmd::spawn_monitor(rt.firewall_tx(), |_| {});
     }
     let ev_tx = tx.clone();
     rt.spawn_event_forwarder(move |ev| {
