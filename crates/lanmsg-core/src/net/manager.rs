@@ -174,6 +174,7 @@ impl ConnManager {
         }
 
         let hello = self.build_hello();
+        let accept_filter = self.read_inner().accept_filter.clone();
         let cleanup = make_exit_cleanup(&self.inner);
         // 整个拨号（TCP + TLS + Hello）限时：对端 TCP 已接受但应用层沉默时不能永久挂起。
         let (peer_info, connection) = tokio::time::timeout(
@@ -184,6 +185,7 @@ impl ConnManager {
                 &self.device_key(),
                 self.self_device(),
                 &hello,
+                accept_filter.as_ref(),
                 self.events_clone(),
                 cleanup,
             ),
@@ -1074,6 +1076,31 @@ mod tests {
         let _ = _mgr_a.connect(mgr_b.local_addr(), false).await;
         // A 不应收到 Up。
         expect_no_up(&mut events_a).await;
+    }
+
+    /// 出站连接与入站对称：本端 filter 拒绝对端时，拨号失败且不登记、不发 Up。
+    #[tokio::test]
+    async fn outbound_connection_also_goes_through_accept_filter() {
+        let (mgr_b, _events_b, _dev_b) = make_manager().await;
+        let (device_a, _) = make_identity();
+        let identity_a = Arc::new(RwLock::new(Identity {
+            device: DeviceKey::from_bytes(&device_a.to_bytes()),
+            user: None,
+            cert: None,
+        }));
+        let (_hello_tx, hello_rx) = watch::channel(HelloInfo {
+            display_name: "A".into(),
+            cert: None,
+            listen_port: 0,
+        });
+        let (events_tx_a, mut events_a) = mpsc::channel(32);
+        let filter = Arc::new(|_: &PeerInfo| false);
+        let mgr_a = ConnManager::bind(identity_a, 0, hello_rx, filter, events_tx_a)
+            .await
+            .expect("A bind failed");
+        assert!(mgr_a.connect(mgr_b.local_addr(), false).await.is_err());
+        expect_no_up(&mut events_a).await;
+        assert!(mgr_a.peers().is_empty());
     }
 
     #[tokio::test]

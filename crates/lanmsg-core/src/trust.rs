@@ -51,7 +51,8 @@ pub(crate) fn accept_rules(
         return pair_window_open;
     };
     // 规则 2：设备已吊销 → 拒绝。
-    if store.is_revoked(&p.device).unwrap_or(false) {
+    // 查询出错一律按已吊销处理（拒绝）。
+    if store.is_revoked(&p.device).unwrap_or(true) {
         return false;
     }
     // 规则 3：自己的设备 → 接受。

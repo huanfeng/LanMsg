@@ -6,12 +6,45 @@ use lanmsg_proto::ids::{DeviceId, UserId};
 use lanmsg_proto::types::PathClass;
 
 use crate::error::CoreError;
+use crate::net::path::classify;
 use crate::net::PeerInfo;
+use crate::store::addresses::MAX_ADDRS_PER_DEVICE;
 use crate::store::{AddrSource, ContactState, KnownAddrRow, Store};
 
 /// 地址簿只交换局域网与 VPN 地址（v1 不使用公网与中继地址）。
 fn exchangeable(p: &PathClass) -> bool {
     matches!(p, PathClass::Lan | PathClass::Vpn)
+}
+
+/// 单个地址簿最多处理的设备条目数（超出截断）。
+pub const MAX_BOOK_ENTRIES: usize = 256;
+
+/// 测试钩子：集成测试的节点都在回环地址上，允许交换回环地址。
+#[cfg(feature = "test-hooks")]
+static ALLOW_LOOPBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 测试辅助：允许地址簿交换回环地址（进程级）。
+#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
+pub fn allow_loopback_for_tests(on: bool) {
+    ALLOW_LOOPBACK.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 地址簿来源的地址能否使用：只接受私网、CGNAT、ULA 段
+/// （10/8、172.16/12、192.168/16、100.64/10、fc00::/7）。回环、未指定、组播、
+/// 链路本地、广播都不在其中。对端的标签不可信，由本机自己判定。
+pub(crate) fn exchanged_ip_allowed(ip: std::net::IpAddr) -> bool {
+    #[cfg(feature = "test-hooks")]
+    if ALLOW_LOOPBACK.load(std::sync::atomic::Ordering::SeqCst) && ip.is_loopback() {
+        return true;
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private() || (o[0] == 100 && (64..=127).contains(&o[1]))
+        }
+        std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
+    }
 }
 
 /// 为对端生成地址簿：
@@ -85,8 +118,11 @@ pub fn merge_devices(
 }
 
 /// 只接受 devices 表中已存在且未吊销的设备；对端不是自己的设备时，只接受属于
-/// 对端所属用户的条目（联系人不能借地址簿注入第三方设备）；丢弃公网与中继地址；
-/// 写入 `source = Exchanged`，`last_ok` 不超过本机当前时间。
+/// 对端所属用户的条目（联系人不能借地址簿注入第三方设备）。
+/// 防滥用：最多处理 [`MAX_BOOK_ENTRIES`] 个条目、每个条目最多 8 个地址；
+/// 丢弃非私网/CGNAT/ULA 地址与端口 0；路径等级用本机网卡重新判定（不信对端标签），
+/// 只收 Lan/Vpn；写入 `source = Exchanged`，`last_ok` 不超过本机当前时间，
+/// 也不超过该设备已有 Direct 记录的最近时间；整个簿在一个事务内写入。
 fn merge_inner(
     store: &Store,
     self_user: Option<UserId>,
@@ -98,9 +134,10 @@ fn merge_inner(
         return Ok((0, Vec::new()));
     };
     let from_is_mine = self_user == Some(from_user);
-    let mut written = 0;
+    let ifaces = crate::net::path::cached_ifaces();
+    let mut rows = Vec::new();
     let mut touched = Vec::new();
-    for entry in &book.entries {
+    for entry in book.entries.iter().take(MAX_BOOK_ENTRIES) {
         let Some(dev) = store.get_device(&entry.device)? else {
             continue;
         };
@@ -110,29 +147,41 @@ fn merge_inner(
         if !from_is_mine && dev.user != from_user {
             continue;
         }
+        // 已有 Direct 记录时，交换来的时间不得晚于它（对端时钟不可信）。
+        let cap = store
+            .addresses_of(&entry.device)?
+            .iter()
+            .filter(|r| r.source == AddrSource::Direct)
+            .map(|r| r.last_ok)
+            .max()
+            .map_or(now, |direct| direct.min(now));
         let mut any = false;
-        for a in &entry.addrs {
-            let Ok(addr) = a.addr.parse() else {
+        for a in entry.addrs.iter().take(MAX_ADDRS_PER_DEVICE) {
+            let Ok(addr) = a.addr.parse::<std::net::SocketAddr>() else {
                 continue;
             };
-            if !exchangeable(&a.path) {
+            if addr.port() == 0 || !exchanged_ip_allowed(addr.ip()) {
                 continue;
             }
-            store.record_address(&KnownAddrRow {
+            let path = classify(addr.ip(), &ifaces, false);
+            if !exchangeable(&path) {
+                continue;
+            }
+            rows.push(KnownAddrRow {
                 device: entry.device,
                 addr,
-                path: a.path.clone(),
-                last_ok: a.last_ok.min(now),
+                path,
+                last_ok: a.last_ok.min(cap),
                 source: AddrSource::Exchanged,
-            })?;
-            written += 1;
+            });
             any = true;
         }
         if any {
             touched.push(entry.device);
         }
     }
-    Ok((written, touched))
+    store.record_addresses(&rows)?;
+    Ok((rows.len(), touched))
 }
 
 /// 连接建立时记录对端地址。必须用 `dial_addr`（对端 IP + Hello.listen_port）：
@@ -333,5 +382,125 @@ mod tests {
         assert_eq!(to_friend.entries[0].device, mine.device);
         let to_stranger = build_for(&store, &me.user_id(), &stranger.user_id()).unwrap();
         assert!(to_stranger.entries.is_empty());
+    }
+
+    #[test]
+    fn merge_drops_unusable_addresses_and_recomputes_path() {
+        let store = Store::open_in_memory().unwrap();
+        let me = UserKey::generate();
+        let mine = cert(&me, 1);
+        let theirs = cert(&UserKey::generate(), 2);
+        add_device(&store, &mine);
+        add_device(&store, &theirs);
+        let from = peer(Some(mine), "10.0.0.2:1", "10.0.0.2:53320", PathClass::Vpn);
+        let addrs: Vec<KnownAddr> = [
+            "10.1.1.1:53320",
+            "[fd00::5]:53320",
+            "127.0.0.1:53320",
+            "0.0.0.0:53320",
+            "224.0.0.1:53320",
+            "169.254.1.1:53320",
+            "255.255.255.255:53320",
+            "[fe80::1]:53320",
+            "10.0.0.9:0",
+            "8.8.8.8:53320",
+        ]
+        .iter()
+        .map(|a| KnownAddr {
+            addr: (*a).into(),
+            path: PathClass::Lan,
+            last_ok: 1,
+        })
+        .collect();
+        let book = AddressBook {
+            entries: vec![AddressEntry {
+                device: theirs.device,
+                addrs,
+            }],
+        };
+        let n = merge(&store, Some(me.user_id()), &from, &book, 10).unwrap();
+        assert_eq!(n, 2);
+        for r in store.addresses_of(&theirs.device).unwrap() {
+            // 对端声称 Lan，本机重算后只能是 Lan 或 Vpn，且来源为 Exchanged。
+            assert!(matches!(r.path, PathClass::Lan | PathClass::Vpn));
+            assert_eq!(r.source, AddrSource::Exchanged);
+        }
+        assert!(!exchanged_ip_allowed("100.63.255.255".parse().unwrap()));
+        assert!(exchanged_ip_allowed("100.64.0.1".parse().unwrap()));
+        assert!(exchanged_ip_allowed("172.31.0.1".parse().unwrap()));
+        assert!(!exchanged_ip_allowed("172.32.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn exchanged_time_capped_by_direct_record() {
+        let store = Store::open_in_memory().unwrap();
+        let me = UserKey::generate();
+        let mine = cert(&me, 1);
+        let theirs = cert(&UserKey::generate(), 2);
+        add_device(&store, &mine);
+        add_device(&store, &theirs);
+        store
+            .record_address(&KnownAddrRow {
+                device: theirs.device,
+                addr: "10.0.0.50:53320".parse().unwrap(),
+                path: PathClass::Vpn,
+                last_ok: 20,
+                source: AddrSource::Direct,
+            })
+            .unwrap();
+        let from = peer(Some(mine), "10.0.0.2:1", "10.0.0.2:53320", PathClass::Vpn);
+        let mut book = book_for(theirs.device, "10.0.0.51:53320", PathClass::Vpn);
+        book.entries[0].addrs[0].last_ok = 9_999;
+        merge(&store, Some(me.user_id()), &from, &book, 1_000).unwrap();
+        let rows = store.addresses_of(&theirs.device).unwrap();
+        let ex = rows
+            .iter()
+            .find(|r| r.source == AddrSource::Exchanged)
+            .unwrap();
+        assert_eq!(ex.last_ok, 20);
+    }
+
+    #[test]
+    fn oversized_book_is_truncated_and_fast() {
+        let store = Store::open_in_memory().unwrap();
+        let me = UserKey::generate();
+        let mine = cert(&me, 1);
+        add_device(&store, &mine);
+        let other = UserKey::generate();
+        let mut entries = Vec::new();
+        let mut devices = Vec::new();
+        for i in 0..300u16 {
+            let mut id = [7u8; 32];
+            id[..2].copy_from_slice(&i.to_le_bytes());
+            let c = DeviceCert::issue(&other, DeviceId(id), "d".into(), DeviceType::Desktop, 1);
+            add_device(&store, &c);
+            devices.push(c.device);
+            entries.push(AddressEntry {
+                device: c.device,
+                addrs: (0..100u16)
+                    .map(|j| KnownAddr {
+                        addr: format!("10.{}.{}.1:53320", (i % 200) as u8, j),
+                        path: PathClass::Vpn,
+                        last_ok: 1,
+                    })
+                    .collect(),
+            });
+        }
+        let from = peer(Some(mine), "10.0.0.2:1", "10.0.0.2:53320", PathClass::Vpn);
+        let start = std::time::Instant::now();
+        let n = merge(
+            &store,
+            Some(me.user_id()),
+            &from,
+            &AddressBook { entries },
+            10,
+        )
+        .unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        assert!(n <= MAX_BOOK_ENTRIES * MAX_ADDRS_PER_DEVICE);
+        // 前 256 个条目被处理，每台设备最多保留 4 条；超出的条目被丢弃。
+        let first = store.addresses_of(&devices[0]).unwrap();
+        assert_eq!(first.len(), 4);
+        assert!(store.addresses_of(&devices[299]).unwrap().is_empty());
     }
 }

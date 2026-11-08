@@ -146,6 +146,7 @@ impl Connection {
         device_key: &DeviceKey,
         self_device: DeviceId,
         hello: &HelloInfo,
+        accept_filter: &(dyn Fn(&PeerInfo) -> bool + Send + Sync),
         event_tx: mpsc::Sender<ConnEvent>,
         cleanup: ExitCleanup,
     ) -> Result<(PeerInfo, Arc<Connection>), CoreError> {
@@ -249,6 +250,27 @@ impl Connection {
         if their_device == self_device {
             return Err(CoreError::Rejected("peer is self".into()));
         }
+        let peer_info = PeerInfo {
+            device: peer_device,
+            cert: their_hello.cert.clone(),
+            display_name: their_hello.user_display_name,
+            addr: peer_addr,
+            dial_addr: SocketAddr::new(peer_addr.ip(), their_hello.listen_port),
+            path: crate::net::path::classify(
+                peer_addr.ip(),
+                &crate::net::path::cached_ifaces(),
+                false,
+            ),
+            caps: their_hello.caps,
+            outbound: true,
+            tls_exporter,
+        };
+
+        // 与入站对称：出站连接同样经准入规则（出错一律拒绝），不符直接断开。
+        if !accept_filter(&peer_info) {
+            return Err(CoreError::Rejected("accept_filter rejected".into()));
+        }
+
         // 校验通过后，等待对端确认（对端若拒绝会发 Error 帧）。
         let confirm = tokio::time::timeout(Duration::from_secs(5), framed_read.next())
             .await
@@ -267,22 +289,6 @@ impl Connection {
             }
             Some(Ok(_)) => {} // 对端接受，继续
         }
-
-        let peer_info = PeerInfo {
-            device: peer_device,
-            cert: their_hello.cert.clone(),
-            display_name: their_hello.user_display_name,
-            addr: peer_addr,
-            dial_addr: SocketAddr::new(peer_addr.ip(), their_hello.listen_port),
-            path: crate::net::path::classify(
-                peer_addr.ip(),
-                &crate::net::path::cached_ifaces(),
-                false,
-            ),
-            caps: their_hello.caps,
-            outbound: true,
-            tls_exporter,
-        };
 
         let connection = start_io(
             peer_info.clone(),

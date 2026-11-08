@@ -6,6 +6,7 @@
 pub mod files;
 pub mod handlers;
 pub mod ingest;
+pub(crate) mod manual;
 pub(crate) mod redial;
 pub mod views;
 
@@ -88,6 +89,10 @@ pub(crate) struct Inner {
     pub(crate) ui_focus: StdMutex<Option<ConvId>>,
     /// 已登记的静态对端地址（启动配置 + AddManualPeer；只存内存，每个地址一个重连任务）。
     pub(crate) static_peers: StdMutex<HashSet<SocketAddr>>,
+    /// 手动添加的对端后台任务（键为规范化的 host:port），可按键停止。
+    pub(crate) manual_tasks: StdMutex<HashMap<String, tokio::task::AbortHandle>>,
+    /// 最近一次发给各对端的地址簿指纹：内容未变则不重复推送。
+    address_book_sent: StdMutex<HashMap<DeviceId, u64>>,
     /// 发现触发的在途拨号地址：同一地址拨号未结束时不重复发起。
     dialing: StdMutex<HashSet<SocketAddr>>,
     /// 受信对端的重连状态（任务登记、唤醒信号、尝试计数）。
@@ -289,6 +294,8 @@ impl Service {
             platform,
             ui_focus: StdMutex::new(None),
             static_peers: StdMutex::new(HashSet::new()),
+            manual_tasks: StdMutex::new(HashMap::new()),
+            address_book_sent: StdMutex::new(HashMap::new()),
             dialing: StdMutex::new(HashSet::new()),
             redial: redial::RedialState::new(),
         });
@@ -323,10 +330,9 @@ impl Service {
         // 重启后恢复手动添加的对端（持久化在 manual_peers）。
         match inner.store.list_manual_peers() {
             Ok(list) => {
-                for (addr, _) in list {
-                    if let Ok(addr) = addr.parse() {
-                        register_static_peer(&inner, addr, false);
-                    }
+                // 主机名在任务内重新解析。
+                for (key, _) in list {
+                    manual::start(&inner, key, false);
                 }
             }
             Err(e) => tracing::warn!("loading manual peers failed: {e}"),
@@ -499,6 +505,7 @@ async fn routing_task(
     // 会长时间等待对端写队列的发送放在这里，避免慢对端阻塞整个事件循环；
     // 同一对端的发送按入队顺序串行，入站摄取仍在本循环内顺序处理。
     let mut sync_workers: HashMap<DeviceId, mpsc::Sender<SyncJob>> = HashMap::new();
+    let mut book_limiter = AddressBookLimiter::default();
     loop {
         tokio::select! {
             evt = conn_rx.recv() => match evt {
@@ -510,6 +517,7 @@ async fn routing_task(
                 }
                 Some(ConnEvent::Down(device)) => {
                     sync_workers.remove(&device);
+                    book_limiter.forget(&device);
                     inner.sync.on_peer_down(&device);
                     // 关系可能在连接期间才变成受信（刚加联系人），断开时补建重连任务。
                     redial::ensure_task(&inner, device);
@@ -613,26 +621,39 @@ async fn routing_task(
                             tracing::debug!(peer = %d, "connection no longer registered when frame arrived, dropped");
                         }
                     }
-                    // 地址簿：合并后唤醒相关设备的重连任务。
+                    // 地址簿：限速后放到阻塞线程合并（批量写库），再唤醒相关设备的重连任务。
                     Frame::AddressBook(book) => {
-                        if let Some(pi) = inner.conns.peer(&d) {
-                            let self_user = inner.state.read().unwrap().self_user;
-                            match crate::net::addrbook::merge_devices(
-                                &inner.store,
-                                self_user,
-                                &pi,
-                                &book,
-                                now_millis(),
-                            ) {
-                                Ok(devices) => {
-                                    for dev in devices {
-                                        redial::addresses_changed(&inner, dev);
+                        if !book_limiter.allow(d, std::time::Instant::now()) {
+                            tracing::debug!(peer = %d, "AddressBook rate limited, dropped");
+                        } else if let Some(pi) = inner.conns.peer(&d) {
+                            let inner = inner.clone();
+                            tokio::spawn(async move {
+                                let self_user = inner.state.read().unwrap().self_user;
+                                let store = inner.store.clone();
+                                let merged = tokio::task::spawn_blocking(move || {
+                                    crate::net::addrbook::merge_devices(
+                                        &store,
+                                        self_user,
+                                        &pi,
+                                        &book,
+                                        now_millis(),
+                                    )
+                                })
+                                .await;
+                                match merged {
+                                    Ok(Ok(devices)) => {
+                                        for dev in devices {
+                                            redial::addresses_changed(&inner, dev);
+                                        }
+                                    }
+                                    Ok(Err(e)) => {
+                                        tracing::warn!(peer = %d, error = %e, "AddressBook merge failed");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(peer = %d, error = %e, "AddressBook merge task failed");
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::warn!(peer = %d, error = %e, "AddressBook merge failed");
-                                }
-                            }
+                            });
                         }
                     }
                     // Blob 持有者查询/应答分派给 BlobServer（P2 Task 11）。
@@ -663,8 +684,8 @@ async fn on_up(inner: &Arc<Inner>, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJo
         tracing::debug!(peer = %peer.device, "uninitialized peer connection (pairing only)");
         return;
     };
-    // 出站连接不经 accept_filter：对端在握手期间被吊销时，这里补一道检查并断开。
-    if inner.store.is_revoked(&peer.device).unwrap_or(false) {
+    // 兜底：准入检查之后到上线之前对端可能被吊销；查询出错一律按已吊销处理。
+    if inner.store.is_revoked(&peer.device).unwrap_or(true) {
         tracing::info!(peer = %peer.device, "revoked device connected, disconnecting");
         inner.conns.disconnect(&peer.device).await;
         return;
@@ -692,7 +713,7 @@ async fn on_up(inner: &Arc<Inner>, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJo
     }
     redial::ensure_task(inner, peer.device);
     let self_user = inner.state.read().unwrap().self_user;
-    push_address_books(inner);
+    push_address_books(inner, Some(peer.device));
     let _ = inner.events.send(Event::PeerOnline {
         peer: views::peer_view(&inner.store, &peer, self_user.as_ref()),
     });
@@ -706,12 +727,49 @@ async fn on_up(inner: &Arc<Inner>, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJo
     try_enqueue(sync_tx, SyncJob::HaveBlobs(peer), &device);
 }
 
+/// 同一对端的地址簿限速：滑动窗口内最多处理 [`BOOK_LIMIT_COUNT`] 个，其余丢弃。
+#[derive(Default)]
+struct AddressBookLimiter {
+    seen: HashMap<DeviceId, std::collections::VecDeque<std::time::Instant>>,
+}
+
+impl AddressBookLimiter {
+    fn allow(&mut self, device: DeviceId, now: std::time::Instant) -> bool {
+        let q = self.seen.entry(device).or_default();
+        while q
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= BOOK_LIMIT_WINDOW)
+        {
+            q.pop_front();
+        }
+        if q.len() >= BOOK_LIMIT_COUNT {
+            return false;
+        }
+        q.push_back(now);
+        true
+    }
+
+    fn forget(&mut self, device: &DeviceId) {
+        self.seen.remove(device);
+    }
+}
+
+/// 地址簿限速窗口与窗口内最大处理个数。
+const BOOK_LIMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+const BOOK_LIMIT_COUNT: usize = 5;
+/// 发送地址簿的超时：对端不读数据时不无限占用任务。
+const BOOK_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// 向所有在线的自己设备与已接受联系人发送各自可见的地址簿（空簿不发）。
 /// 触发时机：对端上线、联系人变化后、定时兜底——新设备记录与新地址到达的先后顺序不固定。
-fn push_address_books(inner: &Arc<Inner>) {
+fn push_address_books(inner: &Arc<Inner>, fresh: Option<DeviceId>) {
     let Some(self_user) = inner.state.read().unwrap().self_user else {
         return;
     };
+    // 新连接上线：它没收过任何簿，清掉指纹强制重发。
+    if let Some(d) = fresh {
+        inner.address_book_sent.lock().unwrap().remove(&d);
+    }
     for p in inner.conns.peers() {
         let Some(peer_user) = p.cert.as_ref().map(|c| c.user) else {
             continue;
@@ -720,11 +778,33 @@ fn push_address_books(inner: &Arc<Inner>) {
             Ok(b) if !b.entries.is_empty() => b,
             _ => continue,
         };
+        // 内容未变则跳过。
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            lanmsg_proto::to_cbor(&book).hash(&mut h);
+            h.finish()
+        };
+        {
+            let mut sent = inner.address_book_sent.lock().unwrap();
+            if sent.get(&p.device) == Some(&fingerprint) {
+                continue;
+            }
+            sent.insert(p.device, fingerprint);
+        }
         let inner = inner.clone();
         let device = p.device;
-        // 发送可能等待写队列，放到后台任务里，不阻塞调用方。
+        // 发送可能等待写队列，放到后台任务里并限时，不阻塞调用方。
         tokio::spawn(async move {
-            let _ = inner.conns.send(&device, Frame::AddressBook(book)).await;
+            let sent = tokio::time::timeout(
+                BOOK_SEND_TIMEOUT,
+                inner.conns.send(&device, Frame::AddressBook(book)),
+            )
+            .await;
+            if !matches!(sent, Ok(Ok(()))) {
+                // 没发成：清掉指纹，下次推送重试。
+                inner.address_book_sent.lock().unwrap().remove(&device);
+            }
         });
     }
 }
@@ -736,13 +816,13 @@ async fn address_book_task(inner: Arc<Inner>) {
     tick.tick().await;
     loop {
         tokio::select! {
-            _ = tick.tick() => push_address_books(&inner),
+            _ = tick.tick() => push_address_books(&inner, None),
             ev = events.recv() => match ev {
                 Ok(Event::ContactsChanged) => {
                     let inner = inner.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(ADDRESS_BOOK_DELAY).await;
-                        push_address_books(&inner);
+                        push_address_books(&inner, None);
                     });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -941,6 +1021,20 @@ async fn sleep_or_shutdown(inner: &Inner, d: std::time::Duration) -> bool {
 #[cfg(test)]
 mod queue_tests {
     use super::*;
+
+    #[test]
+    fn address_book_limiter_allows_burst_then_drops() {
+        let mut l = AddressBookLimiter::default();
+        let d = DeviceId([1u8; 32]);
+        let t0 = std::time::Instant::now();
+        for _ in 0..BOOK_LIMIT_COUNT {
+            assert!(l.allow(d, t0));
+        }
+        assert!(!l.allow(d, t0));
+        // 其他对端不受影响；窗口过后恢复。
+        assert!(l.allow(DeviceId([2u8; 32]), t0));
+        assert!(l.allow(d, t0 + BOOK_LIMIT_WINDOW));
+    }
 
     /// 对端不读数据（接收端不消费）时，洪泛入队最多接受 SYNC_JOB_QUEUE 个，
     /// 其余被丢弃，队列长度有上限。选确定性单测而非网络洪泛：入队决策是

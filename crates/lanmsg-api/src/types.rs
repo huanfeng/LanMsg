@@ -192,6 +192,12 @@ pub enum Request {
     AddManualPeer {
         addr: String,
     },
+    /// 删除手动添加的对端（P5 追加）：停止对该地址的重连，并取消其“手动设备”放行。
+    RemoveManualPeer {
+        addr: String,
+    },
+    /// 列出手动添加的对端（P5 追加）。
+    ListManualPeers,
     ScanSubnet {
         cidr: String,
     },
@@ -284,6 +290,9 @@ pub enum Response {
     },
     Interfaces {
         value: Vec<InterfaceView>,
+    },
+    ManualPeers {
+        value: Vec<ManualPeerView>,
     },
     Stations {
         value: Vec<StationView>,
@@ -806,6 +815,16 @@ pub enum BackgroundMode {
     Realtime,
     PowerSaving,
     Off,
+}
+
+/// 手动添加的对端视图（P5 追加）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ManualPeerView {
+    /// 添加时的地址（IP 或主机名，已规范化为 host:port）。
+    pub addr: String,
+    /// 已连上过的设备（hex）；尚未连上过为 None。
+    pub device_id: Option<String>,
 }
 
 /// 网络接口视图。

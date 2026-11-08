@@ -2,7 +2,6 @@
 // 仍未实现的变体（若有）统一返回 `ErrorCode::Unimplemented`（message 为 `unimplemented: <变体名>`），见文件末尾 `variant_name`。
 // 注释中文，标识符英文。
 
-use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -53,6 +52,8 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
         Request::SetSettings { settings } => set_settings(inner, settings).await,
         Request::SetProfile { display_name } => set_profile(inner, display_name).await,
         Request::AddManualPeer { addr } => add_manual_peer(inner, addr).await,
+        Request::RemoveManualPeer { addr } => remove_manual_peer(inner, addr).await,
+        Request::ListManualPeers => list_manual_peers(inner),
         Request::ListInterfaces => Ok(list_interfaces()),
         Request::NetworkChanged => {
             super::redial::network_changed(inner);
@@ -435,45 +436,68 @@ async fn send_folder(inner: &Inner, conv: String, path: String) -> Result<Respon
     })
 }
 
-/// 解析 `host[:port]`（无端口用 SERVICE_PORT；IPv6 需 `[ip]:port`），持久化后拨号。
+/// AddManualPeer：解析并规范化地址 → 持久化 → 拨号。
+/// 连接失败返回 `PeerOffline`，但记录保留，由后台任务继续重连。
 async fn add_manual_peer(inner: &Arc<Inner>, addr: String) -> Result<Response, ApiError> {
-    let addr = parse_manual_addr(&addr).await?;
+    use super::manual;
+    let key = manual::parse_manual_target(&addr)?.key();
+    let existing = inner
+        .store
+        .list_manual_peers()
+        .map_err(crate::error::CoreError::from)?;
+    if !existing.iter().any(|(k, _)| *k == key)
+        && existing.len() >= crate::store::addresses::MAX_MANUAL_PEERS
+    {
+        return Err(invalid_arg("too many manual peers".into()));
+    }
+    // 先解析再落库：解析不了的地址不留记录。
+    let resolved = manual::resolve(&key).await?;
     inner
         .store
-        .add_manual_peer(&addr.to_string(), now_millis())
+        .add_manual_peer(&key, now_millis())
         .map_err(crate::error::CoreError::from)?;
-    // 登记为静态对端：断线（含对端重启、无 FIN 消失）后按退避自动重连；重启后也会恢复。
-    // 绑定到设备由连接建立时的 on_peer_up_record 完成。
-    if inner.conns.connect(addr, false).await.is_err() {
-        super::register_static_peer(inner, addr, false);
-        return Err(CoreError::PeerOffline.into());
+    match inner.conns.connect(resolved, false).await {
+        Ok(device) => {
+            inner
+                .store
+                .bind_manual_peer(&key, &device)
+                .map_err(crate::error::CoreError::from)?;
+            // 断线（含对端重启、无 FIN 消失）后按退避自动重连；重启后也会恢复。
+            manual::start(inner, key, true);
+            Ok(Response::Ok)
+        }
+        Err(_) => {
+            manual::start(inner, key, false);
+            Err(CoreError::PeerOffline.into())
+        }
     }
-    super::register_static_peer(inner, addr, true);
+}
+
+/// RemoveManualPeer：删除记录并停止后台重连任务（已建立的连接不受影响）。
+async fn remove_manual_peer(inner: &Arc<Inner>, addr: String) -> Result<Response, ApiError> {
+    use super::manual;
+    let key = manual::parse_manual_target(&addr)?.key();
+    inner
+        .store
+        .remove_manual_peer(&key)
+        .map_err(crate::error::CoreError::from)?;
+    manual::stop(inner, &key);
     Ok(Response::Ok)
 }
 
-/// 解析手动添加的地址：`ip`、`ip:port`、`[ipv6]:port`、`host`、`host:port`。
-async fn parse_manual_addr(input: &str) -> Result<SocketAddr, ApiError> {
-    use lanmsg_proto::consts::SERVICE_PORT;
-    let input = input.trim();
-    let bad = || invalid_arg(format!("cannot resolve address: {input}"));
-    if let Ok(a) = input.parse::<SocketAddr>() {
-        return Ok(a);
-    }
-    if let Ok(ip) = input.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
-        return Ok(SocketAddr::new(ip, SERVICE_PORT));
-    }
-    let target = match input.rsplit_once(':') {
-        Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => input.to_string(),
-        Some(_) => return Err(bad()),
-        None if !input.is_empty() => format!("{input}:{SERVICE_PORT}"),
-        None => return Err(bad()),
-    };
-    tokio::net::lookup_host(target)
-        .await
-        .map_err(|_| bad())?
-        .next()
-        .ok_or_else(bad)
+/// ListManualPeers：手动添加的对端及其绑定的设备。
+fn list_manual_peers(inner: &Inner) -> Result<Response, ApiError> {
+    let value = inner
+        .store
+        .list_manual_peers()
+        .map_err(crate::error::CoreError::from)?
+        .into_iter()
+        .map(|(addr, device)| lanmsg_api::types::ManualPeerView {
+            addr,
+            device_id: device.map(|d| d.to_hex()),
+        })
+        .collect();
+    Ok(Response::ManualPeers { value })
 }
 
 // ---- P2 Task 5：联系人双向确认与准入过滤 ----
@@ -1055,6 +1079,8 @@ fn variant_name(req: &Request) -> &'static str {
         Request::GetSettings => "GetSettings",
         Request::SetSettings { .. } => "SetSettings",
         Request::AddManualPeer { .. } => "AddManualPeer",
+        Request::RemoveManualPeer { .. } => "RemoveManualPeer",
+        Request::ListManualPeers => "ListManualPeers",
         Request::ScanSubnet { .. } => "ScanSubnet",
         Request::ListInterfaces => "ListInterfaces",
         Request::NetworkChanged => "NetworkChanged",

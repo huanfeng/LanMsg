@@ -9,6 +9,7 @@ use lanmsg_core::discovery::MemoryBus;
 use lanmsg_core::platform::PlatformHooks;
 
 use common::{befriend, node, node_with, pair, TestNode};
+use lanmsg_api::types::Response;
 
 fn is_online(dev: String) -> impl Fn(&Event) -> bool {
     move |e| matches!(e, Event::PeerOnline { peer } if peer.device_id == dev)
@@ -38,6 +39,8 @@ async fn manual_peer_connects_and_is_remembered() {
 
 #[tokio::test]
 async fn address_book_lets_my_devices_find_contact() {
+    // 节点都在回环地址上：测试期间允许地址簿交换回环地址。
+    lanmsg_core::net::addrbook::allow_loopback_for_tests(true);
     let bus1 = MemoryBus::new();
     let bus2 = MemoryBus::new();
     let mut p1 = node(&bus1).await;
@@ -91,4 +94,45 @@ async fn manual_peer_offline_is_persisted_and_reports_peer_offline() {
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::PeerOffline);
+}
+
+#[tokio::test]
+async fn remove_manual_peer_forgets_it_and_list_reports_bindings() {
+    let a = node(&MemoryBus::new()).await;
+    let b = node(&MemoryBus::new()).await;
+    a.init_first("A").await;
+    b.init_first("B").await;
+    let addr = b.svc.local_addr().to_string();
+    a.call(Request::AddManualPeer { addr: addr.clone() }).await;
+    let Response::ManualPeers { value } = a.call(Request::ListManualPeers).await else {
+        panic!("expected ManualPeers");
+    };
+    assert_eq!(value.len(), 1);
+    assert_eq!(value[0].device_id, Some(b.device_id().await));
+    a.call(Request::RemoveManualPeer { addr }).await;
+    let Response::ManualPeers { value } = a.call(Request::ListManualPeers).await else {
+        panic!("expected ManualPeers");
+    };
+    assert!(value.is_empty());
+}
+
+#[tokio::test]
+async fn manual_peer_count_is_limited() {
+    let a = node(&MemoryBus::new()).await;
+    a.init_first("A").await;
+    for i in 0..32 {
+        // 无服务监听的地址：连接失败（PeerOffline），记录照常保留。
+        let _ = a
+            .try_call(Request::AddManualPeer {
+                addr: format!("127.0.0.1:{}", 40000 + i),
+            })
+            .await;
+    }
+    let err = a
+        .try_call(Request::AddManualPeer {
+            addr: "127.0.0.1:50000".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
 }

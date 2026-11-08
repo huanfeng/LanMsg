@@ -207,6 +207,12 @@ fn candidate_addrs(inner: &Inner, device: &DeviceId) -> Vec<SocketAddr> {
     let mut out: Vec<SocketAddr> = known_addr(inner, device).into_iter().collect();
     if let Ok(rows) = inner.store.addresses_of(device) {
         for r in rows {
+            // 地址簿交换来的地址只拨私网/CGNAT/ULA 段，防止被诱导去连任意主机。
+            if r.source == crate::store::AddrSource::Exchanged
+                && !crate::net::addrbook::exchanged_ip_allowed(r.addr.ip())
+            {
+                continue;
+            }
             if !out.contains(&r.addr) {
                 out.push(r.addr);
             }

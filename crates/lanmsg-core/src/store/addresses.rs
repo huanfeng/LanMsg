@@ -11,6 +11,12 @@ use crate::store::{Store, StoreError};
 /// 每台设备最多保留的地址条数。
 pub const MAX_ADDRS_PER_DEVICE: usize = 8;
 
+/// 每台设备最多保留的地址簿交换来源（Exchanged）地址条数。
+pub const MAX_EXCHANGED_PER_DEVICE: usize = 4;
+
+/// 手动对端条目上限。
+pub const MAX_MANUAL_PEERS: usize = 32;
+
 /// 地址来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddrSource {
@@ -74,40 +80,63 @@ fn lock_err<T>(e: std::sync::PoisonError<T>) -> StoreError {
 }
 
 impl Store {
-    /// 写入（upsert）一条已知地址；每台设备最多保留 8 条，超出删 `last_ok` 最旧的。
+    /// 写入（upsert）一条已知地址，规则见 [`Store::record_addresses`]。
     pub fn record_address(&self, row: &KnownAddrRow) -> Result<(), StoreError> {
+        self.record_addresses(std::slice::from_ref(row))
+    }
+
+    /// 在一个事务内批量写入已知地址。每台设备：Exchanged 最多 4 条（保留最近的），
+    /// 总数最多 8 条，淘汰时优先丢 Exchanged，其次丢最旧的 Direct/Manual。
+    pub fn record_addresses(&self, rows: &[KnownAddrRow]) -> Result<(), StoreError> {
         let mut conn = self.conn().map_err(lock_err)?;
         let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO known_addresses(device_id, addr, path, last_ok, source)
-             VALUES(?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(device_id, addr) DO UPDATE SET
-               path = CASE WHEN known_addresses.source = 'direct' AND excluded.source != 'direct'
-                           THEN known_addresses.path ELSE excluded.path END,
-               last_ok = CASE WHEN known_addresses.source = 'direct' AND excluded.source != 'direct'
-                              THEN known_addresses.last_ok
-                              ELSE MAX(known_addresses.last_ok, excluded.last_ok) END,
-               source = CASE WHEN known_addresses.source = 'direct' AND excluded.source != 'direct'
-                             THEN known_addresses.source ELSE excluded.source END",
-            rusqlite::params![
-                &row.device.0[..],
-                row.addr.to_string(),
-                format!("{:?}", row.path),
-                row.last_ok,
-                row.source.as_str(),
-            ],
-        )?;
-        tx.execute(
-            "DELETE FROM known_addresses WHERE device_id = ?1 AND addr NOT IN (
-               SELECT addr FROM known_addresses WHERE device_id = ?1
-               ORDER BY last_ok DESC, addr LIMIT ?2)",
-            rusqlite::params![&row.device.0[..], MAX_ADDRS_PER_DEVICE as i64],
-        )?;
+        let mut devices: Vec<DeviceId> = Vec::new();
+        for row in rows {
+            tx.execute(
+                "INSERT INTO known_addresses(device_id, addr, path, last_ok, source)
+                 VALUES(?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(device_id, addr) DO UPDATE SET
+                   path = CASE WHEN known_addresses.source = 'direct' AND excluded.source != 'direct'
+                               THEN known_addresses.path ELSE excluded.path END,
+                   last_ok = CASE WHEN known_addresses.source = 'direct' AND excluded.source != 'direct'
+                                  THEN known_addresses.last_ok
+                                  ELSE MAX(known_addresses.last_ok, excluded.last_ok) END,
+                   source = CASE WHEN known_addresses.source = 'direct' AND excluded.source != 'direct'
+                                 THEN known_addresses.source ELSE excluded.source END",
+                rusqlite::params![
+                    &row.device.0[..],
+                    row.addr.to_string(),
+                    format!("{:?}", row.path),
+                    row.last_ok,
+                    row.source.as_str(),
+                ],
+            )?;
+            if !devices.contains(&row.device) {
+                devices.push(row.device);
+            }
+        }
+        for device in devices {
+            // 先限制 Exchanged 条数，再限制总数（受保护的 Direct/Manual 排在 Exchanged 之前）。
+            tx.execute(
+                "DELETE FROM known_addresses WHERE device_id = ?1 AND source = 'exchanged'
+                   AND addr NOT IN (
+                     SELECT addr FROM known_addresses WHERE device_id = ?1 AND source = 'exchanged'
+                     ORDER BY last_ok DESC, addr LIMIT ?2)",
+                rusqlite::params![&device.0[..], MAX_EXCHANGED_PER_DEVICE as i64],
+            )?;
+            tx.execute(
+                "DELETE FROM known_addresses WHERE device_id = ?1 AND addr NOT IN (
+                   SELECT addr FROM known_addresses WHERE device_id = ?1
+                   ORDER BY (source = 'exchanged') ASC, last_ok DESC, addr LIMIT ?2)",
+                rusqlite::params![&device.0[..], MAX_ADDRS_PER_DEVICE as i64],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
 
-    /// 某设备的已知地址：先按路径优先级（Lan < Vpn < Internet < Relay），再按 `last_ok` 降序。
+    /// 某设备的已知地址：先按路径优先级（Lan < Vpn < Internet < Relay），同路径下
+    /// Direct/Manual 优先于 Exchanged，最后按 `last_ok` 降序。
     pub fn addresses_of(&self, device: &DeviceId) -> Result<Vec<KnownAddrRow>, StoreError> {
         let conn = self.conn().map_err(lock_err)?;
         let mut stmt = conn.prepare(
@@ -139,6 +168,7 @@ impl Store {
         out.sort_by(|a, b| {
             path_rank(&a.path)
                 .cmp(&path_rank(&b.path))
+                .then((a.source == AddrSource::Exchanged).cmp(&(b.source == AddrSource::Exchanged)))
                 .then(b.last_ok.cmp(&a.last_ok))
         });
         Ok(out)
@@ -172,13 +202,40 @@ impl Store {
     }
 
     /// 把手动对端地址绑定到连上的设备；地址不在 manual_peers 中则什么都不做。
+    /// 首次绑定与改绑都会记一条日志。
     pub fn bind_manual_peer(&self, addr: &str, device: &DeviceId) -> Result<(), StoreError> {
+        use rusqlite::OptionalExtension;
         let conn = self.conn().map_err(lock_err)?;
+        let current: Option<Option<Vec<u8>>> = conn
+            .query_row(
+                "SELECT device_id FROM manual_peers WHERE addr = ?1",
+                [addr],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Ok(());
+        };
+        if current.as_deref() == Some(&device.0[..]) {
+            return Ok(());
+        }
         conn.execute(
             "UPDATE manual_peers SET device_id = ?2 WHERE addr = ?1",
             rusqlite::params![addr, &device.0[..]],
         )?;
+        if current.is_some() {
+            tracing::info!(%addr, %device, "manual peer rebound to a different device");
+        } else {
+            tracing::info!(%addr, %device, "manual peer bound to device");
+        }
         Ok(())
+    }
+
+    /// 删除手动对端，返回是否存在。
+    pub fn remove_manual_peer(&self, addr: &str) -> Result<bool, StoreError> {
+        let conn = self.conn().map_err(lock_err)?;
+        let n = conn.execute("DELETE FROM manual_peers WHERE addr = ?1", [addr])?;
+        Ok(n > 0)
     }
 
     /// 该设备是否由用户手动添加过。
@@ -274,5 +331,65 @@ mod tests {
         // 绑定不存在的地址不会凭空创建记录。
         s.bind_manual_peer("9.9.9.9:1", &DeviceId([8; 32])).unwrap();
         assert!(!s.is_manual_device(&DeviceId([8; 32])).unwrap());
+    }
+
+    fn row_src(dev: u8, addr: &str, last_ok: i64, source: AddrSource) -> KnownAddrRow {
+        let mut r = row(dev, addr, PathClass::Vpn, last_ok);
+        r.source = source;
+        r
+    }
+
+    #[test]
+    fn exchanged_capped_at_four_and_direct_protected() {
+        let s = Store::open_in_memory().unwrap();
+        let d = DeviceId([1; 32]);
+        for i in 0..6u8 {
+            s.record_address(&row_src(
+                1,
+                &format!("10.0.0.{}:1", i + 1),
+                100 + i as i64,
+                AddrSource::Exchanged,
+            ))
+            .unwrap();
+        }
+        let rows = s.addresses_of(&d).unwrap();
+        assert_eq!(rows.len(), MAX_EXCHANGED_PER_DEVICE);
+        // 8 条 Direct/Manual 之后，Exchanged 先被淘汰。
+        let mut batch = Vec::new();
+        for i in 0..8u8 {
+            batch.push(row_src(
+                1,
+                &format!("172.16.0.{}:1", i + 1),
+                i as i64,
+                AddrSource::Direct,
+            ));
+        }
+        s.record_addresses(&batch).unwrap();
+        let rows = s.addresses_of(&d).unwrap();
+        assert_eq!(rows.len(), MAX_ADDRS_PER_DEVICE);
+        assert!(rows.iter().all(|r| r.source == AddrSource::Direct));
+    }
+
+    #[test]
+    fn direct_sorts_before_exchanged_on_same_path() {
+        let s = Store::open_in_memory().unwrap();
+        s.record_address(&row_src(1, "10.0.0.1:1", 500, AddrSource::Exchanged))
+            .unwrap();
+        s.record_address(&row_src(1, "10.0.0.2:1", 1, AddrSource::Direct))
+            .unwrap();
+        let rows = s.addresses_of(&DeviceId([1; 32])).unwrap();
+        assert_eq!(rows[0].addr.to_string(), "10.0.0.2:1");
+    }
+
+    #[test]
+    fn remove_manual_peer_deletes_binding() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_manual_peer("host.example:53320", 1).unwrap();
+        let d = DeviceId([5; 32]);
+        s.bind_manual_peer("host.example:53320", &d).unwrap();
+        assert!(s.is_manual_device(&d).unwrap());
+        assert!(s.remove_manual_peer("host.example:53320").unwrap());
+        assert!(!s.is_manual_device(&d).unwrap());
+        assert!(!s.remove_manual_peer("host.example:53320").unwrap());
     }
 }
