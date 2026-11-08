@@ -116,6 +116,7 @@ mod tests {
             unicast_targets: Vec::new(),
             background_mode: lanmsg_api::types::BackgroundMode::Realtime,
             localsend_listening: None,
+            localsend_port: 53317,
         }
     }
 

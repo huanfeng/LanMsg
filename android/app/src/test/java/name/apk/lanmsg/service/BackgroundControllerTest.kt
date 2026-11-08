@@ -44,7 +44,7 @@ class BackgroundControllerTest {
 
     private fun settings(mode: BackgroundMode) = SettingsDto(
         deviceName = "p", downloadDir = "/d", autoImageMax = 0uL, autoFileMax = 0uL, autoFileWifiOnly = true,
-        localsendEnabled = false, unicastTargets = emptyList(), backgroundMode = mode, localsendListening = null,
+        localsendEnabled = false, unicastTargets = emptyList(), backgroundMode = mode, localsendListening = null, localsendPort = 53317u,
     )
 
     @Test fun mode_and_conditions_drive_service_and_worker() = runTest {

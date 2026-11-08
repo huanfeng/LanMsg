@@ -744,6 +744,7 @@ pub fn demo_model(p: DemoPage) -> Model {
         unicast_targets: vec!["192.168.1.20".into()],
         background_mode: BackgroundMode::Realtime,
         localsend_listening: Some(true),
+        localsend_port: 53317,
     });
     match p {
         DemoPage::Wizard => {

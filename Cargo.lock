@@ -2149,6 +2149,7 @@ dependencies = [
  "keyring",
  "lanmsg-api",
  "lanmsg-core",
+ "lanmsg-localsend",
  "lanmsg-proto",
  "rand",
  "rcgen",

@@ -957,3 +957,71 @@ async fn deleted_message_not_resurrected_by_sync() {
         "同步后 A 的已删除消息不应复活"
     );
 }
+
+/// LocalSend 会话（伪设备作者、签名全零）永远不参与同步：配对的另一台设备上看不到。
+#[tokio::test]
+async fn localsend_conv_is_never_synced() {
+    let mut a = node_offline().await;
+    let mut b = node_offline().await;
+    let a_user = a.init_first("甲").await;
+    init_join(&b).await;
+    pair(&mut a, &mut b).await;
+
+    // A 的库里直接放一个 LocalSend 会话与一条伪设备消息
+    let store = a.svc.store_for_test();
+    let ls_conv = ConvId::localsend(&"ab".repeat(32));
+    store
+        .ensure_conversation(&ConvRow {
+            conv: ls_conv,
+            kind: ConvKindRow::LocalSend,
+            peer_user: None,
+            title: Some("PhoneApp".into()),
+            created_at: 1,
+        })
+        .unwrap();
+    let pseudo = lanmsg_core::store::pseudo_device_id(&"ab".repeat(32));
+    let (seq, conv_seq) = store.next_seqs(&pseudo, &ls_conv).unwrap();
+    let env = lanmsg_proto::types::Envelope {
+        conv: ls_conv,
+        id: lanmsg_proto::ids::MsgId {
+            author: pseudo,
+            seq,
+        },
+        conv_seq,
+        hlc: lanmsg_proto::types::Hlc {
+            millis: 1,
+            counter: 0,
+        },
+        body: lanmsg_proto::types::MsgBody::Text { text: "ls".into() },
+        enc: None,
+        sig: lanmsg_proto::types::Signature64([0u8; 64]),
+    };
+    store
+        .insert_envelope(&env, lanmsg_core::store::MsgStateRow::Delivered, 1)
+        .unwrap();
+
+    // B 断开重连触发同步；用一条自设备会话消息确认同步确实发生过
+    b.svc.shutdown().await;
+    let TestNode { dir, .. } = b;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let self_conv = ConvId::self_devices(&user(&a_user)).to_hex();
+    a.call(Request::SendText {
+        conv: self_conv.clone(),
+        text: "sync marker".into(),
+    })
+    .await;
+    let b2 = node_offline_with(dir, PlatformHooks::default()).await;
+    link(&a, &b2).await;
+    wait_until(|| async { list_texts(&b2, &self_conv).await.len() == 1 }, 5).await;
+
+    match b2.call(Request::ListConversations).await {
+        Response::Conversations { value } => {
+            assert!(
+                value.iter().all(|c| c.conv != ls_conv.to_hex()),
+                "LocalSend 会话不应同步到其他设备"
+            );
+        }
+        other => panic!("期望 Conversations，实际 {other:?}"),
+    }
+    assert!(list_msgs(&b2, &ls_conv.to_hex()).await.is_empty());
+}

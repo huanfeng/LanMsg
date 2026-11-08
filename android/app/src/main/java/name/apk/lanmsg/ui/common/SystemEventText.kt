@@ -20,6 +20,8 @@ fun systemEventFormat(event: SystemEventView): EventText = when (event) {
     is SystemEventView.Recalled ->
         if (event.byMe) EventText(R.string.sys_recalled_by_me, emptyList())
         else EventText(R.string.sys_recalled_by_peer, listOf(event.authorName))
+    is SystemEventView.LocalSendPin -> EventText(R.string.sys_localsend_pin, listOf(event.name))
+    is SystemEventView.LocalSendBusy -> EventText(R.string.sys_localsend_busy, listOf(event.name))
 }
 
 @Composable

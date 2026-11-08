@@ -3755,6 +3755,7 @@ mod tests {
             unicast_targets: Vec::new(),
             background_mode: BackgroundMode::Realtime,
             localsend_listening: None,
+            localsend_port: 53317,
         }
     }
 

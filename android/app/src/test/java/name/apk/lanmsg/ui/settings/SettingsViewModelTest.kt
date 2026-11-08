@@ -34,7 +34,7 @@ class SettingsViewModelTest {
     private val initial = SettingsDto(
         deviceName = "phone", downloadDir = "/d", autoImageMax = 10uL, autoFileMax = 0uL,
         autoFileWifiOnly = true, localsendEnabled = false, unicastTargets = emptyList(),
-        backgroundMode = BackgroundMode.REALTIME, localsendListening = null,
+        backgroundMode = BackgroundMode.REALTIME, localsendListening = null, localsendPort = 53317u,
     )
     private var failSet = false
     private val prefs = MemoryPrefs()

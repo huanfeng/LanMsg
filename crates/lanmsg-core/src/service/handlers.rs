@@ -130,6 +130,7 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
             pinned,
         } => station_set_pinned(inner, &station, &item, pinned).await,
         Request::Shutdown => {
+            inner.localsend.stop().await;
             inner.discovery.shutdown();
             inner.conns.shutdown().await;
             Ok(Response::Ok)
@@ -267,6 +268,9 @@ async fn init(
 
     // 更新 accept_filter / 路由可见的 self_user。
     inner.state.write().unwrap().self_user = Some(user);
+
+    // 初始化完成：按设置启动 LocalSend 兼容服务。
+    inner.localsend.reconfigure(inner).await;
 
     Ok(Response::Ok)
 }
@@ -425,25 +429,58 @@ async fn open_dm(inner: &Inner, user: String) -> Result<Response, ApiError> {
 
 async fn send_text(inner: &Inner, conv: String, text: String) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
-    let msg_id = inner.msg.send(&conv, MsgBody::Text { text }).await?;
+    let bridge = localsend_target(inner, &conv)?;
+    let msg_id = inner
+        .msg
+        .send(&conv, MsgBody::Text { text: text.clone() })
+        .await?;
+    if let Some(b) = bridge {
+        let id = msg_id.clone();
+        tokio::spawn(async move { b.deliver_text(conv, id, text).await });
+    }
     Ok(Response::MsgId {
         value: msg_id.to_string(),
     })
+}
+
+/// LocalSend 会话的发送前检查：桥未运行或对端不在线 → `PeerOffline`。
+/// 非 LocalSend 会话返回 `None`。
+fn localsend_target(
+    inner: &Inner,
+    conv: &ConvId,
+) -> Result<Option<Arc<crate::localsend_bridge::LocalSendBridge>>, ApiError> {
+    if !crate::localsend_bridge::is_localsend_conv(&inner.store, conv) {
+        return Ok(None);
+    }
+    match inner.localsend.get() {
+        Some(b) if b.peer_online(conv) => Ok(Some(b)),
+        _ => Err(CoreError::PeerOffline.into()),
+    }
 }
 
 /// SendFiles：发送文件消息，返回预留的 MsgId（后台完成哈希后入库投递）。
 async fn send_files(inner: &Inner, conv: String, paths: Vec<String>) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
-    let paths = paths.into_iter().map(std::path::PathBuf::from).collect();
-    let msg_id = inner.msg.send_files(&conv, paths).await?;
+    let bridge = localsend_target(inner, &conv)?;
+    let paths: Vec<std::path::PathBuf> = paths.into_iter().map(std::path::PathBuf::from).collect();
+    let msg_id = inner.msg.send_files(&conv, paths.clone()).await?;
+    if let Some(b) = bridge {
+        let id = msg_id.clone();
+        tokio::spawn(async move { b.deliver_files(conv, id, paths).await });
+    }
     Ok(Response::MsgId {
         value: msg_id.to_string(),
     })
 }
 
-/// SendFolder：发送文件夹消息。
+/// SendFolder：发送文件夹消息（LocalSend 会话不支持）。
 async fn send_folder(inner: &Inner, conv: String, path: String) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
+    if crate::localsend_bridge::is_localsend_conv(&inner.store, &conv) {
+        return Err(invalid_arg(
+            "localsend does not support sending folders".into(),
+        ));
+    }
     let msg_id = inner
         .msg
         .send_folder(&conv, std::path::PathBuf::from(path))
@@ -543,10 +580,14 @@ async fn list_requests(inner: &Inner) -> Result<Response, ApiError> {
         .store
         .list_open_requests()
         .map_err(crate::error::CoreError::from)?;
-    let value = rows
+    let mut value: Vec<_> = rows
         .iter()
         .map(|r| crate::service::views::request_view(&inner.store, r))
         .collect();
+    // LocalSend 的待审批请求不在 requests 表里，追加在末尾。
+    if let Some(b) = inner.localsend.get() {
+        value.extend(b.pending_requests());
+    }
     Ok(Response::Requests { value })
 }
 
@@ -556,6 +597,15 @@ async fn respond_request(
     request: String,
     action: lanmsg_api::types::RequestAction,
 ) -> Result<Response, ApiError> {
+    // LocalSend 请求以 `ls-` 为前缀；桥未运行时视为不存在。
+    if request.starts_with("ls-") {
+        let bridge = inner.localsend.get().ok_or_else(|| ApiError {
+            code: ErrorCode::NotFound,
+            message: format!("request not found: {request}"),
+        })?;
+        bridge.respond(&request, action).await?;
+        return Ok(Response::Ok);
+    }
     let row = inner
         .store
         .get_request(&request)
@@ -728,7 +778,9 @@ fn list_interfaces() -> Response {
 
 /// GetSettings：从存储加载（无记录返回默认值）。
 async fn get_settings(inner: &Inner) -> Result<Response, ApiError> {
-    let value = crate::settings::load_settings(&inner.store)?;
+    let mut value = crate::settings::load_settings(&inner.store)?;
+    // 只读字段：LocalSend 运行中才有值，false 表示端口被占用（只能发送）。
+    value.localsend_listening = inner.localsend.get().map(|b| b.listening());
     Ok(Response::Settings { value })
 }
 
@@ -738,6 +790,9 @@ async fn set_settings(inner: &Inner, settings: SettingsDto) -> Result<Response, 
     // 校验：下载目录 trim 后非空（阈值 u64 恒 ≥ 0，无需检查）。
     if settings.download_dir.trim().is_empty() {
         return Err(invalid_arg("download directory must not be empty".into()));
+    }
+    if !(1024..=65535).contains(&settings.localsend_port) {
+        return Err(invalid_arg("localsend port must be 1024-65535".into()));
     }
 
     let mut settings = settings;
@@ -769,6 +824,9 @@ async fn set_settings(inner: &Inner, settings: SettingsDto) -> Result<Response, 
         };
         apply_cert_and_broadcast(inner, &new_cert).await;
     }
+
+    // LocalSend 开关、端口、下载目录或别名变化时启动 / 重启 / 停止。
+    inner.localsend.reconfigure(inner).await;
 
     Ok(Response::Ok)
 }
@@ -862,6 +920,9 @@ async fn set_profile(inner: &Inner, display_name: String) -> Result<Response, Ap
             },
         )
         .await?;
+
+    // LocalSend 的别名取显示名：变化时重启。
+    inner.localsend.reconfigure(inner).await;
 
     Ok(Response::Ok)
 }

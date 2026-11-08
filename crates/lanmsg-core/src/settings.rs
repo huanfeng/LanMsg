@@ -43,6 +43,7 @@ pub fn default_settings(data_dir: &Path, device_name: &str) -> SettingsDto {
         unicast_targets: Vec::new(),
         background_mode: BackgroundMode::Realtime,
         localsend_listening: None,
+        localsend_port: lanmsg_proto::consts::LOCALSEND_PORT,
     }
 }
 

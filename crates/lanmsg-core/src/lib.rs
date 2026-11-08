@@ -6,6 +6,7 @@ pub mod identity;
 pub mod keystore;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod keystore_os;
+pub mod localsend_bridge;
 pub mod msg;
 pub mod net;
 pub mod pairing;

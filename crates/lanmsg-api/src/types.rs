@@ -510,13 +510,36 @@ pub enum MessageBodyView {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum SystemEventView {
-    DeviceAdded { name: String },
-    DeviceRemoved { name: String },
-    ContactAdded { name: String },
-    ContactUpdated { name: String },
-    NicknameUpdated { name: String },
-    MessagesDeleted { count: u32 },
-    Recalled { author_name: String, by_me: bool },
+    DeviceAdded {
+        name: String,
+    },
+    DeviceRemoved {
+        name: String,
+    },
+    ContactAdded {
+        name: String,
+    },
+    ContactUpdated {
+        name: String,
+    },
+    NicknameUpdated {
+        name: String,
+    },
+    MessagesDeleted {
+        count: u32,
+    },
+    Recalled {
+        author_name: String,
+        by_me: bool,
+    },
+    /// LocalSend 对端开启了 PIN，暂不支持（P5 追加）。
+    LocalSendPin {
+        name: String,
+    },
+    /// LocalSend 对端正忙，请稍后重试（P5 追加）。
+    LocalSendBusy {
+        name: String,
+    },
 }
 
 /// Blob 状态。
@@ -806,6 +829,14 @@ pub struct SettingsDto {
     pub background_mode: BackgroundMode,
     /// 只读：P5 填充，SetSettings 时忽略。
     pub localsend_listening: Option<bool>,
+    /// LocalSend 监听端口（P5 追加，默认 53317；SetSettings 校验 1024–65535）。
+    #[serde(default = "default_localsend_port")]
+    pub localsend_port: u16,
+}
+
+/// `SettingsDto.localsend_port` 的默认值（旧版本保存的设置缺该字段时使用）。
+fn default_localsend_port() -> u16 {
+    53317
 }
 
 /// 后台模式（仅 Android 使用）。

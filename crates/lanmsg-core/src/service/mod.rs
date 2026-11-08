@@ -49,7 +49,8 @@ pub struct ServiceConfig {
     pub static_peers: Vec<SocketAddr>,
     /// 平台钩子（P1 为空）。
     pub platform: PlatformHooks,
-    /// LocalSend 监听端口（P5 使用，当前仅占位）。
+    /// LocalSend 开关：非 0 表示生产模式（端口取设置项 `localsend_port`，
+    /// 且在组播发现开启时启用 LocalSend 发现）；0 表示测试模式（随机端口、无发现）。
     pub localsend_port: u16,
 }
 
@@ -89,6 +90,10 @@ pub(crate) struct Inner {
     pub(crate) station_client: crate::station::client::StationClient,
     /// 数据目录（中转站副本目录等）。
     pub(crate) data_dir: std::path::PathBuf,
+    /// 混合逻辑时钟（LocalSend 桥为伪设备作者的消息取时间戳）。
+    pub(crate) clock: Arc<StdMutex<HlcClock>>,
+    /// LocalSend 兼容服务（P5 Task 11）。
+    pub(crate) localsend: crate::localsend_bridge::LsSlot,
     /// 平台钩子：自动下载策略查询网络状态（P2 Task 13）。
     pub(crate) platform: PlatformHooks,
     /// 界面当前正在看的会话（SetUiFocus 设置，只存内存不落库）。
@@ -153,7 +158,7 @@ impl Service {
             keystore,
             static_peers,
             platform,
-            localsend_port: _localsend_port,
+            localsend_port,
         } = cfg;
 
         std::fs::create_dir_all(&data_dir)?;
@@ -261,6 +266,7 @@ impl Service {
 
         let (disc_tx, disc_rx) = mpsc::channel::<DiscoveryEvent>(64);
         let self_device = identity.read().unwrap().device_id();
+        let ls_multicast = matches!(discovery, DiscoveryMode::Multicast);
         let discovery = Discovery::spawn(discovery, self_device, announce_rx, disc_tx);
         // 用户配置的单播通告目标（解析失败的配置项在保存时已拒绝，这里兜底忽略）。
         match crate::settings::load_settings(&store) {
@@ -291,6 +297,8 @@ impl Service {
         // 多设备同步引擎（P2 Task 9）。
         let sync = crate::sync::SyncEngine::new(store.clone(), identity.clone(), conns.clone());
 
+        // LocalSend 固定端口与发现仅在生产模式启用：端口非 0 且使用组播发现。
+        let ls_production = localsend_port != 0 && ls_multicast;
         let station = Arc::new(crate::station::StationHost::new(
             store.clone(),
             identity.clone(),
@@ -319,6 +327,8 @@ impl Service {
             station,
             station_client: crate::station::client::StationClient::new(),
             data_dir: data_dir.clone(),
+            clock,
+            localsend: crate::localsend_bridge::LsSlot::new(ls_production),
             platform,
             ui_focus: StdMutex::new(None),
             static_peers: StdMutex::new(HashSet::new()),
@@ -384,6 +394,20 @@ impl Service {
 
         // 恢复遗留的活动传输（续传 .part 与已完成分段）。
         inner.transfer.clone().resume_all().await?;
+
+        // 已初始化且开启 LocalSend 兼容时启动。配对加入、其他设备改昵称等路径不经过
+        // 本机的请求入口，因此另起低频任务让桥跟上设置与身份的变化。
+        inner.localsend.reconfigure(&inner).await;
+        let weak = Arc::downgrade(&inner);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let Some(i) = weak.upgrade() else { break };
+                i.localsend.reconfigure(&i).await;
+            }
+        });
 
         Ok(svc)
     }
@@ -482,6 +506,12 @@ impl Service {
         self.inner.conns.connect_expecting(addr, Some(expect)).await
     }
 
+    /// 测试辅助：LocalSend 服务的实际监听端口（未运行为 None）。
+    #[doc(hidden)]
+    pub fn localsend_port_for_test(&self) -> Option<u16> {
+        self.inner.localsend.get().map(|b| b.port())
+    }
+
     /// 测试辅助：访问存储（集成测试断言 holders 等用）。
     #[doc(hidden)]
     pub fn store_for_test(&self) -> Arc<Store> {
@@ -512,6 +542,7 @@ impl Service {
     /// 关闭发现与所有连接；同时中止后台文件准备任务（preparing 行保留，
     /// 重启后续做）。
     pub async fn shutdown(&self) {
+        self.inner.localsend.stop().await;
         self.inner.transfer.shutdown_all();
         self.inner.msg.abort_prepares();
         self.inner.discovery.shutdown();

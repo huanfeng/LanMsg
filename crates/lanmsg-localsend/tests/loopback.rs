@@ -619,3 +619,21 @@ async fn next_incoming(
     .await
     .unwrap()
 }
+
+#[tokio::test]
+async fn shutdown_cleans_part_files_and_reports_session_finished() {
+    let a = node(LsDecision::Accept).await;
+    let mut b = node(LsDecision::Accept).await;
+    let (client, url, resp) = raw_prepare(&a, &b, "x.txt", None).await;
+    let (tx, h) = streaming_upload(&client, &url, &resp);
+    tx.send(Ok(b"a".to_vec())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(b.download_dir().join("x.txt.part").exists());
+    b.ls.shutdown().await;
+    next_matching(&mut b, |e| {
+        matches!(e, LsEvent::SessionFinished { ok: false, .. })
+    })
+    .await;
+    assert!(!b.download_dir().join("x.txt.part").exists());
+    h.abort();
+}

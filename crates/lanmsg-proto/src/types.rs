@@ -158,12 +158,31 @@ pub struct FolderEntry {
 /// 系统事件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SystemEvent {
-    DeviceAdded { device: DeviceId, name: String },
-    DeviceRemoved { device: DeviceId },
-    ContactAdded { user: UserId },
+    DeviceAdded {
+        device: DeviceId,
+        name: String,
+    },
+    DeviceRemoved {
+        device: DeviceId,
+    },
+    ContactAdded {
+        user: UserId,
+    },
     ContactUpdated(ContactRecord),
-    ProfileUpdated { display_name: String },
-    LocalDeleted { msgs: Vec<MsgId> },
+    ProfileUpdated {
+        display_name: String,
+    },
+    LocalDeleted {
+        msgs: Vec<MsgId>,
+    },
+    /// LocalSend 对端开启了 PIN，暂不支持发送（P5 追加）。
+    LocalSendPin {
+        name: String,
+    },
+    /// LocalSend 对端正忙（已有会话或待审批已满），发送失败（P5 追加）。
+    LocalSendBusy {
+        name: String,
+    },
 }
 
 /// 设备通告，由设备密钥签名。

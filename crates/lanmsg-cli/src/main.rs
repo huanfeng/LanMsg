@@ -716,6 +716,8 @@ fn system_event_line(event: &SystemEventView) -> String {
         SystemEventView::Recalled { author_name, .. } => {
             format!("{author_name} recalled a message")
         }
+        SystemEventView::LocalSendPin { name } => format!("{name} requires a PIN (unsupported)"),
+        SystemEventView::LocalSendBusy { name } => format!("{name} is busy, try again later"),
     }
 }
 

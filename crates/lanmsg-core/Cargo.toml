@@ -12,6 +12,7 @@ test-hooks = []
 [dependencies]
 lanmsg-proto = { path = "../lanmsg-proto" }
 lanmsg-api = { path = "../lanmsg-api" }
+lanmsg-localsend = { path = "../lanmsg-localsend" }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 tracing = "0.1"

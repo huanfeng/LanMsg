@@ -267,12 +267,21 @@ impl LocalSend {
         lock(&self.inner.peers).list(Instant::now(), &self.inner.limits)
     }
 
-    /// 停止服务与发现。
+    /// 停止服务与发现；进行中的接收会话被中止：清理 `.part` 并上报 `SessionFinished`。
     pub async fn shutdown(&self) {
         self.inner.handle.shutdown();
         *lock(&self.inner.discovery) = None;
         for t in lock(&self.inner.tasks).drain(..) {
             t.abort();
+        }
+        let aborted = lock(&self.inner.session).take();
+        if let Some(sess) = aborted {
+            // 上层可能已不再消费事件，限时发送避免关闭被卡住
+            let _ = tokio::time::timeout(
+                Duration::from_secs(1),
+                discard_session(&self.inner, sess, "service stopped"),
+            )
+            .await;
         }
     }
 }

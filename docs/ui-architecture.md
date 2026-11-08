@@ -174,6 +174,8 @@
 | sys_messages_deleted | 已删除 %1$d 条消息 |
 | sys_recalled_by_me | 你撤回了一条消息 |
 | sys_recalled_by_peer | %1$s 撤回了一条消息 |
+| sys_localsend_pin | %1$s 开启了 PIN，暂不支持发送 |
+| sys_localsend_busy | %1$s 正忙，请稍后重试 |
 | msg_read | 已读 |
 | msg_unsupported | 不支持的消息类型，请升级 LanMsg |
 | msg_resend | 重新发送 |

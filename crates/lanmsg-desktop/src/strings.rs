@@ -98,6 +98,8 @@ pub const SYS_DELETED_PREFIX: &str = "已删除 ";
 pub const SYS_DELETED_SUFFIX: &str = " 条消息";
 pub const SYS_RECALLED_BY_ME: &str = "你撤回了一条消息";
 pub const SYS_RECALLED_BY_PEER: &str = " 撤回了一条消息";
+pub const SYS_LOCALSEND_PIN_SUFFIX: &str = " 开启了 PIN，暂不支持发送";
+pub const SYS_LOCALSEND_BUSY_SUFFIX: &str = " 正忙，请稍后重试";
 /// 文件来源文案：来自谁、存于哪里。
 pub const SOURCE_FROM_ME: &str = "来自我";
 pub const SOURCE_FROM_PREFIX: &str = "来自 ";

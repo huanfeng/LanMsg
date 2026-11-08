@@ -38,6 +38,12 @@ pub fn system_event_text(event: &SystemEventView) -> String {
         } => {
             format!("{author_name}{}", strings::SYS_RECALLED_BY_PEER)
         }
+        SystemEventView::LocalSendPin { name } => {
+            format!("{name}{}", strings::SYS_LOCALSEND_PIN_SUFFIX)
+        }
+        SystemEventView::LocalSendBusy { name } => {
+            format!("{name}{}", strings::SYS_LOCALSEND_BUSY_SUFFIX)
+        }
     }
 }
 
@@ -162,6 +168,18 @@ mod tests {
                     by_me: true,
                 },
                 "你撤回了一条消息",
+            ),
+            (
+                SystemEventView::LocalSendPin {
+                    name: "小李".into(),
+                },
+                "小李 开启了 PIN，暂不支持发送",
+            ),
+            (
+                SystemEventView::LocalSendBusy {
+                    name: "小李".into(),
+                },
+                "小李 正忙，请稍后重试",
             ),
         ];
         for (event, expect) in cases {

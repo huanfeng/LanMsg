@@ -370,6 +370,12 @@ fn system_event_view(store: &Store, event: &SystemEvent) -> SystemEventView {
         SystemEvent::LocalDeleted { msgs } => SystemEventView::MessagesDeleted {
             count: msgs.len() as u32,
         },
+        SystemEvent::LocalSendPin { name } => SystemEventView::LocalSendPin {
+            name: name_or(name, "?".into()),
+        },
+        SystemEvent::LocalSendBusy { name } => SystemEventView::LocalSendBusy {
+            name: name_or(name, "?".into()),
+        },
     }
 }
 
@@ -400,9 +406,18 @@ pub fn message_view(
         .map(|(s, a)| s == a)
         .unwrap_or(false);
 
+    // devices 表里没有的作者可能是 LocalSend 对端的伪设备：用其别名作显示名。
     let (author_device_name, author_user_str) = match &author_row {
         Some(r) => (r.name.clone(), r.user.to_hex()),
-        None => (author_device.short(), String::new()),
+        None => (
+            store
+                .ls_peer_by_pseudo(&author_device)
+                .ok()
+                .flatten()
+                .map(|p| name_or(&p.alias, author_device.short()))
+                .unwrap_or_else(|| author_device.short()),
+            String::new(),
+        ),
     };
 
     // 撤回提示与文件来源描述用作者显示名（users 表优先，无则设备名）。
@@ -532,6 +547,10 @@ pub fn conv_summary(
     conv: &ConvRow,
     peer_online: bool,
 ) -> ConversationSummary {
+    // LocalSend 会话的在线状态来自对端最近一次被发现的时间。
+    let peer_online = peer_online
+        || (conv.kind == crate::store::ConvKindRow::LocalSend
+            && store.ls_conv_online(&conv.conv, crate::service::now_millis()));
     let title = match conv.kind {
         crate::store::ConvKindRow::Dm => conv
             .peer_user

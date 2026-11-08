@@ -7,6 +7,7 @@ pub mod blobs;
 pub mod contacts;
 pub mod convs;
 pub mod file_index;
+pub mod localsend;
 pub mod messages;
 pub mod schema;
 pub mod search_index;
@@ -21,6 +22,7 @@ pub use blobs::{
 pub use contacts::{ContactRow, ContactState, RequestKindRow, RequestRow};
 pub use convs::{ConvKindRow, ConvRow, Gate};
 pub use file_index::{file_kind, FileQuery, FileRow};
+pub use localsend::{pseudo_device_id, LsPeerRow};
 pub use messages::{MsgStateRow, StoredMessage};
 pub use stations::{StationItemRow, StoreModeRow};
 pub use users::{DeviceRow, UserRow};

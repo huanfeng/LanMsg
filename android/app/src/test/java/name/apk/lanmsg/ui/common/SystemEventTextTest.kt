@@ -18,6 +18,8 @@ class SystemEventTextTest {
         Triple(SystemEventView.MessagesDeleted(3u), R.string.sys_messages_deleted, listOf(3)),
         Triple(SystemEventView.Recalled(name, false), R.string.sys_recalled_by_peer, listOf(name)),
         Triple(SystemEventView.Recalled(name, true), R.string.sys_recalled_by_me, emptyList()),
+        Triple(SystemEventView.LocalSendPin(name), R.string.sys_localsend_pin, listOf(name)),
+        Triple(SystemEventView.LocalSendBusy(name), R.string.sys_localsend_busy, listOf(name)),
     )
 
     @Test fun every_variant_maps_to_its_resource_with_name_args() {
@@ -52,6 +54,8 @@ class SystemEventTextTest {
         R.string.sys_nickname_updated -> "sys_nickname_updated"
         R.string.sys_messages_deleted -> "sys_messages_deleted"
         R.string.sys_recalled_by_peer -> "sys_recalled_by_peer"
+        R.string.sys_localsend_pin -> "sys_localsend_pin"
+        R.string.sys_localsend_busy -> "sys_localsend_busy"
         else -> "sys_recalled_by_me"
     }
 }
