@@ -28,3 +28,13 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+      - name: Setup Node
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: node web tests
+        if: matrix.os == 'ubuntu-latest'
+        run: node --test web/test/crypto.test.mjs

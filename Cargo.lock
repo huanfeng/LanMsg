@@ -1891,6 +1891,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lanmsg-web-assets"
+version = "0.1.0"
+
+[[package]]
 name = "lanmsgd"
 version = "0.1.0"
 dependencies = [
