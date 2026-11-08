@@ -49,6 +49,7 @@ import name.apk.lanmsg.ui.search.SearchScreen
 import name.apk.lanmsg.ui.preview.TextPreviewScreen
 import name.apk.lanmsg.ui.settings.SettingsScreen
 import name.apk.lanmsg.ui.share.SharePickScreen
+import name.apk.lanmsg.ui.station.StationScreen
 import name.apk.lanmsg.ui.share.SharePickViewModel
 import name.apk.lanmsg.ui.theme.LanMsgColors
 
@@ -141,6 +142,7 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
             }
             composable(Routes.CONVS) { ConversationListScreen(
                     onOpenChat = { nav.navigate(Routes.chat(it)) },
+                    onOpenStation = { nav.navigate(Routes.station(it)) },
                     onSearch = { nav.navigate(Routes.SEARCH) },
                 ) }
             composable(
@@ -227,6 +229,10 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                     onOpenText = { path, name, mime -> nav.navigate(Routes.text(path, name, mime)) },
                     onForward = { nav.navigate(Routes.forward(it)) },
                 )
+            }
+            composable(Routes.STATION, arguments = listOf(navArgument("conv") { type = NavType.StringType })) { entry ->
+                val conv = entry.arguments?.getString("conv") ?: return@composable
+                StationScreen(conv = conv, onBack = { nav.popBackStack() })
             }
             composable(
                 Routes.TEXT,

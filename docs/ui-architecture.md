@@ -15,7 +15,7 @@
  │     │     ├─ 「这是我的第一台设备」→ Init(FirstDevice) → 主界面
  │     │     └─ 「加入我已有的设备」→ Init(JoinExisting) → 配对加入页 → Done → 主界面
  └─ 已初始化 → 主界面（底部 4 个标签）
-       ├─ 消息（会话列表）→ 聊天页 → 图片查看页；会话列表右上角搜索 → 搜索页（→ 聊天页）
+       ├─ 消息（会话列表）→ 聊天页 / 中转站页（中转站会话）→ 图片查看页；会话列表右上角搜索 → 搜索页（→ 聊天页）
        ├─ 文件（文件视图）
        ├─ 联系人 → 新的请求页 / 联系人详情页（→ 聊天页）
        └─ 我 → 我的设备页（→ 配对主持页 / 配对加入页）/ 设置页
@@ -31,6 +31,7 @@
 | `onboarding` | — | 引导 |
 | `convs` | — | 会话列表（标签 1） |
 | `chat/{conv}` | conv：会话 id | 聊天 |
+| `station/{conv}` | conv：中转站会话 id（`ConvKind.Station`） | 中转站 |
 | `image/{conv}/{hash}` | — | 图片查看（聊天与文件页的图片都进这里） |
 | `text?path={path}&name={name}&mime={mime}` | path：本地路径，name、mime：文件名与类型 | 文本预览（只读、等宽、可选中；最多 1 MiB） |
 | `files?conv={conv}` | conv 可选 | 文件视图（标签 2） |
@@ -66,7 +67,8 @@
 | 会话列表 | `items: [ConversationSummary]`（按 `last_hlc_millis` 降序，空值排最后）、`loading` | `ListConversations` | `ConversationUpdated` → 按 conv upsert 并重排；`PeerOnline/PeerOffline` → 重拉 | 点行 → `chat/{conv}`；长按 → 菜单「免打扰 / 取消免打扰」（仅本机设置） |
 | 聊天 | `conv`、`title`、`kind`、`peerOnline`、`messages: [MessageView]`（升序）、`hasMore`、`loadingMore`、`input`、`progress: {hash → (transfer, done, total)}`（`transfer` 取自 `TransferProgress.transfer`，`CancelTransfer{transfer}` 用它） | `ListConversations` 取本会话摘要；`ListMessages{conv, before=null, limit=50}` | `MessageAdded`(conv 相同) → 按 id 去重后追加；`MessageUpdated` → 按 id 替换；`TransferProgress{transfer, hash, done, total, …}` → 按 hash 更新 progress（含 transfer）；`TransferFinished` → 移除 progress 并重拉最新一页合并；`ConversationUpdated` → 更新标题/在线 | 发送文字：`SendText`；选择图片/视频（系统相册选择器）或文件（系统文件选择器）→ 复制到发件箱 → `SendFiles{conv, paths}`；点"未下载"的文件 → `DownloadBlob{hash}`；下载中点 × → `CancelTransfer{transfer}`（取 progress[hash].transfer）；长按自己 2 分钟内的消息 → 「撤回」→ `Recall`；长按任意消息 → 「删除」→ `DeleteLocal{msgs, also_my_devices=false}`、「复制」（文字）、「转发」（Files/Folder 消息，转发其全部文件 → `forward/{hashes}`）；滚到顶 → `ListMessages{before=最早一条 id}`；页面可见且最新一条变化 → `MarkRead{conv, upto=最新一条 id}` |
 | 图片查看 | `item: FileItemView` | 从聊天页传入的 conv 中 `ListMessages` 查找 hash | `TransferFinished`(hash) → 刷新 | 未下载时显示缩略图 + 「下载原图」→ `DownloadBlob`；「保存到相册」（本机动作） |
-| 文件视图 | `filter: FileFilter`（默认 kind=All、limit=200）、`items: [FileView]` | `QueryFiles{filter}` | `MessageAdded` / `MessageUpdated` / `TransferFinished` → 500ms 防抖后重查 | 顶部分段：全部/图片/视频/文档/压缩包/其他；筛选菜单：状态（全部/已下载/未下载）、来源设备；搜索框（`name_query`）；点项：已下载 → 打开，未下载 → `DownloadBlob`；长按：「打开所在会话」→ `chat/{conv}`、「转发」→ `forward/{hash}` |
+| 文件视图 | `filter: FileFilter`（默认 kind=All、limit=200）、`items: [FileView]` | `QueryFiles{filter}` | `MessageAdded` / `MessageUpdated` / `TransferFinished` → 500ms 防抖后重查 | 顶部分段：全部/图片/视频/文档/压缩包/其他；筛选菜单：状态（全部/已下载/未下载）、来源设备；搜索框（`name_query`）；点项：已下载 → 打开，未下载 → `DownloadBlob`；长按：「打开所在会话」→ `chat/{conv}`、「转发」→ `forward/{hash}`、「放入中转站」→ 选站点 → `StationPut{Blobs[hash], Reference}`（站点来自 `StationList`），成功提示 `toast_put_station` |
+| 中转站 | `name`、`hostOnline`、`items: [StationItemView]`、`expiry`(不过期/1天/7天/30天，仅作用于之后的放入)、`busy`、`error: ErrorCode?`（界面用 `errorTextRes` 本地化）、`refreshing`、`progress: {hash → (done, total)}` | `StationList`（取本站点）、`StationItems{station}` | `StationUpdated`(station 相同) 与 `lagged` → 重拉；`TransferProgress/Finished` → 更新 progress 并重拉 | 手机不能新建中转站；FAB「选择文件」→ 复制到发件箱 → `StationPut{Paths, Copy, expires_at}`、「输入文字」→ `StationPut{Text, Copy}`；点文字条目复制并提示 `toast_copied`；点未下载文件 → `DownloadBlob{hash}`，已下载 → 打开；长按 → 「置顶/取消置顶」`StationSetPinned`、「删除」`StationRemove`；顶栏菜单「保留时间」；下拉刷新；主机离线显示 `station_host_offline_banner`；`unavailable` 条目显示 `station_item_unavailable`。连接主机最坏 13 秒才返回 `PeerOffline`，期间只显示进度条不显示失败。设置页「清理已分享文件的副本」会先读各中转站条目的 `local_path` 并保护这些副本（主机可能尚未拉取） |
 | 联系人 | `contacts: [ContactView]`、`nearby: [PeerView]`（`!is_contact && !is_mine`）、`requestCount` | `ListContacts`、`ListPeers`、`ListRequests` | `ContactsChanged` → 重拉联系人；`PeerOnline/Offline` → 重拉 peers；`IncomingRequest` → 重拉请求数 | 顶部「新的请求 (N)」→ `requests`；点联系人 → `contact/{user}`；附近的人行尾「添加」→ `RequestContact{user}`，成功后提示 `toast_request_sent` |
 | 新的请求 | `items: [RequestView]` | `ListRequests` | `IncomingRequest` → 重拉 | 每项四个按钮：接收一次/加为联系人/拒绝/屏蔽 → `RespondRequest{request, action}`，成功后从列表移除 |
 | 联系人详情 | `contact: ContactView` | `ListContacts` 中按 user 查找 | `ContactsChanged` → 重拉 | 「发消息」→ `OpenDm{user}` → `chat/{conv}`；「自动接收」开关、「超过此大小仍询问」选择（不限/10MB/50MB/100MB/500MB）→ `SetContactPolicy` |
@@ -353,6 +355,24 @@
 | action_forward | 转发 |
 | forward_title | 转发到 |
 | toast_forwarded | 已转发 |
+| files_put_station | 放入中转站 |
+| files_no_station | 还没有中转站，请先在电脑上新建 |
+| toast_put_station | 已放入中转站 |
+| station_host_offline_banner | 主机离线，暂时无法下载 |
+| station_item_unavailable | 已失效 |
+| station_pin | 置顶 |
+| station_unpin | 取消置顶 |
+| station_remove | 删除 |
+| station_expiry | 保留时间 |
+| station_expiry_never | 不过期 |
+| station_expiry_1d | 1 天 |
+| station_expiry_7d | 7 天 |
+| station_expiry_30d | 30 天 |
+| station_add | 添加 |
+| station_add_file | 选择文件 |
+| station_add_text | 输入文字 |
+| station_items_empty | 中转站里还没有东西 |
+| toast_copied | 已复制 |
 
 ## §7 通知规范
 - 渠道：`messages`（高）、`requests`（高）、`transfers`（低，进度）、`service`（最低，前台服务常驻）。

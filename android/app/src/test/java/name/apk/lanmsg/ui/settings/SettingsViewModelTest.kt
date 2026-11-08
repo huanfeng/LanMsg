@@ -13,6 +13,7 @@ import name.apk.lanmsg.core.ApiException
 import name.apk.lanmsg.core.SettingsPrefs
 import name.apk.lanmsg.files.OutboxStore
 import name.apk.lanmsg.testutil.FakeCoreApi
+import name.apk.lanmsg.testutil.Fixtures
 import name.apk.lanmsg.testutil.MainDispatcherRule
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -37,6 +38,8 @@ class SettingsViewModelTest {
         backgroundMode = BackgroundMode.REALTIME, localsendListening = null,
     )
     private var failSet = false
+    private var stations = emptyList<uniffi.lanmsg_api.StationView>()
+    private var stationItems = emptyMap<String, List<uniffi.lanmsg_api.StationItemView>>()
     private val prefs = MemoryPrefs()
     private val outbox = MemoryOutbox(2048)
     private val modes = mutableListOf<BackgroundMode>()
@@ -48,6 +51,8 @@ class SettingsViewModelTest {
         handler = { req ->
             when (req) {
                 Request.GetSettings -> Response.Settings(coreValue.copy())
+                Request.StationList -> Response.Stations(stations)
+                is Request.StationItems -> Response.StationItems(stationItems[req.station].orEmpty())
                 is Request.SetSettings -> if (failSet) throw ApiException(ErrorCode.IO, "disk full") else { coreValue = req.settings.copy(); Response.Ok }
                 else -> throw ApiException(ErrorCode.INTERNAL, "unexpected $req")
             }
@@ -181,6 +186,33 @@ class SettingsViewModelTest {
         assertEquals(OUTBOX_BYTES, vm.state.value.clearedBytes)
     }
 
+    @Test fun clear_outbox_protects_local_paths_referenced_by_station_items() = runTest {
+        stations = listOf(Fixtures.stationView("s1"), Fixtures.stationView("s2"))
+        stationItems = mapOf(
+            "s1" to listOf(Fixtures.stationFileItem("i1", localPath = "/o/pending"), Fixtures.stationTextItem("i2", "hi")),
+            "s2" to listOf(Fixtures.stationFileItem("i3", localPath = "/o/other"), Fixtures.stationFileItem("i4", localPath = null)),
+        )
+        val vm = vm(fake())
+        advanceUntilIdle()
+        vm.clearOutbox()
+        advanceUntilIdle()
+        assertEquals(setOf("/o/pending", "/o/other"), outbox.protected)
+        assertEquals(OUTBOX_BYTES, vm.state.value.clearedBytes)
+    }
+
+    @Test fun clear_outbox_aborts_when_station_references_cannot_be_read() = runTest {
+        val fake = fake()
+        val ok = fake.handler
+        fake.handler = { req -> if (req === Request.StationList) throw ApiException(ErrorCode.IO, "x") else ok(req) }
+        val vm = vm(fake)
+        advanceUntilIdle()
+        vm.clearOutbox()
+        advanceUntilIdle()
+        assertNull(outbox.cutoff)
+        assertNull(vm.state.value.clearedBytes)
+        assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
+    }
+
     @Test fun consecutive_failed_updates_end_with_core_value() = runTest {
         val fake = fake()
         val vm = vm(fake)
@@ -272,9 +304,11 @@ private const val OUTBOX_BYTES = 2048L
 private class MemoryOutbox(private var bytes: Long) : OutboxStore {
     var cutoff: Long? = null
     var delivered: Set<String>? = null
+    var protected: Set<String>? = null
     override fun outboxSizeBytes(): Long = bytes
     override fun rootPath(): String = OUTBOX_ROOT
-    override fun clear(deliveredPaths: Set<String>, olderThanMillis: Long): Long {
+    override fun clear(deliveredPaths: Set<String>, olderThanMillis: Long, protectedPaths: Set<String>): Long {
+        protected = protectedPaths
         cutoff = olderThanMillis
         delivered = deliveredPaths
         val freed = bytes

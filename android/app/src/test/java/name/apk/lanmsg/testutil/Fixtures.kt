@@ -17,6 +17,8 @@ import uniffi.lanmsg_api.RequestKind
 import uniffi.lanmsg_api.LastMessageKind
 import uniffi.lanmsg_api.RequestView
 import uniffi.lanmsg_api.SelfInfo
+import uniffi.lanmsg_api.StationItemView
+import uniffi.lanmsg_api.StationView
 import uniffi.lanmsg_api.StatusDto
 
 object Fixtures {
@@ -55,6 +57,24 @@ object Fixtures {
                 ),
             ),
         )
+
+    fun stationView(station: String = "s1", name: String = "桌面中转站", hostOnline: Boolean = true, count: UInt = 0u): StationView =
+        StationView(station = station, name = name, hostDevice = "d9", hostOnline = hostOnline, itemCount = count)
+
+    fun stationTextItem(item: String, text: String, pinned: Boolean = false): StationItemView =
+        StationItemView(item = item, addedBy = "d9", addedAt = 1000, expiresAt = null, text = text, file = null, pinned = pinned, unavailable = null)
+
+    fun stationFileItem(
+        item: String, hash: String = "h-$item", state: BlobState = BlobState.REMOTE, localPath: String? = null,
+        pinned: Boolean = false, unavailable: Boolean? = null,
+    ): StationItemView = StationItemView(
+        item = item, addedBy = "d9", addedAt = 1000, expiresAt = null, text = null, pinned = pinned, unavailable = unavailable,
+        file = FileItemView(
+            hash = hash, name = "$item.bin", size = 10uL, mime = "application/octet-stream",
+            width = null, height = null, durationMs = null, thumbPath = null, localPath = localPath,
+            state = state, sourceName = "桌面", sourceIsMe = false, holderName = null,
+        ),
+    )
 
     fun selfInfo(initialized: Boolean = true): SelfInfo = SelfInfo(
         initialized = initialized,
