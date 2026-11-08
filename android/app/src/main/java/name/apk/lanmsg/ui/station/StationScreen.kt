@@ -27,6 +27,7 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.Notes
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -69,6 +70,8 @@ import name.apk.lanmsg.R
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.files.FileOpener
 import name.apk.lanmsg.ui.chat.FileCard
+import name.apk.lanmsg.ui.chat.fileKindIcon
+import name.apk.lanmsg.ui.chat.fileKindOf
 import name.apk.lanmsg.ui.chat.middleEllipsis
 import name.apk.lanmsg.ui.common.EmptyState
 import name.apk.lanmsg.ui.common.StatusDot
@@ -255,47 +258,60 @@ private fun ItemRow(
     val text = item.text
     Box {
         Column(Modifier.fillMaxWidth().background(c.surface)) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .combinedClickable(
-                        enabled = text != null && !unavailable,
-                        onClick = { text?.let(onCopyText) },
-                        onLongClick = { menu = true },
-                    )
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    when {
-                        unavailable -> {
-                            Text(
-                                middleEllipsis(file?.name ?: text.orEmpty()),
-                                color = c.inkSubtle,
-                                style = MaterialTheme.typography.bodyMedium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.combinedClickable(onClick = {}, onLongClick = { menu = true }),
-                            )
-                            Text(stringResource(R.string.station_item_unavailable), color = c.danger, fontSize = 12.sp)
-                        }
-                        file != null -> FileCard(
-                            item = file,
-                            progress = progress,
-                            content = c.ink,
-                            muted = c.inkMuted,
-                            onDownload = onDownload,
-                            onCancel = onCancel,
-                            onOpen = onOpenFile,
+            val time = formatTime(item.addedAt)
+            val pin: (@Composable () -> Unit)? = if (item.pinned) {
+                {
+                    Icon(Icons.Outlined.PushPin, contentDescription = null, tint = c.signal, modifier = Modifier.padding(end = 4.dp).size(14.dp))
+                }
+            } else null
+            if (file != null && !unavailable) {
+                FileCard(
+                    item = file,
+                    progress = progress,
+                    content = c.ink,
+                    muted = c.inkMuted,
+                    onDownload = onDownload,
+                    onCancel = onCancel,
+                    onOpen = onOpenFile,
+                    onLongClick = { menu = true },
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    fillWidth = true,
+                    sizeSuffix = time,
+                    titlePrefix = pin,
+                )
+            } else {
+                // 文字条目与已失效条目：左图标 + 标题 + 副标题，与文件卡片同一节奏
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .combinedClickable(
+                            enabled = text != null && !unavailable,
+                            onClick = { text?.let(onCopyText) },
                             onLongClick = { menu = true },
                         )
-                        else -> Text(text.orEmpty(), color = c.ink, style = MaterialTheme.typography.bodyMedium, maxLines = 6, overflow = TextOverflow.Ellipsis)
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val icon = if (file != null) fileKindIcon(fileKindOf(file.mime)) else Icons.Outlined.Notes
+                    Icon(icon, contentDescription = null, tint = if (unavailable) c.inkSubtle else c.inkMuted, modifier = Modifier.size(32.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            pin?.invoke()
+                            Text(
+                                if (file != null) middleEllipsis(file.name) else text.orEmpty(),
+                                color = if (unavailable) c.inkSubtle else c.ink,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = if (file != null) 1 else 3,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (unavailable) {
+                            Text(stringResource(R.string.station_item_unavailable) + " \u00B7 " + time, color = c.danger, fontSize = 12.sp)
+                        } else {
+                            Text(time, color = c.inkMuted, fontSize = 12.sp)
+                        }
                     }
-                    Text(formatTime(item.addedAt), color = c.inkSubtle, fontSize = 12.sp)
-                }
-                if (item.pinned) {
-                    Spacer(Modifier.width(8.dp))
-                    Icon(Icons.Outlined.PushPin, contentDescription = null, tint = c.signal, modifier = Modifier.size(18.dp))
                 }
             }
             HorizontalDivider(color = c.line)

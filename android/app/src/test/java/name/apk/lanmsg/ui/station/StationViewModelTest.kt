@@ -189,4 +189,97 @@ class StationViewModelTest {
         assertEquals(2, vm.state.value.items.size)
         assertEquals(ErrorCode.IO, vm.state.value.error)
     }
+
+    @Test fun out_of_order_refresh_does_not_overwrite_newer_result() = runTest {
+        val fake = fake()
+        val vm = vm(fake)
+        advanceUntilIdle()
+        val slow = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var calls = 0
+        fake.handler = { req ->
+            when (req) {
+                Request.StationList -> Response.Stations(stations)
+                is Request.StationItems ->
+                    if (calls++ == 0) {
+                        slow.await()
+                        Response.StationItems(listOf(Fixtures.stationTextItem("old", "old")))
+                    } else {
+                        Response.StationItems(listOf(Fixtures.stationTextItem("new", "new")))
+                    }
+                else -> Response.Ok
+            }
+        }
+        vm.refresh()
+        advanceUntilIdle()
+        vm.refresh()
+        advanceUntilIdle()
+        slow.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(listOf("new"), vm.state.value.items.map { it.item })
+    }
+
+    @Test fun pull_refresh_resets_refreshing_even_when_cancelled_by_newer_refresh() = runTest {
+        val fake = fake()
+        val vm = vm(fake)
+        advanceUntilIdle()
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val ok = fake.handler
+        fake.handler = { req -> if (req is Request.StationItems) { gate.await(); ok(req) } else ok(req) }
+        vm.pullRefresh()
+        advanceUntilIdle()
+        assertTrue(vm.state.value.refreshing)
+        vm.refresh() // 取消在途刷新
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertFalse(vm.state.value.refreshing)
+    }
+
+    @Test fun transfer_events_track_progress_and_finish_clears_it_and_refreshes() = runTest {
+        val fake = fake()
+        val vm = vm(fake)
+        advanceUntilIdle()
+        fake.emit(Event.TransferProgress("t1", "h-i2", 5uL, 10uL, 1uL))
+        advanceUntilIdle()
+        assertEquals(5uL to 10uL, vm.state.value.progress["h-i2"])
+        val before = fake.requests.count { it is Request.StationItems }
+        fake.emit(Event.TransferFinished("t1", "h-i2", true, null, null))
+        advanceUntilIdle()
+        assertTrue(vm.state.value.progress.isEmpty())
+        assertEquals(before + 1, fake.requests.count { it is Request.StationItems })
+    }
+
+    @Test fun cancel_sends_transfer_id_learned_from_progress() = runTest {
+        val fake = fake()
+        val vm = vm(fake)
+        advanceUntilIdle()
+        fake.emit(Event.TransferProgress("t7", "h-i2", 1uL, 10uL, 1uL))
+        advanceUntilIdle()
+        vm.cancel("h-i2")
+        advanceUntilIdle()
+        assertEquals(Request.CancelTransfer("t7"), fake.requests.filterIsInstance<Request.CancelTransfer>().last())
+    }
+
+    @Test fun cancel_without_known_transfer_sends_nothing_and_refreshes() = runTest {
+        val fake = fake()
+        val vm = vm(fake)
+        advanceUntilIdle()
+        val before = fake.requests.count { it is Request.StationItems }
+        vm.cancel("h-i2")
+        advanceUntilIdle()
+        assertTrue(fake.requests.none { it is Request.CancelTransfer })
+        assertEquals(before + 1, fake.requests.count { it is Request.StationItems })
+    }
+
+    @Test fun put_uris_with_all_imports_failed_reports_error_and_sends_nothing() = runTest {
+        val fake = fake()
+        val vm = StationViewModel(fake, "s1", object : Importer {
+            override suspend fun import(uris: List<Uri>): List<String> = emptyList()
+        }, { 1000L })
+        advanceUntilIdle()
+        vm.putUris(listOf(Uri.parse("content://x/a.txt")))
+        advanceUntilIdle()
+        assertTrue(fake.requests.none { it is Request.StationPut })
+        assertEquals(ErrorCode.INVALID_ARGUMENT, vm.state.value.error)
+        assertFalse(vm.state.value.busy)
+    }
 }

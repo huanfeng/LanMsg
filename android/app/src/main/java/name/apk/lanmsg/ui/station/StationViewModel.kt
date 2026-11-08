@@ -53,6 +53,7 @@ class StationViewModel(
     /** hash -> transfer id，CancelTransfer 用。 */
     private val transfers = mutableMapOf<String, String>()
     private var pending = 0
+    private var refreshJob: Job? = null
 
     init {
         viewModelScope.launch { core.events.collect(::onEvent) }
@@ -60,9 +61,10 @@ class StationViewModel(
         refresh()
     }
 
-    /** 重取本站点的主机状态与条目；失败保留旧列表。 */
-    fun refresh(): Job =
-        viewModelScope.launch {
+    /** 重取本站点的主机状态与条目；失败保留旧列表。新刷新取消在途的旧刷新，避免旧响应覆盖新结果。 */
+    fun refresh(): Job {
+        refreshJob?.cancel()
+        val job = viewModelScope.launch {
             try {
                 val view = core.call<Response.Stations>(Request.StationList).value.firstOrNull { it.station == station }
                 val items = core.call<Response.StationItems>(Request.StationItems(station)).value
@@ -79,13 +81,19 @@ class StationViewModel(
                 _state.update { it.copy(loading = false, error = e.code) }
             }
         }
+        refreshJob = job
+        return job
+    }
 
     /** 下拉刷新：刷新期间 [UiState.refreshing] 为 true。 */
     fun pullRefresh() {
         viewModelScope.launch {
             _state.update { it.copy(refreshing = true) }
-            refresh().join()
-            _state.update { it.copy(refreshing = false) }
+            try {
+                refresh().join()
+            } finally {
+                _state.update { it.copy(refreshing = false) }
+            }
         }
     }
 
@@ -118,12 +126,14 @@ class StationViewModel(
     }
 
     fun cancel(hash: String) {
-        val transfer = transfers[hash] ?: return
+        // 没有传输映射（事件尚未到达或已结束）：无可取消，刷新一次让界面回到真实状态
+        val transfer = transfers[hash] ?: run { refresh(); return }
         launchBusy { core.call<Response.Ok>(Request.CancelTransfer(transfer)) }
     }
 
     fun clearError() = _state.update { it.copy(error = null) }
 
+    /** 放入请求。远程站点（主机是别的设备）的复制由主机拉取后完成，手机只登记来源。 */
     private suspend fun put(item: StationPutItem) {
         val days = _state.value.expiry.days
         val expiresAt = days?.let { clock() + it * DAY_MILLIS }

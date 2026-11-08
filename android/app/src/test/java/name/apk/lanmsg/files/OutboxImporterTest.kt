@@ -215,6 +215,18 @@ class OutboxImporterTest {
         assertTrue(pending.exists())
     }
 
+    @Test fun protected_path_is_matched_after_canonicalization_including_dot_dot() {
+        val imp = importer()
+        val pending = outboxFile("20240101", "pending.txt", "1234")
+        val other = outboxFile("20240101", "other.txt", "12")
+        // core 记录的路径可能带 ..，与文件系统上的规范路径指向同一文件
+        val dotted = File(pending.parentFile, "../20240101/pending.txt").path
+        val freed = imp.clear(emptySet(), millis(2024, 1, 10), setOf(dotted))
+        assertEquals(2L, freed)
+        assertTrue(pending.exists())
+        assertFalse(other.exists())
+    }
+
     @Test fun root_path_is_canonical_and_prefixes_imported_paths_when_root_is_a_symlink() = runTest {
         Robolectric.setupContentProvider(FakeSharedProvider::class.java, "share.test")
         val real = File(tmp.root, "real-outbox").apply { mkdirs() }

@@ -213,6 +213,20 @@ class SettingsViewModelTest {
         assertEquals(errorTextRes(ErrorCode.IO), vm.state.value.error)
     }
 
+    @Test fun clear_outbox_aborts_when_station_items_cannot_be_read() = runTest {
+        stations = listOf(Fixtures.stationView("s1"))
+        val fake = fake()
+        val ok = fake.handler
+        fake.handler = { req -> if (req is Request.StationItems) throw ApiException(ErrorCode.PEER_OFFLINE, "x") else ok(req) }
+        val vm = vm(fake)
+        advanceUntilIdle()
+        vm.clearOutbox()
+        advanceUntilIdle()
+        assertNull(outbox.cutoff)
+        assertNull(vm.state.value.clearedBytes)
+        assertEquals(errorTextRes(ErrorCode.PEER_OFFLINE), vm.state.value.error)
+    }
+
     @Test fun consecutive_failed_updates_end_with_core_value() = runTest {
         val fake = fake()
         val vm = vm(fake)
