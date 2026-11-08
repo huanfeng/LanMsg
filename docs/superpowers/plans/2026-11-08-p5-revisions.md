@@ -49,6 +49,14 @@
   - T10 的 `client.rs` 复用 T9 中构造宽松 TLS 客户端的函数，不要另建一个。`announce_enabled=false` 时不发通告、不 register，这条行为的测试在 T10 补上。
   - 已知限制：组播只加入默认网卡（discovery.rs `join_multicast_v4(.., UNSPECIFIED)`），联调时再决定是否按网卡逐个加入。
 - **T11**：对端指纹先统一转成小写，再入库、计算 `ConvId::localsend` 和设备 ID。新增设置项 `localsend_port`（默认 53317，用户询问后追加；端口被占用时的提示里指引用户改端口）。 `RequestView.preview` 用 `RequestPreviewView::Files{..}`；新增 PIN 系统事件变体（全局修订 4）；把 `ServiceConfig.localsend_port`（mod.rs:52、141）接入。
+- **T12（安全审阅后修订，已实现）**：
+  - HKDF 输出 128 字节：`k_page | k_host | k_enc_p2h | k_enc_h2p`（各 32）。加密按方向分离：页面发往宿主用 `k_enc_p2h`，宿主发往页面用 `k_enc_h2p`，防反射。`SessionKeys` 提供 `seal_to_page` / `open_from_page`（宿主端）与 `seal_to_host` / `open_from_host`（页面侧、测试用），原 `k_enc`、`seal`、`open` 删除。`vectors.json` 的每种模式含 `k_enc_p2h`、`k_enc_h2p`、`sealed_p2h`、`sealed_h2p`。
+  - `derive` 与 `host_respond` 返回 `Result<_, CoreError>`：X25519 共享密钥非贡献性（零点等低阶公钥）时返回 `InvalidArgument`。
+  - `WebSecrets::rotate_code(&mut self)` 同时重生成 `code`、`scrypt_salt` 并重算 `code_auth`；`CodeGuard::record_success()` 清零失败计数（确认成功时调用）。
+  - `SessionKeys`、`WebSecrets` 实现 `ZeroizeOnDrop`，不再 `Clone`。
+  - 配对码规范化 `normalize_code`：仅 ASCII 大写并去除空白。JS 侧必须做同样处理。
+- **T13（对 T12 的补充）**：`crypto.js` 的 `derive` 返回 `{kPage, kHost, kEncP2h, kEncH2p, th}`，页面发送用 `kEncP2h`、接收用 `kEncH2p`；JS 配对码输入只做 ASCII 大写与去空白，并对易混字符给出映射或提示（`0`/`O`、`1`/`I`/`L` 不在字母表内，字母表只有 `2-9` 与去掉 `I`、`O` 的字母）。
+- **T14（对 T12 的补充）**：加密帧的明文头必须带 `seq`（u64，每个方向独立、严格递增，收到不大于已见值的帧一律拒绝，防重放）；文件分块帧另带 `file_id` 与 `chunk_idx`，并在认证范围内（放在明文头中随 secretbox 一起认证），防止分块被换位或跨文件替换。配对码确认失败走 `CodeGuard::record_failure`，成功走 `record_success`，达到上限时 `rotate_code`。
 - **T13**：网页文案放 `web/strings.js`（`zh`、`en` 两套，按 `navigator.language` 选择）；`check-no-cjk.py` 扩展到扫描 `web/`，`web/strings.js` 列入白名单。页面总大小 < 300KB 的限制不变。
 - **T14**：访客会话标题由 core 返回空字符串，界面按会话类型显示本地化标题；上传目录名用英文。
 - **T15**：手动添加的错误走 `error_text`；扫描结果和"公网"等文案进 `strings.rs`；托盘文案进 lanmsgd `strings.rs`。

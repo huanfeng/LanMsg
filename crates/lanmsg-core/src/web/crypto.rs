@@ -1,7 +1,7 @@
 //! Web 会话密码学。算法定义见 P5 计划 Task 12，JS 侧（web/crypto.js）必须逐字节一致。
 //!
 //! 流程：auth（url_key 或 scrypt(code)）作 HKDF 盐，X25519 共享密钥作 IKM，
-//! transcript 哈希作 info，派生 k_page / k_host / k_enc；双向 HMAC 确认后用
+//! transcript 哈希作 info，派生 k_page / k_host / k_enc_p2h / k_enc_h2p（按方向分离）；双向 HMAC 确认后用
 //! XSalsa20-Poly1305（NaCl secretbox）加密载荷。
 
 use crypto_secretbox::aead::{Aead, KeyInit};
@@ -11,6 +11,7 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::{Digest, Sha512};
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::CoreError;
 
@@ -45,7 +46,7 @@ impl WebMode {
 }
 
 /// 宿主每次开启网页传输生成的秘密材料。
-#[derive(Clone)]
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct WebSecrets {
     pub url_key: [u8; 32],
     pub code: String,
@@ -53,18 +54,26 @@ pub struct WebSecrets {
     code_auth: [u8; 32],
 }
 
+/// 配对码规范化：仅 ASCII 大写并去除空白。
+pub fn normalize_code(code: &str) -> String {
+    code.chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
 /// scrypt(code 大写, salt, N=16384, r=8, p=1, dkLen=32)。
 pub fn scrypt_code(code: &str, salt: &[u8; 16]) -> [u8; 32] {
     let mut out = [0u8; 32];
     // 参数为常量且合法，不会失败。
     let params = scrypt::Params::new(14, 8, 1, 32).expect("constant scrypt params are valid");
-    scrypt::scrypt(code.to_uppercase().as_bytes(), salt, &params, &mut out)
+    scrypt::scrypt(normalize_code(code).as_bytes(), salt, &params, &mut out)
         .expect("output length matches params");
     out
 }
 
 /// 生成 8 位配对码。
-pub fn generate_code() -> String {
+pub(crate) fn generate_code() -> String {
     let mut raw = [0u8; CODE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut raw);
     // 256 是 32 的整数倍，取低 5 位无偏差。
@@ -90,6 +99,16 @@ impl WebSecrets {
         }
     }
 
+    /// 轮换配对码：同时重生成 code 与 scrypt_salt 并重算 code_auth。
+    pub fn rotate_code(&mut self) {
+        let mut salt = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+        self.code.zeroize();
+        self.code = generate_code();
+        self.scrypt_salt = salt;
+        self.code_auth = scrypt_code(&self.code, &self.scrypt_salt);
+    }
+
     /// 指定模式下的认证密钥。
     pub fn auth_key(&self, mode: WebMode) -> [u8; 32] {
         match mode {
@@ -100,11 +119,14 @@ impl WebSecrets {
 }
 
 /// 会话密钥与 transcript 哈希。
-#[derive(Clone)]
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SessionKeys {
     pub k_page: [u8; 32],
     pub k_host: [u8; 32],
-    pub k_enc: [u8; 32],
+    /// 页面 -> 宿主方向的加密密钥。
+    pub k_enc_p2h: [u8; 32],
+    /// 宿主 -> 页面方向的加密密钥。
+    pub k_enc_h2p: [u8; 32],
     pub th: [u8; 64],
 }
 
@@ -132,7 +154,7 @@ pub fn host_respond(
     auth: &[u8; 32],
     page_pk: &[u8; 32],
     page_nonce: &[u8; 16],
-) -> HostHandshake {
+) -> Result<HostHandshake, CoreError> {
     let mut rng = rand::rngs::OsRng;
     let host_sk = StaticSecret::random_from_rng(rng);
     let host_pk = PublicKey::from(&host_sk).to_bytes();
@@ -141,10 +163,11 @@ pub fn host_respond(
     let mut sid = [0u8; 16];
     rng.fill_bytes(&mut sid);
     let session = data_encoding::HEXLOWER.encode(&sid);
+    let mut sk_bytes = host_sk.to_bytes();
     let keys = derive(
         mode,
         auth,
-        &host_sk.to_bytes(),
+        &sk_bytes,
         page_pk,
         page_pk,
         &host_pk,
@@ -152,12 +175,13 @@ pub fn host_respond(
         &host_nonce,
         &session,
     );
-    HostHandshake {
+    sk_bytes.zeroize();
+    Ok(HostHandshake {
         session,
         host_pk,
         host_nonce,
-        keys,
-    }
+        keys: keys?,
+    })
 }
 
 /// 双方共用的密钥推导（`my_sk` / `their_pk` 因侧而异，其余输入两侧一致）。
@@ -172,7 +196,7 @@ pub fn derive(
     page_nonce: &[u8; 16],
     host_nonce: &[u8; 16],
     session: &str,
-) -> SessionKeys {
+) -> Result<SessionKeys, CoreError> {
     let mut hasher = Sha512::new();
     hasher.update(TRANSCRIPT_PREFIX);
     hasher.update([mode.byte()]);
@@ -184,21 +208,27 @@ pub fn derive(
     let th: [u8; 64] = hasher.finalize().into();
 
     let shared = StaticSecret::from(*my_sk).diffie_hellman(&PublicKey::from(*their_pk));
+    if !shared.was_contributory() {
+        return Err(CoreError::InvalidArgument("invalid peer public key".into()));
+    }
     let hk = Hkdf::<Sha512>::new(Some(auth), shared.as_bytes());
-    let mut okm = [0u8; 96];
+    let mut okm = [0u8; 128];
     // 96 字节远小于 HKDF-SHA512 上限，不会失败。
     hk.expand(&th, &mut okm)
-        .expect("96-byte okm is within HKDF limit");
+        .expect("128-byte okm is within HKDF limit");
     let mut keys = SessionKeys {
         k_page: [0; 32],
         k_host: [0; 32],
-        k_enc: [0; 32],
+        k_enc_p2h: [0; 32],
+        k_enc_h2p: [0; 32],
         th,
     };
     keys.k_page.copy_from_slice(&okm[0..32]);
     keys.k_host.copy_from_slice(&okm[32..64]);
-    keys.k_enc.copy_from_slice(&okm[64..96]);
-    keys
+    keys.k_enc_p2h.copy_from_slice(&okm[64..96]);
+    keys.k_enc_h2p.copy_from_slice(&okm[96..128]);
+    okm.zeroize();
+    Ok(keys)
 }
 
 fn mac_of(key: &[u8; 32], label: &[u8], th: &[u8; 64]) -> HmacSha512 {
@@ -230,34 +260,63 @@ impl SessionKeys {
         truncate_mac(mac_of(&self.k_host, b"host", &self.th))
     }
 
-    /// `nonce(24) || secretbox`。
-    pub fn seal(&self, pt: &[u8]) -> Vec<u8> {
-        let mut nonce = [0u8; NONCE_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
-        self.seal_with_nonce(pt, &nonce)
+    /// 宿主 -> 页面：`nonce(24) || secretbox`，使用 h2p 密钥。
+    pub fn seal_to_page(&self, pt: &[u8]) -> Vec<u8> {
+        seal_with_key(&self.k_enc_h2p, pt, &random_nonce())
     }
 
-    pub(crate) fn seal_with_nonce(&self, pt: &[u8], nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
-        let cipher = XSalsa20Poly1305::new(Key::from_slice(&self.k_enc));
-        // 加密仅在明文长度溢出时失败，不会发生。
-        let ct = cipher
-            .encrypt(Nonce::from_slice(nonce), pt)
-            .expect("secretbox encryption cannot fail");
-        let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
-        out.extend_from_slice(nonce);
-        out.extend_from_slice(&ct);
-        out
+    /// 页面 -> 宿主，使用 p2h 密钥（页面侧与测试用）。
+    pub fn seal_to_host(&self, pt: &[u8]) -> Vec<u8> {
+        seal_with_key(&self.k_enc_p2h, pt, &random_nonce())
     }
 
-    pub fn open(&self, ct: &[u8]) -> Result<Vec<u8>, CoreError> {
-        if ct.len() < NONCE_LEN + TAG_LEN {
-            return Err(CoreError::InvalidArgument("ciphertext too short".into()));
-        }
-        let (nonce, body) = ct.split_at(NONCE_LEN);
-        XSalsa20Poly1305::new(Key::from_slice(&self.k_enc))
-            .decrypt(Nonce::from_slice(nonce), body)
-            .map_err(|_| CoreError::InvalidArgument("ciphertext authentication failed".into()))
+    #[cfg(test)]
+    pub(crate) fn seal_to_page_with_nonce(&self, pt: &[u8], nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
+        seal_with_key(&self.k_enc_h2p, pt, nonce)
     }
+
+    #[cfg(test)]
+    pub(crate) fn seal_to_host_with_nonce(&self, pt: &[u8], nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
+        seal_with_key(&self.k_enc_p2h, pt, nonce)
+    }
+
+    /// 宿主解密页面发来的密文（p2h）。
+    pub fn open_from_page(&self, ct: &[u8]) -> Result<Vec<u8>, CoreError> {
+        open_with_key(&self.k_enc_p2h, ct)
+    }
+
+    /// 页面解密宿主发来的密文（h2p，页面侧与测试用）。
+    pub fn open_from_host(&self, ct: &[u8]) -> Result<Vec<u8>, CoreError> {
+        open_with_key(&self.k_enc_h2p, ct)
+    }
+}
+
+fn random_nonce() -> [u8; NONCE_LEN] {
+    let mut nonce = [0u8; NONCE_LEN];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    nonce
+}
+
+fn seal_with_key(key: &[u8; 32], pt: &[u8], nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
+    let cipher = XSalsa20Poly1305::new(Key::from_slice(key));
+    // 加密仅在明文长度溢出时失败，不会发生。
+    let ct = cipher
+        .encrypt(Nonce::from_slice(nonce), pt)
+        .expect("secretbox encryption cannot fail");
+    let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
+    out.extend_from_slice(nonce);
+    out.extend_from_slice(&ct);
+    out
+}
+
+fn open_with_key(key: &[u8; 32], ct: &[u8]) -> Result<Vec<u8>, CoreError> {
+    if ct.len() < NONCE_LEN + TAG_LEN {
+        return Err(CoreError::InvalidArgument("ciphertext too short".into()));
+    }
+    let (nonce, body) = ct.split_at(NONCE_LEN);
+    XSalsa20Poly1305::new(Key::from_slice(key))
+        .decrypt(Nonce::from_slice(nonce), body)
+        .map_err(|_| CoreError::InvalidArgument("ciphertext authentication failed".into()))
 }
 
 fn truncate_mac(mac: HmacSha512) -> [u8; 32] {
@@ -274,6 +333,11 @@ pub struct CodeGuard {
 }
 
 impl CodeGuard {
+    /// 确认成功后清零计数。
+    pub fn record_success(&mut self) {
+        self.failures = 0;
+    }
+
     /// 记录一次失败；返回 `true` 表示已达上限，调用方必须轮换 code 与 scrypt_salt。
     /// 达到上限时计数清零。
     pub fn record_failure(&mut self) -> bool {
@@ -309,7 +373,7 @@ mod tests {
         let page_sk = [5u8; 32];
         let page_pk = pk_of(&page_sk);
         let page_nonce = [6u8; 16];
-        let host = host_respond(mode, host_auth, &page_pk, &page_nonce);
+        let host = host_respond(mode, host_auth, &page_pk, &page_nonce).unwrap();
         let page = derive(
             mode,
             page_auth,
@@ -320,7 +384,8 @@ mod tests {
             &page_nonce,
             &host.host_nonce,
             &host.session,
-        );
+        )
+        .unwrap();
         (page, host)
     }
 
@@ -333,7 +398,9 @@ mod tests {
             let h = host.keys();
             assert_eq!(page.k_page, h.k_page);
             assert_eq!(page.k_host, h.k_host);
-            assert_eq!(page.k_enc, h.k_enc);
+            assert_eq!(page.k_enc_p2h, h.k_enc_p2h);
+            assert_eq!(page.k_enc_h2p, h.k_enc_h2p);
+            assert_ne!(h.k_enc_p2h, h.k_enc_h2p);
             assert_eq!(page.th, h.th);
             assert!(h.verify_page_mac(&page.page_mac()));
             assert_eq!(page.host_mac(), h.host_mac());
@@ -354,13 +421,34 @@ mod tests {
         let s = WebSecrets::generate();
         let auth = s.auth_key(WebMode::Key);
         let (page, host) = handshake(WebMode::Key, &auth, &auth);
-        let sealed = page.seal(b"hello");
-        assert_eq!(host.keys().open(&sealed).unwrap(), b"hello");
+        let sealed = page.seal_to_host(b"hello");
+        assert_eq!(host.keys().open_from_page(&sealed).unwrap(), b"hello");
         let mut bad = sealed.clone();
         let last = bad.len() - 1;
         bad[last] ^= 1;
-        assert!(host.keys().open(&bad).is_err());
-        assert!(host.keys().open(&sealed[..30]).is_err());
+        assert!(host.keys().open_from_page(&bad).is_err());
+        assert!(host.keys().open_from_page(&sealed[..30]).is_err());
+        let back = host.keys().seal_to_page(b"world");
+        assert_eq!(page.open_from_host(&back).unwrap(), b"world");
+    }
+
+    #[test]
+    fn directions_are_not_interchangeable() {
+        let s = WebSecrets::generate();
+        let auth = s.auth_key(WebMode::Key);
+        let (page, host) = handshake(WebMode::Key, &auth, &auth);
+        // 宿主发出的密文（h2p）不能被宿主当作页面发来的密文（p2h）接受，即反射攻击无效。
+        let reflected = host.keys().seal_to_page(b"x");
+        assert!(host.keys().open_from_page(&reflected).is_err());
+        let reflected = page.seal_to_host(b"x");
+        assert!(page.open_from_host(&reflected).is_err());
+    }
+
+    #[test]
+    fn zero_public_key_rejected() {
+        let s = WebSecrets::generate();
+        let auth = s.auth_key(WebMode::Key);
+        assert!(host_respond(WebMode::Key, &auth, &[0u8; 32], &[1u8; 16]).is_err());
     }
 
     #[test]
@@ -373,6 +461,25 @@ mod tests {
     }
 
     #[test]
+    fn normalize_code_uppercases_and_strips_whitespace() {
+        assert_eq!(normalize_code(" ab cd\t23 "), "ABCD23");
+    }
+
+    #[test]
+    fn rotate_code_changes_code_salt_and_auth() {
+        let mut s = WebSecrets::generate();
+        let (code, salt, auth) = (s.code.clone(), s.scrypt_salt, s.auth_key(WebMode::Code));
+        s.rotate_code();
+        assert_ne!(s.code, code);
+        assert_ne!(s.scrypt_salt, salt);
+        assert_ne!(s.auth_key(WebMode::Code), auth);
+        assert_eq!(
+            s.auth_key(WebMode::Code),
+            scrypt_code(&s.code, &s.scrypt_salt)
+        );
+    }
+
+    #[test]
     fn code_mode_rotates_after_five_failures() {
         let mut g = CodeGuard::default();
         for _ in 0..4 {
@@ -380,6 +487,19 @@ mod tests {
         }
         assert!(g.record_failure());
         assert!(!g.record_failure());
+    }
+
+    #[test]
+    fn success_resets_failure_count() {
+        let mut g = CodeGuard::default();
+        for _ in 0..4 {
+            assert!(!g.record_failure());
+        }
+        g.record_success();
+        for _ in 0..4 {
+            assert!(!g.record_failure());
+        }
+        assert!(g.record_failure());
     }
 
     /// 固定输入生成的向量，供 web/test/crypto.test.mjs 比对。
@@ -415,7 +535,8 @@ mod tests {
                 &page_nonce,
                 &host_nonce,
                 session,
-            );
+            )
+            .unwrap();
             let host = derive(
                 mode,
                 &auth,
@@ -426,8 +547,10 @@ mod tests {
                 &page_nonce,
                 &host_nonce,
                 session,
-            );
-            assert_eq!(page.k_enc, host.k_enc);
+            )
+            .unwrap();
+            assert_eq!(page.k_enc_p2h, host.k_enc_p2h);
+            assert_eq!(page.k_enc_h2p, host.k_enc_h2p);
             modes.insert(
                 name.into(),
                 json!({
@@ -435,10 +558,12 @@ mod tests {
                     "th": b64u(&page.th),
                     "k_page": b64u(&page.k_page),
                     "k_host": b64u(&page.k_host),
-                    "k_enc": b64u(&page.k_enc),
+                    "k_enc_p2h": b64u(&page.k_enc_p2h),
+                    "k_enc_h2p": b64u(&page.k_enc_h2p),
                     "page_mac": b64u(&page.page_mac()),
                     "host_mac": b64u(&page.host_mac()),
-                    "sealed": b64u(&page.seal_with_nonce(plaintext.as_bytes(), &seal_nonce)),
+                    "sealed_p2h": b64u(&page.seal_to_host_with_nonce(plaintext.as_bytes(), &seal_nonce)),
+                    "sealed_h2p": b64u(&host.seal_to_page_with_nonce(plaintext.as_bytes(), &seal_nonce)),
                 }),
             );
         }
