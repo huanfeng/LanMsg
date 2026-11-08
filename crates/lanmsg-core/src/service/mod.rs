@@ -95,6 +95,8 @@ pub(crate) struct Inner {
     address_book_sent: StdMutex<HashMap<DeviceId, u64>>,
     /// 网段扫描进行中标志：同一时刻只允许一个扫描。
     pub(crate) scanning: std::sync::atomic::AtomicBool,
+    /// 网段扫描探测的端口（默认服务端口；测试钩子可覆盖）。
+    pub(crate) scan_port: std::sync::atomic::AtomicU16,
     /// 发现触发的在途拨号地址：同一地址拨号未结束时不重复发起。
     dialing: StdMutex<HashSet<SocketAddr>>,
     /// 受信对端的重连状态（任务登记、唤醒信号、尝试计数）。
@@ -307,6 +309,7 @@ impl Service {
             manual_tasks: StdMutex::new(HashMap::new()),
             address_book_sent: StdMutex::new(HashMap::new()),
             scanning: std::sync::atomic::AtomicBool::new(false),
+            scan_port: std::sync::atomic::AtomicU16::new(lanmsg_proto::consts::SERVICE_PORT),
             dialing: StdMutex::new(HashSet::new()),
             redial: redial::RedialState::new(),
         });
@@ -427,6 +430,15 @@ impl Service {
     #[cfg(feature = "test-hooks")]
     pub fn override_dial_addr_for_test(&self, device: DeviceId, addr: SocketAddr) {
         self.inner.conns.override_dial_addr_for_tests(device, addr);
+    }
+
+    /// 测试辅助：覆盖网段扫描探测的端口（默认服务端口）。
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn override_scan_port_for_test(&self, port: u16) {
+        self.inner
+            .scan_port
+            .store(port, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 测试辅助：重连任务循环迭代总数（检测空转）。

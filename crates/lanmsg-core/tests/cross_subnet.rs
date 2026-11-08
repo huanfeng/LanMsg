@@ -215,11 +215,10 @@ async fn scan_subnet_request_validates_and_reports_finish() {
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad}");
     }
-    // 服务端口 53320 若被占用（例如本机跑着守护进程），无法构造受控场景，跳过后半段。
-    let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:53320").await else {
-        eprintln!("port 53320 busy, skipping the concurrency part");
-        return;
-    };
+    // 监听者绑定随机端口，并让扫描改探测该端口，不依赖固定端口是否空闲。
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    a.svc
+        .override_scan_port_for_test(listener.local_addr().unwrap().port());
     // 只接受连接、不做 TLS 应答：握手在 dial 超时（数秒）前一直卡住。
     let blocker = tokio::spawn(async move {
         let mut held = Vec::new();

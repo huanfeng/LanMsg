@@ -52,7 +52,8 @@ pub async fn scan(conns: ConnManager, net: Ipv4Net, port: u16) -> ScanReport {
         .map(|i| i.addr)
         .collect();
     let sem = Arc::new(Semaphore::new(SCAN_CONCURRENCY));
-    let mut tasks = Vec::new();
+    // JoinSet：外层 future 被丢弃时自动 abort 全部探测任务。
+    let mut tasks = tokio::task::JoinSet::new();
     let mut probed = 0u32;
     for ip in net.hosts() {
         let ip = IpAddr::V4(ip);
@@ -63,7 +64,7 @@ pub async fn scan(conns: ConnManager, net: Ipv4Net, port: u16) -> ScanReport {
         let addr = SocketAddr::new(ip, port);
         let conns = conns.clone();
         let sem = sem.clone();
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             let _permit = sem.acquire_owned().await.ok()?;
             let reachable =
                 tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect(addr))
@@ -73,11 +74,11 @@ pub async fn scan(conns: ConnManager, net: Ipv4Net, port: u16) -> ScanReport {
                 return None;
             }
             conns.connect(addr, false).await.ok()
-        }));
+        });
     }
     let mut found: HashSet<DeviceId> = HashSet::new();
-    for t in tasks {
-        if let Ok(Some(device)) = t.await {
+    while let Some(res) = tasks.join_next().await {
+        if let Ok(Some(device)) = res {
             found.insert(device);
         }
     }

@@ -684,7 +684,7 @@ fn scan_subnet(inner: &Arc<Inner>, cidr: String) -> Result<Response, ApiError> {
             r = crate::net::scan::scan(
                 inner.conns.clone(),
                 net,
-                lanmsg_proto::consts::SERVICE_PORT,
+                inner.scan_port.load(Ordering::SeqCst),
             ) => r,
             _ = inner.conns.wait_shutdown() => return,
         };
