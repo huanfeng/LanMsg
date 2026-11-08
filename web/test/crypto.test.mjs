@@ -125,3 +125,25 @@ test("fresh handshake derives matching keys on both sides", async () => {
   const sealed = C.seal(b.kEncH2p, text.encode("x"));
   assert.deepEqual([...C.open(a.kEncH2p, sealed)], [120]);
 });
+
+test("seq window rejects replays, stale and invalid values", () => {
+  const w = C.newSeqWindow(4);
+  assert.equal(w.accept(1), true);
+  assert.equal(w.accept(1), false);
+  assert.equal(w.accept(3), true);
+  assert.equal(w.accept(2), true);
+  assert.equal(w.accept(10), true);
+  assert.equal(w.accept(7), true);
+  assert.equal(w.accept(6), false);
+  assert.equal(w.accept(5), false);
+  assert.equal(w.accept(0), false);
+  assert.equal(w.accept(-1), false);
+  assert.equal(w.accept(1.5), false);
+  assert.equal(w.accept(undefined), false);
+});
+
+test("seq window keeps rejecting old values after pruning", () => {
+  const w = C.newSeqWindow(4);
+  for (let i = 1; i <= 100; i++) assert.equal(w.accept(i), true);
+  for (let i = 1; i <= 100; i++) assert.equal(w.accept(i), false);
+});

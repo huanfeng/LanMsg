@@ -29,7 +29,8 @@ WHITELIST = {
     "crates/lanmsgd/src/strings.rs",
     "crates/lanmsg-desktop/src/fixtures.rs",
 }
-WEB_WHITELIST = ("web/strings.js", "web/vendor/", "web/test/")
+WEB_WHITELIST_FILES = {"web/strings.js"}
+WEB_WHITELIST_DIRS = ("web/vendor/", "web/test/")
 # CJK 标点与符号、假名、扩展 A、汉字、谚文、全角形式
 CJK = re.compile(r"[　-〿぀-ヿ㐀-䶿一-鿿가-힯＀-￯]")
 
@@ -229,12 +230,14 @@ def markup_hits(text, comment):
 
 def web_hits(rel, text):
     ext = rel.rsplit(".", 1)[-1]
-    if ext == "js":
+    if ext in ("js", "mjs"):
         return js_string_hits(text)
-    if ext == "html":
+    if ext in ("html", "svg"):
         return markup_hits(text, r"<!--.*?-->")
     if ext == "css":
         return markup_hits(text, r"/\*.*?\*/")
+    if ext == "json":
+        return markup_hits(text, r"(?!)")
     return []
 
 
@@ -270,6 +273,9 @@ def self_test():
         ("JS 字符串内的双斜杠不是注释", "a.js", 'var u = "http://x"; var s = "中";\n', [1]),
         ("HTML 文本命中", "a.html", "<p>中文</p>\n", [1]),
         ("HTML 注释放行", "a.html", "<!-- 中文 -->\n<p>ok</p>\n", []),
+        ("MJS 字符串命中", "a.mjs", 'const s = "中";\n', [1]),
+        ("SVG 注释放行 / 文本命中", "a.svg", "<!-- 中 -->\n<text>中</text>\n", [2]),
+        ("JSON 命中", "a.json", '{"a": "中"}\n', [1]),
         ("CSS 注释放行 / 内容命中", "a.css", "/* 中 */\na { content: \"中\"; }\n", [2]),
     ]
     for name, rel, src, expect in web_cases:
@@ -296,7 +302,7 @@ def main():
             hits.append(f"{rel}:{lineno}: {content.strip()[:60]}")
     for path in sorted((ROOT / "web").rglob("*")):
         rel = path.relative_to(ROOT).as_posix()
-        if not path.is_file() or rel.startswith(WEB_WHITELIST):
+        if not path.is_file() or rel in WEB_WHITELIST_FILES or rel.startswith(WEB_WHITELIST_DIRS):
             continue
         for lineno in web_hits(rel, path.read_text(encoding="utf-8")):
             hits.append(f"{rel}:{lineno}: contains CJK text")

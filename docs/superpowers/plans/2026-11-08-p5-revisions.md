@@ -57,7 +57,13 @@
   - 配对码规范化 `normalize_code`：仅 ASCII 大写并去除空白。JS 侧必须做同样处理。
 - **T13（对 T12 的补充）**：`crypto.js` 的 `derive` 返回 `{kPage, kHost, kEncP2h, kEncH2p, th}`，页面发送用 `kEncP2h`、接收用 `kEncH2p`；JS 配对码输入只做 ASCII 大写与去空白，输入 `0`、`1`、`I`、`O` 时提示“配对码不含 0、1、I、O”（字母表 `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` 含 `L`，`L` 不得改写）。
 - **T14（对 T12 的补充）**：加密帧的明文头必须带 `seq`（u64，每个方向独立、严格递增，收到不大于已见值的帧一律拒绝，防重放）；文件分块帧另带 `file_id` 与 `chunk_idx`，并在认证范围内（放在明文头中随 secretbox 一起认证），防止分块被换位或跨文件替换。配对码确认失败走 `CodeGuard::record_failure`，成功走 `record_success`（只在 `verify_page_mac` 通过后调用；denied、超时不清零），达到上限时 `rotate_code`。
-- **T13（落地约定，供 T14 对齐）**：宿主到页面的 WS 帧 JSON 带 `seq`，按连接从 1 开始严格递增；页面到宿主的所有加密 JSON（WS 消息、`upload/init`）与分块都带页面侧唯一递增的 `seq`，由于分块并发 PUT 会乱序到达，宿主对页面方向应使用“拒绝已见值与过旧值”的滑动窗口（建议窗口 4096），而不是要求严格连续。分块明文为 `seq(u64 BE) || fid_len(u8) || fid(ASCII) || chunk_idx(u32 BE) || data`，下载响应同格式（页面校验 fid 与 idx）。`crypto.js` 暴露 `frameChunk`、`parseChunk`。
+- **T13（落地约定，供 T14 对齐，第 2 轮修订）**：
+  - **seq**：页面到宿主的所有加密 JSON（WS 消息、`upload/init`、请求头）与分块都带页面侧唯一递增的 `seq`，重试也换新 `seq`。宿主到页面的所有加密 JSON 与分块也带 `seq`，是**会话级单调计数器**（WS 帧与 HTTP 加密响应共用，不随 WS 重连重置）。两个方向的接收方都用“拒绝已见值与过旧值”的滑动窗口（窗口 4096，`crypto.js` 的 `newSeqWindow`），而不是严格连续，因为并发请求与 WS 会交错到达。
+  - **分块明文**：`seq(u64 BE) || fid_len(u8) || fid(ASCII) || chunk_idx(u32 BE) || data`，下载响应同格式（页面校验 fid、idx 与 seq）。
+  - **请求认证头**：`finish` 与 `download` 带 `X-LanMsg-Req: b64u(seal(k_enc_p2h, JSON{seq, fid[, idx]}))`，宿主校验 fid、idx 与路径一致且 `seq` 未重放。
+  - **响应回显**：`upload/init` 响应（密封 JSON）回显 `client_key`；`finish` 响应（成功与 409）回显 `fid`；页面校验不符即失败。
+  - **页面安全头（T14 在 HTTP 响应头发出）**：`Content-Security-Policy: default-src 'self'; connect-src 'self'; img-src 'self' blob:; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`（`frame-ancestors` 不能放 meta，只能放响应头）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
+  - 页面读出 `#k=` 后立刻 `history.replaceState` 清除地址栏片段；会话结束时清零并丢弃密钥。
 - **T13**：网页文案放 `web/strings.js`（`zh`、`en` 两套，按 `navigator.language` 选择）；`check-no-cjk.py` 扩展到扫描 `web/`，`web/strings.js` 列入白名单。页面总大小 < 300KB 的限制不变。
 - **T14**：访客会话标题由 core 返回空字符串，界面按会话类型显示本地化标题；上传目录名用英文。
 - **T15**：手动添加的错误走 `error_text`；扫描结果和"公网"等文案进 `strings.rs`；托盘文案进 lanmsgd `strings.rs`。

@@ -22,6 +22,9 @@ fn collect(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) -> std::io::
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
         let rel_path = if rel.is_empty() {
             name.clone()
         } else {

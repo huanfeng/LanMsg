@@ -1,7 +1,8 @@
 // LanMsg 网页传输页面逻辑。
 // 约定（Task 14 服务端实现）：
-// - 宿主到页面的 WS 序号按连接从 1 开始（页面在每次连接建立时重置）。
-// - 页面到宿主的每个加密 JSON 消息与分块都带 seq（页面侧唯一递增）；宿主到页面的 WS 帧带 seq，页面拒绝不大于已见值的帧。
+// - 页面到宿主的每个加密 JSON、分块与请求头都带 seq（页面侧唯一递增，重试也换新 seq）。
+// - 宿主到页面的每个加密 JSON 与分块都带 seq（会话级，WS 与 HTTP 响应共用一个计数器），页面用滑动窗口拒绝重放。
+// - finish 与下载请求在 X-LanMsg-Req 头里带密封的 {seq, fid[, idx]}；init 响应回显 client_key，finish 响应回显 fid。
 // - 分块明文为 frameChunk(seq, fid, idx, data)，fid 与 idx 在认证范围内。
 (function () {
   "use strict";
@@ -14,7 +15,8 @@
   var session = null;
   var keys = null;
   var seq = 0;
-  var lastHostSeq = 0;
+  // 宿主到页面的 seq 为会话级单调计数器（WS 帧与 HTTP 加密响应共用），不随重连重置。
+  var hostWindow = C.newSeqWindow(4096);
   var ended = false;
   var ws = null;
   var wsDelay = 1000;
@@ -44,7 +46,21 @@
     if (withForm) $("code-input").focus();
   }
 
-  function fail(key) { ended = true; showGate(T(key), false); }
+  // 结束会话并清除密钥材料。
+  function endSession() {
+    ended = true;
+    if (keys) {
+      keys.kPage.fill(0);
+      keys.kHost.fill(0);
+      keys.kEncP2h.fill(0);
+      keys.kEncH2p.fill(0);
+      keys.th.fill(0);
+    }
+    keys = null;
+    session = null;
+  }
+
+  function fail(key) { endSession(); showGate(T(key), false); }
 
   function postJson(path, body) {
     return fetch(path, {
@@ -90,6 +106,7 @@
       var hostPk = C.b64uDecode(h.host_pk);
       keys = C.derive(mode, auth, hs.sk, hostPk, hs.pk, hostPk,
         hs.nonce, C.b64uDecode(h.host_nonce), h.session);
+      hs.sk.fill(0);
       if (!keys) return fail("verify_failed");
       session = h.session;
       r = await postJson("/api/web/confirm", { session: session, page_mac: C.b64uEncode(C.pageMac(keys)) });
@@ -135,14 +152,25 @@
     return C.seal(keys.kEncP2h, enc.encode(JSON.stringify(obj)));
   }
 
+  // 解密宿主发来的 JSON 并检查 seq（重放或乱序过旧返回 null）。
   function openJson(u8) {
+    if (!keys) return null;
     var pt = C.open(keys.kEncH2p, u8);
-    return pt ? JSON.parse(dec.decode(pt)) : null;
+    if (!pt) return null;
+    var m = JSON.parse(dec.decode(pt));
+    return hostWindow.accept(m.seq) ? m : null;
   }
 
-  async function secureFetch(method, path, body) {
-    var r = await fetch(path, { method: method, headers: { "X-LanMsg-Session": session }, body: body || undefined });
-    return r;
+  // 带密封请求头 X-LanMsg-Req = b64u(seal({seq, ...fields}))，每次调用换新 seq。
+  function reqHeader(fields) {
+    var obj = Object.assign({}, fields);
+    return C.b64uEncode(sealJson(obj));
+  }
+
+  async function secureFetch(method, path, body, reqFields) {
+    var headers = { "X-LanMsg-Session": session };
+    if (reqFields) headers["X-LanMsg-Req"] = reqHeader(reqFields);
+    return fetch(path, { method: method, headers: headers, body: body || undefined });
   }
 
   // ---------- 聊天 ----------
@@ -176,7 +204,6 @@
     ws.binaryType = "arraybuffer";
     ws.onopen = function () {
       wsDelay = 1000;
-      lastHostSeq = 0;
       setStatus(true);
       jobs.forEach(function (j) { if (j.failed) runJob(j); });
     };
@@ -184,8 +211,6 @@
       var m;
       try { m = openJson(new Uint8Array(e.data)); } catch (err) { m = null; }
       if (!m) return;
-      if (typeof m.seq !== "number" || m.seq <= lastHostSeq) return;
-      lastHostSeq = m.seq;
       handleHost(m);
     };
     ws.onclose = function () {
@@ -202,8 +227,9 @@
     } else if (m.t === "msg") {
       addMessage(m);
     } else if (m.t === "bye") {
-      ended = true;
-      if (ws) ws.close();
+      var sock = ws;
+      endSession();
+      if (sock) sock.close();
       showGate(T("ended"), false);
     }
   }
@@ -286,11 +312,11 @@
     var lastErr = null;
     for (var attempt = 0; attempt < 3; attempt++) {
       try {
-        var r = await secureFetch("GET", "/api/web/download/" + fid + "/" + idx);
+        var r = await secureFetch("GET", "/api/web/download/" + fid + "/" + idx, null, { fid: fid, idx: idx });
         if (!r.ok) throw new Error("status " + r.status);
-        var pt = C.open(keys.kEncH2p, new Uint8Array(await r.arrayBuffer()));
+        var pt = keys && C.open(keys.kEncH2p, new Uint8Array(await r.arrayBuffer()));
         var p = pt && C.parseChunk(pt);
-        if (!p || p.fid !== fid || p.idx !== idx) throw new Error("bad chunk");
+        if (!p || p.fid !== fid || p.idx !== idx || !hostWindow.accept(p.seq)) throw new Error("bad chunk");
         return p.data;
       } catch (err) {
         lastErr = err;
@@ -331,10 +357,11 @@
 
   async function putChunk(job, fid, idx, cs) {
     var data = new Uint8Array(await job.file.slice(idx * cs, (idx + 1) * cs).arrayBuffer());
-    var body = C.seal(keys.kEncP2h, C.frameChunk(nextSeq(), fid, idx, data));
     var lastErr = null;
     for (var attempt = 0; attempt < 3; attempt++) {
       try {
+        // 每次尝试都用新 seq 重新封包，否则重试会被宿主当作重放。
+        var body = C.seal(keys.kEncP2h, C.frameChunk(nextSeq(), fid, idx, data));
         var r = await secureFetch("PUT", "/api/web/upload/" + fid + "/" + idx, body);
         if (r.status === 204) return;
         throw new Error("status " + r.status);
@@ -358,7 +385,7 @@
       }));
       if (!r.ok) throw new Error("init " + r.status);
       var init = openJson(new Uint8Array(await r.arrayBuffer()));
-      if (!init) throw new Error("bad init");
+      if (!init || init.client_key !== job.key) throw new Error("bad init");
       var cs = init.chunk_size;
       var total = Math.ceil(file.size / cs);
       var have = {};
@@ -378,8 +405,10 @@
           }
         };
         await Promise.all([worker(), worker(), worker()]);
-        r = await secureFetch("POST", "/api/web/upload/" + init.fid + "/finish");
+        r = await secureFetch("POST", "/api/web/upload/" + init.fid + "/finish", null, { fid: init.fid });
         if (r.ok) {
+          var done = openJson(new Uint8Array(await r.arrayBuffer()));
+          if (!done || done.fid !== init.fid) throw new Error("bad finish");
           job.li.remove();
           jobs.splice(jobs.indexOf(job), 1);
           job.running = false;
@@ -387,7 +416,7 @@
         }
         if (r.status !== 409) throw new Error("finish " + r.status);
         var miss = openJson(new Uint8Array(await r.arrayBuffer()));
-        if (!miss || !miss.missing) throw new Error("bad finish");
+        if (!miss || miss.fid !== init.fid || !miss.missing) throw new Error("bad finish");
         miss.missing.forEach(function (i) { delete have[i]; });
       }
       throw new Error("missing chunks");
@@ -426,6 +455,8 @@
   if (hashKey) {
     try {
       var urlKey = C.b64uDecode(hashKey[1]);
+      // 密钥读出后立刻从地址栏与历史记录中移除。
+      history.replaceState(null, "", location.pathname + location.search);
       if (urlKey.length === 32) connect("key", urlKey);
       else fail("verify_failed");
     } catch (err) {

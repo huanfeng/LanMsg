@@ -170,7 +170,26 @@
     };
   }
 
+  // 防重放滑动窗口：拒绝非正整数、已见值与落后最大值 size 以上的值。
+  function newSeqWindow(size) {
+    var max = 0;
+    var seen = new Set();
+    return {
+      accept: function (s) {
+        if (!Number.isSafeInteger(s) || s <= 0) return false;
+        if (s <= max - size || seen.has(s)) return false;
+        seen.add(s);
+        if (s > max) max = s;
+        if (seen.size > size * 2) {
+          seen.forEach(function (v) { if (v <= max - size) seen.delete(v); });
+        }
+        return true;
+      }
+    };
+  }
+
   var api = {
+    newSeqWindow: newSeqWindow,
     b64uEncode: b64uEncode, b64uDecode: b64uDecode, sha512: sha512,
     hmacSha512: hmacSha512, hkdfSha512: hkdfSha512, normalizeCode: normalizeCode,
     scryptCode: scryptCode, newHandshake: newHandshake, derive: derive,
