@@ -20,7 +20,7 @@
 
 ## 任务条目
 
-- **T1**：迁移为 `MIGRATIONS[3]`（核实 schema.rs 当前 3 个元素）。`Frame` 追加 `AddressBook(50)`、`Station(60)` 及 `TYPE_*` 常量，同步 `type_id_values_match_spec` 测试。表 `known_addresses`、`manual_peers` 按 T3 修订后的列定义（见下）。
+- **T1**：迁移为 `MIGRATIONS[3]`（核实 schema.rs 当前 3 个元素）。`Frame` 追加 `AddressBook(50)`、`Station(60)` 及 `TYPE_*` 常量，同步 `type_id_values_match_spec` 测试。`station_blobs` 主键改为 `(item_id, rel_path, hash)`，`rel_path` 为 `TEXT NOT NULL DEFAULT ''`（文件夹内同内容文件不冲突；File 条目 `rel_path` 为空串）；另加索引 `station_items(expires_at)`、`localsend_peers(pseudo_device)`、`web_guests(pseudo_device)`。表 `known_addresses`、`manual_peers` 按 T3 修订后的列定义（见下）。
 - **T2**：`LocalIface` 加 `tunnel` 字段，全仓 4 处构造同步。`ListInterfaces` 实现并移出兜底。
 - **T3（重写）**：不新建 `Reconnector`，在 `service/redial.rs` 上增量修改：
   - `store/addresses.rs`：`known_addresses(device, addr, path, last_ok, source)`，每台设备最多 8 条；`manual_peers(addr, device NULL, added_at)`。函数名照原计划（`record_address`、`addresses_of`、`add_manual_peer`、`list_manual_peers`、`bind_manual_peer`、`is_manual_device`）。

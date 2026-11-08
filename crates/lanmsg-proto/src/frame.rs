@@ -409,6 +409,16 @@ mod tests {
             99
         );
         assert_eq!(Frame::Unknown(777).type_id(), 777);
+        assert_eq!(TYPE_ADDRESS_BOOK, 50);
+        assert_eq!(TYPE_STATION, 60);
+        assert_eq!(
+            Frame::AddressBook(crate::addrbook::AddressBook { entries: vec![] }).type_id(),
+            50
+        );
+        assert_eq!(
+            Frame::Station(crate::station::StationMsg::Announce { stations: vec![] }).type_id(),
+            60
+        );
     }
 
     #[test]
