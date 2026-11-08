@@ -1448,6 +1448,11 @@ impl Model {
         )]
     }
 
+    /// 是否显示“防火墙可能阻止发现”横幅：与断开横幅同一位置，断开优先。
+    pub fn show_firewall_banner(&self) -> bool {
+        self.firewall_missing && !self.conn.is_down()
+    }
+
     /// 读取本机网卡。
     pub fn load_interfaces(&mut self) -> Vec<Effect> {
         vec![call(Request::ListInterfaces, ReplyTag::Interfaces)]
@@ -4541,6 +4546,19 @@ mod tests {
             Request::RemoveManualPeer { addr } if addr == "10.8.0.5:53320")));
         let fx = m.apply(reply(ReplyTag::ManualPeerRemoved, Response::Ok));
         assert!(has(&fx, |r| matches!(r, Request::ListManualPeers)));
+    }
+
+    #[test]
+    fn firewall_banner_yields_to_disconnected_banner() {
+        let mut m = Model::new();
+        assert!(!m.show_firewall_banner());
+        m.apply(UiMsg::Event(Event::FirewallMissing));
+        m.conn = ConnState::Connected;
+        assert!(m.show_firewall_banner());
+        m.apply(UiMsg::Disconnected("x".into()));
+        assert!(!m.show_firewall_banner());
+        // 断线期间保留标记，重连后继续显示
+        assert!(m.firewall_missing);
     }
 
     #[test]

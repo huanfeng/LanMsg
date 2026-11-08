@@ -17,6 +17,7 @@ use tracing_subscriber::fmt::writer::MakeWriter;
 
 use lanmsg_proto::consts::SERVICE_PORT;
 
+mod firewall_cmd;
 mod ipc_server;
 #[cfg(feature = "desktop")]
 mod launch;
@@ -95,6 +96,9 @@ pub(crate) struct Args {
     /// 强制无头模式（不显示托盘与界面）
     #[arg(long)]
     headless: bool,
+    /// 添加 Windows 防火墙入站放行规则后退出（需要管理员权限；其他平台无操作）
+    #[arg(long)]
+    add_firewall_rule: bool,
 }
 
 impl Args {
@@ -119,6 +123,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = Args::parse();
+    if args.add_firewall_rule {
+        std::process::exit(firewall_cmd::run_add_rule());
+    }
     let data_dir = args.resolved_data_dir();
     std::fs::create_dir_all(&data_dir)?;
     init_tracing(&data_dir, &args.log)?;
@@ -127,6 +134,12 @@ fn run() -> Result<()> {
     let env = |k: &str| std::env::var(k).ok();
     if runtime::is_headless(&env, args.headless) {
         tracing::info!("running in headless mode");
+        // 规则缺失只记日志：无头模式没有界面提示入口，IPC 客户端连接时会补发事件
+        std::thread::spawn(|| {
+            if firewall_cmd::check_missing() {
+                tracing::warn!("firewall rule for lanmsgd is missing");
+            }
+        });
         rt.block_until_shutdown();
     } else {
         #[cfg(feature = "desktop")]

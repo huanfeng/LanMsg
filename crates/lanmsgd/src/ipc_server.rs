@@ -56,6 +56,19 @@ pub(crate) async fn serve_connection(
         })
     };
 
+    // 启动检查发现防火墙规则缺失：新连接补发一次（先复查，规则可能已被放行）。
+    if crate::firewall_cmd::firewall_missing()
+        && tokio::task::spawn_blocking(crate::firewall_cmd::check_missing)
+            .await
+            .unwrap_or(false)
+    {
+        let _ = sink
+            .lock()
+            .await
+            .send(IpcFrame::Event(lanmsg_api::types::Event::FirewallMissing))
+            .await;
+    }
+
     // 请求处理循环。
     while let Some(frame) = source.next().await {
         let req = match frame {

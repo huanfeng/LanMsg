@@ -209,6 +209,7 @@ fn main() {
             ui_tick.tick_pair();
             ui_tick.tick_web();
             ui_tick.tick_scan();
+            ui_tick.tick_firewall();
             ui_tick.tick_files();
             ui_tick.preview.tick();
         })

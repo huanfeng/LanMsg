@@ -1,9 +1,7 @@
 // 联系人页：左侧分类导航（联系人 / 新的请求 / 附近的人 / 我的设备），右侧为该类内容。
 // 注释中文，标识符英文。
 
-use lanmsg_api::types::{
-    ContactView, PathClassDto, PeerView, RequestAction, RequestKind, RequestView,
-};
+use lanmsg_api::types::{ContactView, PeerView, RequestAction, RequestKind, RequestView};
 use windui::prelude::*;
 
 use crate::event_text::request_preview_text;
@@ -14,7 +12,7 @@ use crate::ui_state::UiState;
 use crate::views::chats::avatar;
 use crate::views::confirm::{confirm_host, Confirm, ConfirmState};
 use crate::views::devices::{device_row, devices_panel, remove_confirm_host};
-use crate::views::network::path_badge_text;
+use crate::views::network::{path_badge_text, path_rank};
 
 /// 分类导航栏宽度。
 const NAV_W: i32 = 200;
@@ -34,15 +32,6 @@ pub struct Nearby {
     pub short: String,
     /// 最优路径的角标；局域网不标。
     pub badge: Option<&'static str>,
-}
-
-fn path_rank(p: &PathClassDto) -> u8 {
-    match p {
-        PathClassDto::Lan => 0,
-        PathClassDto::Vpn => 1,
-        PathClassDto::Internet => 2,
-        PathClassDto::Relay => 3,
-    }
 }
 
 /// 从在线设备里挑出还不是联系人、也不是自己设备的人，按用户合并。
@@ -616,6 +605,7 @@ pub fn contacts_page(ui: &UiState) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lanmsg_api::types::PathClassDto;
 
     fn peer(device: &str, user: &str, path: PathClassDto, contact: bool, mine: bool) -> PeerView {
         PeerView {

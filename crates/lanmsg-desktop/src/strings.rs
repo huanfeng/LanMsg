@@ -488,3 +488,7 @@ pub fn net_scan_result(probed: u32, found: u32) -> String {
 pub fn net_scan_cidr_button(cidr: &str) -> String {
     format!("扫描 {cidr}")
 }
+
+/// 防火墙横幅（仅 Windows 的后台服务会上报）。
+pub const FIREWALL_BANNER: &str = "Windows 防火墙可能阻止其他设备发现本机";
+pub const FIREWALL_ALLOW: &str = "允许";

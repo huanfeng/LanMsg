@@ -52,6 +52,8 @@ pub struct UiState {
     web_show: Rc<RefCell<Option<Signal<bool>>>>,
     /// 网页传输窗口里当前选中的访问地址下标；放在这里，窗口重建后选择不丢。
     pub web_url_sel: Signal<usize>,
+    /// 防火墙放行提权的结果通道：提权在后台线程（会等 UAC），结果由 `tick_firewall` 取走。
+    firewall_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<bool>>>>,
     /// `--web` 带来的待办：连接上后台服务后开启网页传输。
     pending_web: Rc<RefCell<bool>>,
     /// 配对完成（Done）后开始计时的时刻，用于 1.5 秒后自动关闭。
@@ -108,6 +110,7 @@ impl UiState {
             pair_show: Rc::new(RefCell::new(None)),
             web_show: Rc::new(RefCell::new(None)),
             web_url_sel: signal(0usize),
+            firewall_rx: Rc::new(RefCell::new(None)),
             pending_web: Rc::new(RefCell::new(false)),
             pair_done_since: Rc::new(RefCell::new(None)),
             pair_refresh_at: Rc::new(RefCell::new(None)),
@@ -171,6 +174,51 @@ impl UiState {
             self.act(|m| m.web_start());
         } else {
             *self.pending_web.borrow_mut() = true;
+        }
+    }
+
+    /// 点击横幅“允许”：以管理员身份运行同目录的 `lanmsgd --add-firewall-rule`（仅 Windows 有效，
+    /// 其他平台不会出现该横幅）。正在进行时忽略；结果由 `tick_firewall` 处理。
+    pub fn allow_firewall(&self) {
+        #[cfg(windows)]
+        {
+            if self.firewall_rx.borrow().is_some() {
+                return;
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            *self.firewall_rx.borrow_mut() = Some(rx);
+            std::thread::spawn(move || {
+                let ok = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("lanmsgd.exe")))
+                    .map(|exe| lanmsg_core::firewall::elevate_add_rule(&exe))
+                    .is_some_and(|r| match r {
+                        Ok(ok) => ok,
+                        Err(e) => {
+                            tracing::warn!("failed to elevate firewall rule command: {e}");
+                            false
+                        }
+                    });
+                let _ = tx.send(ok);
+            });
+        }
+    }
+
+    /// 周期调用：取走提权结果，成功（退出码 0）则隐藏横幅；取消或失败保留横幅可再试。
+    pub fn tick_firewall(&self) {
+        let done = match self.firewall_rx.borrow().as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(ok)) => Some(ok),
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Some(false),
+            _ => None,
+        };
+        if let Some(ok) = done {
+            self.firewall_rx.borrow_mut().take();
+            if ok {
+                self.act(|m| {
+                    m.firewall_missing = false;
+                    Vec::new()
+                });
+            }
         }
     }
 

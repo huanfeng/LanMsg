@@ -36,3 +36,11 @@ pub const TRAY_ONLINE: &str = "在线";
 pub const TRAY_INVISIBLE: &str = "隐身";
 pub const TRAY_BUSY: &str = "忙碌";
 pub const TRAY_QUIT: &str = "退出";
+
+/// 防火墙放行（仅 Windows 的托盘使用）。
+#[cfg(windows)]
+pub const TRAY_FIREWALL: &str = "允许 LanMsg 通过防火墙";
+#[cfg(windows)]
+pub const NOTIFY_FIREWALL_TITLE: &str = "LanMsg";
+#[cfg(windows)]
+pub const NOTIFY_FIREWALL_BODY: &str = "Windows 防火墙可能阻止其他设备发现本机，点击允许";

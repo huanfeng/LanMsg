@@ -37,6 +37,7 @@ fn every_demo_page_renders() {
         "stations",
         "web",
         "network",
+        "firewall",
         "preview-image",
         "preview-text",
     ] {

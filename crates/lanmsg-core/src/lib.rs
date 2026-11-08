@@ -1,6 +1,7 @@
 pub mod blob;
 pub mod discovery;
 pub mod error;
+pub mod firewall;
 pub mod hlc;
 pub mod identity;
 pub mod keystore;

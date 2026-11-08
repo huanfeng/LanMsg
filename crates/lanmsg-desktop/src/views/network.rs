@@ -23,6 +23,16 @@ pub fn path_badge_text(p: &PathClassDto) -> Option<&'static str> {
     }
 }
 
+/// 路径优先级：数值越小越优（局域网 < VPN < 公网 < 中继），用于挑出一个用户的最优路径。
+pub fn path_rank(p: &PathClassDto) -> u8 {
+    match p {
+        PathClassDto::Lan => 0,
+        PathClassDto::Vpn => 1,
+        PathClassDto::Internet => 2,
+        PathClassDto::Relay => 3,
+    }
+}
+
 /// 隧道类型的显示名；core 给的是稳定字符串，未知的统一叫“隧道”。
 pub fn tunnel_label(kind: &str) -> &'static str {
     match kind {
@@ -293,6 +303,13 @@ mod tests {
         assert_eq!(path_badge_text(&PathClassDto::Vpn), Some("VPN"));
         assert_eq!(path_badge_text(&PathClassDto::Internet), Some("公网"));
         assert_eq!(path_badge_text(&PathClassDto::Relay), Some("中继"));
+    }
+
+    #[test]
+    fn path_rank_orders_lan_first_relay_last() {
+        assert!(path_rank(&PathClassDto::Lan) < path_rank(&PathClassDto::Vpn));
+        assert!(path_rank(&PathClassDto::Vpn) < path_rank(&PathClassDto::Internet));
+        assert!(path_rank(&PathClassDto::Internet) < path_rank(&PathClassDto::Relay));
     }
 
     #[test]

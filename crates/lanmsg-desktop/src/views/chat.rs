@@ -11,7 +11,7 @@ use crate::style;
 use crate::tz;
 use crate::ui_state::UiState;
 use crate::views::chats::{format_time, now_millis};
-use crate::views::network::path_badge_text;
+use crate::views::network::{path_badge_text, path_rank};
 use crate::views::{composer, forward, message_row};
 
 /// 超过此间隔插入时间分隔行（规范第 8 节）。
@@ -118,15 +118,6 @@ pub struct HeaderInfo {
     pub devices: Vec<String>,
     /// 非局域网路径的角标文字。
     pub badge: Option<&'static str>,
-}
-
-fn path_rank(p: &PathClassDto) -> u8 {
-    match p {
-        PathClassDto::Lan => 0,
-        PathClassDto::Vpn => 1,
-        PathClassDto::Internet => 2,
-        PathClassDto::Relay => 3,
-    }
 }
 
 /// 当前会话的顶栏数据；没有选中会话时为 None。

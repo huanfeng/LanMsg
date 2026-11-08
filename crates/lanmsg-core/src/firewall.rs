@@ -1,0 +1,231 @@
+// Windows 防火墙入站规则：检测与添加（经 netsh advfirewall）。
+// 规则名与参数和安装包清单（packaging/windows/app.toml 的 [[firewall]]）一致；
+// 纯函数（参数拼装、输出判断）跨平台编译以便单测，netsh 调用与提权只在 Windows 编译。
+// 注释中文，标识符英文。
+
+use std::path::Path;
+
+/// 防火墙规则名；与 `packaging/windows/app.toml` 中 `[[firewall]].name` 一致。
+pub const FIREWALL_RULE_NAME: &str = "LanMsg";
+
+/// `show rule` 的参数。不带 `program=`（该子命令不接受），按名字查 verbose 输出。
+pub fn show_rule_args() -> Vec<String> {
+    vec![
+        "advfirewall".into(),
+        "firewall".into(),
+        "show".into(),
+        "rule".into(),
+        format!("name={FIREWALL_RULE_NAME}"),
+        "verbose".into(),
+    ]
+}
+
+/// `add rule` 的参数：入站放行 `program`，私有与域网络，任意协议（与安装包一致）。
+pub fn add_rule_args(program: &Path) -> Vec<String> {
+    vec![
+        "advfirewall".into(),
+        "firewall".into(),
+        "add".into(),
+        "rule".into(),
+        format!("name={FIREWALL_RULE_NAME}"),
+        "dir=in".into(),
+        "action=allow".into(),
+        format!("program={}", program.display()),
+        "enable=yes".into(),
+        "profile=private,domain".into(),
+        "protocol=any".into(),
+    ]
+}
+
+/// `show rule ... verbose` 的输出里是否出现 `program`（不区分大小写的路径字面量判断）。
+/// 输出文案随系统语言变化，不解析标签。netsh 按 OEM 代码页输出而这里按 UTF-8 宽松解码，
+/// 路径含非 ASCII 字符时字面量比较不可靠，此时只要 show 成功（该名下有规则）就视为存在。
+pub fn output_mentions_program(output: &str, program: &Path) -> bool {
+    let program = program.to_string_lossy();
+    if !program.is_ascii() {
+        return true;
+    }
+    output.to_lowercase().contains(&program.to_lowercase())
+}
+
+#[cfg(windows)]
+pub use win::{add_rule, elevate_add_rule, firewall_rule_present};
+
+#[cfg(windows)]
+mod win {
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::process::CommandExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use windows::core::{w, HRESULT, PCWSTR};
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    use super::{add_rule_args, output_mentions_program, show_rule_args};
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    /// 用户在 UAC 对话框里取消。
+    const ERROR_CANCELLED: u32 = 1223;
+
+    /// 用 System32 下的绝对路径，避免被当前目录或 PATH 里同名 netsh.exe 劫持。
+    fn netsh_path() -> PathBuf {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        PathBuf::from(root).join("System32").join("netsh.exe")
+    }
+
+    /// 运行 netsh，返回（退出码，stdout）。
+    fn run_netsh(args: &[String]) -> io::Result<(i32, String)> {
+        let out = Command::new(netsh_path())
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()?;
+        Ok((
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        ))
+    }
+
+    /// 规则是否已放行 `program`：`show rule` 非零退出码表示该名下没有规则；命令无法执行视为不存在。
+    pub fn firewall_rule_present(program: &Path) -> bool {
+        match run_netsh(&show_rule_args()) {
+            Ok((0, out)) => output_mentions_program(&out, program),
+            _ => false,
+        }
+    }
+
+    /// 添加放行规则（需要管理员权限）；已存在则不重复添加。
+    pub fn add_rule(program: &Path) -> Result<(), String> {
+        if firewall_rule_present(program) {
+            return Ok(());
+        }
+        let (code, out) =
+            run_netsh(&add_rule_args(program)).map_err(|e| format!("failed to run netsh: {e}"))?;
+        if code == 0 {
+            Ok(())
+        } else {
+            // netsh 把错误写在 stdout
+            Err(format!("netsh failed ({code}): {}", out.trim()))
+        }
+    }
+
+    /// 以管理员身份（`runas`）运行 `exe --add-firewall-rule` 并等待结束：
+    /// 退出码 0 返回 `Ok(true)`；用户取消 UAC 返回 `Ok(false)`。会阻塞到 UAC 与命令完成，
+    /// 调用方应放在后台线程。
+    pub fn elevate_add_rule(exe: &Path) -> io::Result<bool> {
+        let file: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
+        let params: Vec<u16> = "--add-firewall-rule\0".encode_utf16().collect();
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS,
+            lpVerb: w!("runas"),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(params.as_ptr()),
+            nShow: SW_HIDE.0,
+            ..Default::default()
+        };
+        // SAFETY: info 与其指向的两个宽字符串在调用期间有效；hProcess 由本函数负责关闭。
+        unsafe {
+            if let Err(e) = ShellExecuteExW(&mut info) {
+                if e.code() == HRESULT::from_win32(ERROR_CANCELLED) {
+                    return Ok(false);
+                }
+                return Err(io::Error::other(e));
+            }
+            if WaitForSingleObject(info.hProcess, INFINITE) != WAIT_OBJECT_0 {
+                let _ = CloseHandle(info.hProcess);
+                return Err(io::Error::last_os_error());
+            }
+            let mut code = 1u32;
+            let got = GetExitCodeProcess(info.hProcess, &mut code);
+            let _ = CloseHandle(info.hProcess);
+            got.map_err(io::Error::other)?;
+            Ok(code == 0)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    const PROGRAM: &str = r"C:\Program Files\LanMsg\lanmsgd.exe";
+
+    const EN_OUTPUT: &str = "\r\nRule Name:                            LanMsg\r\n\
+----------------------------------------------------------------------\r\n\
+Enabled:                              Yes\r\n\
+Direction:                            In\r\n\
+Profiles:                             Domain,Private\r\n\
+Grouping:\r\n\
+Program:                              C:\\Program Files\\LanMsg\\lanmsgd.exe\r\n\
+Action:                               Allow\r\n";
+
+    const ZH_OUTPUT: &str = "\r\n规则名称:                            LanMsg\r\n\
+----------------------------------------------------------------------\r\n\
+已启用:                               是\r\n\
+方向:                                 入站\r\n\
+配置文件:                             域,专用\r\n\
+程序:                                 c:\\program files\\lanmsg\\LANMSGD.EXE\r\n\
+操作:                                 允许\r\n";
+
+    #[test]
+    fn output_mentions_program_matches_english_and_chinese_labels() {
+        assert!(output_mentions_program(EN_OUTPUT, Path::new(PROGRAM)));
+        // 中文系统输出，路径大小写不同
+        assert!(output_mentions_program(ZH_OUTPUT, Path::new(PROGRAM)));
+    }
+
+    #[test]
+    fn output_mentions_program_rejects_other_program() {
+        assert!(!output_mentions_program(
+            EN_OUTPUT,
+            Path::new(r"D:\Other\lanmsgd.exe")
+        ));
+        assert!(!output_mentions_program("", Path::new(PROGRAM)));
+    }
+
+    #[test]
+    fn output_mentions_program_non_ascii_path_trusts_successful_show() {
+        // 输出按 OEM 代码页，含非 ASCII 的路径无法按字面量比较：show 成功即视为存在
+        assert!(output_mentions_program(
+            "whatever",
+            Path::new(r"C:\程序\lanmsgd.exe")
+        ));
+    }
+
+    #[test]
+    fn rule_args_match_installer_manifest() {
+        assert_eq!(FIREWALL_RULE_NAME, "LanMsg");
+        assert_eq!(
+            show_rule_args(),
+            [
+                "advfirewall",
+                "firewall",
+                "show",
+                "rule",
+                "name=LanMsg",
+                "verbose"
+            ]
+        );
+        assert_eq!(
+            add_rule_args(Path::new(PROGRAM)),
+            [
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=LanMsg",
+                "dir=in",
+                "action=allow",
+                r"program=C:\Program Files\LanMsg\lanmsgd.exe",
+                "enable=yes",
+                "profile=private,domain",
+                "protocol=any",
+            ]
+        );
+    }
+}

@@ -31,6 +31,8 @@ pub enum DemoPage {
     Stations,
     /// 网页传输窗口（叠在会话页上）。
     Web,
+    /// 会话页，顶部显示防火墙横幅。
+    Firewall,
     /// 设置页（网络分组：手动对端、扫描结果、网卡）；截图时用较高的窗口。
     Network,
     /// 会话页上叠着图片预览。
@@ -59,6 +61,7 @@ impl DemoPage {
             "stations" => DemoPage::Stations,
             "web" => DemoPage::Web,
             "network" => DemoPage::Network,
+            "firewall" => DemoPage::Firewall,
             "preview-image" => DemoPage::PreviewImage,
             "preview-text" => DemoPage::PreviewText,
             _ => return None,
@@ -847,6 +850,12 @@ pub fn demo_model(p: DemoPage) -> Model {
                     received_at_millis: real_now(),
                 }],
             });
+        }
+        DemoPage::Firewall => {
+            m.page = Page::Chats;
+            m.current_conv = Some("c-dm".into());
+            m.messages = demo_messages();
+            m.firewall_missing = true;
         }
         DemoPage::Network => {
             m.page = Page::Settings;
