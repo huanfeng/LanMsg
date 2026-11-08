@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::types::{LsAnnounce, LsInfo, LsPeer};
-use crate::{LsError, LOCALSEND_MCAST, LOCALSEND_PORT};
+use crate::{LsError, LOCALSEND_MCAST};
 
 /// 周期性通告间隔。
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(30);
@@ -32,12 +32,12 @@ impl Drop for LsDiscovery {
     }
 }
 
-fn bind_socket() -> Result<UdpSocket, LsError> {
+fn bind_socket(port: u16) -> Result<UdpSocket, LsError> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_reuse_address(true)?;
     #[cfg(unix)]
     sock.set_reuse_port(true)?;
-    let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, LOCALSEND_PORT);
+    let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
     sock.bind(&addr.into()).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AddrInUse {
             LsError::PortBusy
@@ -70,7 +70,7 @@ pub(crate) fn parse_datagram(
     ))
 }
 
-async fn send_announce(sock: &UdpSocket, me: &LsInfo, announce: bool) {
+async fn send_announce(sock: &UdpSocket, mcast_port: u16, me: &LsInfo, announce: bool) {
     let msg = LsAnnounce {
         info: me.clone(),
         announce,
@@ -78,19 +78,22 @@ async fn send_announce(sock: &UdpSocket, me: &LsInfo, announce: bool) {
     let Ok(bytes) = serde_json::to_vec(&msg) else {
         return;
     };
-    let dst = SocketAddr::V4(SocketAddrV4::new(LOCALSEND_MCAST, LOCALSEND_PORT));
+    let dst = SocketAddr::V4(SocketAddrV4::new(LOCALSEND_MCAST, mcast_port));
     if let Err(e) = sock.send_to(&bytes, dst).await {
         tracing::debug!("localsend announce send failed: {e}");
     }
 }
 
-/// 启动发现。`announce_enabled == false` 时只收不发，也不调用 register。
+/// 启动发现。`mcast_port` 是组播 UDP 端口（默认 `LOCALSEND_PORT`），与 `me.port`（HTTP 端口，
+/// 对端据此回连）相互独立；官方协议未规定两者必须相同。
+/// `announce_enabled == false` 时只收不发，也不调用 register。
 pub fn spawn(
     me: LsInfo,
+    mcast_port: u16,
     announce_enabled: bool,
     events: mpsc::Sender<LsPeerEvent>,
 ) -> Result<LsDiscovery, LsError> {
-    let sock = Arc::new(bind_socket()?);
+    let sock = Arc::new(bind_socket(mcast_port)?);
     let task = tokio::spawn(async move {
         let client = match reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -109,7 +112,7 @@ pub fn spawn(
             tokio::select! {
                 _ = tick.tick() => {
                     if announce_enabled {
-                        send_announce(&sock, &me, true).await;
+                        send_announce(&sock, mcast_port, &me, true).await;
                     }
                 }
                 r = sock.recv_from(&mut buf) => {
@@ -135,7 +138,7 @@ pub fn spawn(
                                 }
                                 Err(e) => {
                                     tracing::debug!("localsend register failed, replying via multicast: {e}");
-                                    send_announce(&sock, &me, false).await;
+                                    send_announce(&sock, mcast_port, &me, false).await;
                                 }
                             }
                         });
