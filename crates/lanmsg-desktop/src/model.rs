@@ -27,7 +27,30 @@ pub enum Page {
     Chats,
     Contacts,
     Files,
+    Stations,
     Settings,
+}
+
+/// 中转站条目的保留时间选项。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpiryChoice {
+    Never,
+    Day1,
+    Day7,
+    Day30,
+}
+
+impl ExpiryChoice {
+    /// 以 `now_millis` 为起点的过期时刻；不过期为 None。
+    pub fn expires_at(&self, now_millis: i64) -> Option<i64> {
+        let days: i64 = match self {
+            ExpiryChoice::Never => return None,
+            ExpiryChoice::Day1 => 1,
+            ExpiryChoice::Day7 => 7,
+            ExpiryChoice::Day30 => 30,
+        };
+        Some(now_millis + days * 86_400_000)
+    }
 }
 
 /// 与后台服务的连接状态。
@@ -194,6 +217,14 @@ pub struct Model {
     /// 文件页视图的重建序号：进入文件页或用户改筛选时自增（回到列表顶部）；
     /// 事件触发的静默刷新不自增，滚动位置得以保留。
     pub files_view_epoch: u64,
+    pub stations: Vec<StationView>,
+    pub current_station: Option<String>,
+    pub station_items: Vec<StationItemView>,
+    /// 之后放入的存储方式 / 保留时间（界面下拉写入）。
+    pub station_mode: StoreMode,
+    pub station_expiry: ExpiryChoice,
+    /// 已发出、尚未回复的放入请求数：经反向通道最坏要十几秒，期间显示“正在放入”而不是失败。
+    pub station_putting: u32,
     pub settings: Option<SettingsDto>,
     /// 已发出、尚未收到回复的设置保存数；>0 时设置页各组“保存”置灰，
     /// 避免连续保存时用尚未刷新的旧值把另一组写回。
@@ -275,6 +306,12 @@ impl Model {
             files_refresh_acc: Vec::new(),
             files_loaded: false,
             files_view_epoch: 0,
+            stations: Vec::new(),
+            current_station: None,
+            station_items: Vec::new(),
+            station_mode: StoreMode::Reference,
+            station_expiry: ExpiryChoice::Never,
+            station_putting: 0,
             settings: None,
             settings_saving: 0,
             transfers: BTreeMap::new(),
@@ -311,16 +348,19 @@ impl Model {
                 self.conn = ConnState::Disconnected(reason);
                 // 断线后在途请求的回复可能不会再来，别让保存按钮一直停在“正在保存”
                 self.settings_saving = 0;
+                self.station_putting = 0;
                 Vec::new()
             }
             UiMsg::DaemonQuit => {
                 self.conn = ConnState::DaemonQuit;
                 self.settings_saving = 0;
+                self.station_putting = 0;
                 Vec::new()
             }
             UiMsg::LaunchFailed(reason) => {
                 self.conn = ConnState::LaunchFailed(reason);
                 self.settings_saving = 0;
+                self.station_putting = 0;
                 Vec::new()
             }
             UiMsg::Reply { tag, result } => match result {
@@ -355,6 +395,9 @@ impl Model {
                     if let ReplyTag::Transfer { hash } = &tag {
                         // 下载请求失败：恢复为可再次下载
                         self.pending_downloads.remove(hash);
+                    }
+                    if tag == ReplyTag::StationPut {
+                        self.station_putting = self.station_putting.saturating_sub(1);
                     }
                     if tag == ReplyTag::Init {
                         // Init 失败：回到可重新提交的状态
@@ -416,6 +459,13 @@ impl Model {
             }
             fx.push(self.list_messages_call(c, None, false));
         }
+        // 站点列表随连接刷新：文件页右键菜单的“放入中转站”要用
+        fx.push(call(Request::StationList, ReplyTag::Stations));
+        if self.page == Page::Stations {
+            if let Some(s) = self.current_station.clone() {
+                fx.push(station_items_call(s));
+            }
+        }
         fx
     }
 
@@ -460,8 +510,43 @@ impl Model {
                 fx
             }
             (ReplyTag::Conversations, Response::Conversations { value }) => {
-                self.convs = value;
+                // 中转站会话在“中转站”页呈现，不进会话列表
+                self.convs = value
+                    .into_iter()
+                    .filter(|c| c.kind != ConvKind::Station)
+                    .collect();
                 sort_convs(&mut self.convs);
+                Vec::new()
+            }
+            (ReplyTag::Stations, Response::Stations { value }) => {
+                self.stations = value;
+                // 当前站点已不存在则回退；没有当前站点时自动打开第一个
+                let still = self
+                    .current_station
+                    .as_ref()
+                    .is_some_and(|c| self.stations.iter().any(|s| &s.station == c));
+                if !still {
+                    self.current_station = None;
+                    self.station_items.clear();
+                    if let Some(first) = self.stations.first().map(|s| s.station.clone()) {
+                        return self.open_station(first);
+                    }
+                }
+                Vec::new()
+            }
+            (ReplyTag::StationItems { station }, Response::StationItems { value }) => {
+                if self.current_station.as_deref() == Some(station.as_str()) {
+                    self.station_items = value;
+                }
+                Vec::new()
+            }
+            (ReplyTag::StationCreated, Response::ConvId { value }) => {
+                let mut fx = vec![call(Request::StationList, ReplyTag::Stations)];
+                fx.extend(self.open_station(value));
+                fx
+            }
+            (ReplyTag::StationPut, _) => {
+                self.station_putting = self.station_putting.saturating_sub(1);
                 Vec::new()
             }
             (ReplyTag::Messages { conv, older }, Response::Messages { value }) => {
@@ -792,6 +877,13 @@ impl Model {
                 self.peers.retain(|p| p.device_id != device);
                 Vec::new()
             }
+            Event::StationUpdated { station } => {
+                let mut fx = vec![call(Request::StationList, ReplyTag::Stations)];
+                if self.current_station.as_deref() == Some(station.as_str()) {
+                    fx.push(station_items_call(station));
+                }
+                fx
+            }
             Event::ContactsChanged => vec![call(Request::ListContacts, ReplyTag::Contacts)],
             Event::DevicesChanged => vec![call(Request::ListMyDevices, ReplyTag::Devices)],
             Event::PairStatus { session, state } => {
@@ -885,12 +977,118 @@ impl Model {
                 call(Request::ListMyDevices, ReplyTag::Devices),
             ],
             Page::Files => self.query_files(true),
+            Page::Stations => vec![call(Request::StationList, ReplyTag::Stations)],
             // 设置页内嵌“我的设备”，一并刷新设备列表
             Page::Settings => vec![
                 call(Request::GetSettings, ReplyTag::Settings),
                 call(Request::ListMyDevices, ReplyTag::Devices),
             ],
         }
+    }
+
+    /// 打开一个中转站并拉取它的条目。
+    pub fn open_station(&mut self, station: String) -> Vec<Effect> {
+        self.current_station = Some(station.clone());
+        self.station_items.clear();
+        vec![station_items_call(station)]
+    }
+
+    /// 新建中转站（名字由界面校验非空）。
+    pub fn create_station(&mut self, name: String) -> Vec<Effect> {
+        vec![call(
+            Request::StationCreate { name },
+            ReplyTag::StationCreated,
+        )]
+    }
+
+    fn station_put_call(
+        &mut self,
+        station: String,
+        item: StationPutItem,
+        mode: StoreMode,
+        expires_at: Option<i64>,
+    ) -> Vec<Effect> {
+        self.station_putting += 1;
+        vec![call(
+            Request::StationPut {
+                station,
+                item,
+                mode,
+                expires_at,
+            },
+            ReplyTag::StationPut,
+        )]
+    }
+
+    /// 把本机路径（文件 / 文件夹）放入当前中转站，按当前选择的存储方式与保留时间。
+    pub fn station_put(&mut self, paths: Vec<std::path::PathBuf>, now_millis: i64) -> Vec<Effect> {
+        let Some(station) = self.current_station.clone() else {
+            return Vec::new();
+        };
+        if paths.is_empty() {
+            return Vec::new();
+        }
+        let paths = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let (mode, exp) = (
+            self.station_mode.clone(),
+            self.station_expiry.expires_at(now_millis),
+        );
+        self.station_put_call(station, StationPutItem::Paths { paths }, mode, exp)
+    }
+
+    /// 把文字放入当前中转站。
+    pub fn station_put_text(&mut self, text: String, now_millis: i64) -> Vec<Effect> {
+        let Some(station) = self.current_station.clone() else {
+            return Vec::new();
+        };
+        if text.trim().is_empty() {
+            return Vec::new();
+        }
+        let (mode, exp) = (
+            self.station_mode.clone(),
+            self.station_expiry.expires_at(now_millis),
+        );
+        self.station_put_call(station, StationPutItem::Text { text }, mode, exp)
+    }
+
+    /// 把已有的文件（按哈希）放入指定中转站，不复制内容。
+    pub fn put_blobs_to_station(&mut self, station: String, hashes: Vec<String>) -> Vec<Effect> {
+        if hashes.is_empty() {
+            return Vec::new();
+        }
+        self.station_put_call(
+            station,
+            StationPutItem::Blobs { hashes },
+            StoreMode::Reference,
+            None,
+        )
+    }
+
+    pub fn station_remove(&mut self, item: String) -> Vec<Effect> {
+        let Some(station) = self.current_station.clone() else {
+            return Vec::new();
+        };
+        vec![call(
+            Request::StationRemove { station, item },
+            ReplyTag::Generic,
+        )]
+    }
+
+    pub fn station_set_pinned(&mut self, item: String, pinned: bool) -> Vec<Effect> {
+        let Some(station) = self.current_station.clone() else {
+            return Vec::new();
+        };
+        vec![call(
+            Request::StationSetPinned {
+                station,
+                item,
+                pinned,
+            },
+            ReplyTag::Generic,
+        )]
     }
 
     /// 窗口焦点变化：失焦时告诉 core 不再关注任何会话，回到前台时恢复并标已读。
@@ -1456,6 +1654,15 @@ impl Model {
             ReplyTag::Forwarded,
         )]
     }
+}
+
+fn station_items_call(station: String) -> Effect {
+    call(
+        Request::StationItems {
+            station: station.clone(),
+        },
+        ReplyTag::StationItems { station },
+    )
 }
 
 fn call(req: Request, tag: ReplyTag) -> Effect {
@@ -3598,5 +3805,216 @@ mod tests {
         m.save_settings(settings_dto(), "");
         m.apply(UiMsg::Disconnected("断开".into()));
         assert_eq!(m.settings_saving, 0, "断线后回复不会再来");
+    }
+
+    // ---- 中转站（P5 Task 7）----
+
+    fn station_view(id: &str) -> StationView {
+        StationView {
+            station: id.into(),
+            name: id.into(),
+            host_device: "host".into(),
+            host_online: true,
+            is_local: false,
+            item_count: 0,
+        }
+    }
+
+    fn station_call(fx: &[Effect]) -> Option<(Request, ReplyTag)> {
+        fx.iter().find_map(|e| match e {
+            Effect::Call(r @ Request::StationPut { .. }, t) => Some((r.clone(), t.clone())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn set_page_stations_requests_list() {
+        let mut m = Model::new();
+        let fx = m.set_page(Page::Stations);
+        assert!(fx.contains(&Effect::Call(Request::StationList, ReplyTag::Stations)));
+    }
+
+    #[test]
+    fn stations_reply_auto_opens_first() {
+        let mut m = Model::new();
+        let fx = m.apply(reply(
+            ReplyTag::Stations,
+            Response::Stations {
+                value: vec![station_view("s1"), station_view("s2")],
+            },
+        ));
+        assert_eq!(m.current_station.as_deref(), Some("s1"));
+        assert!(fx.contains(&Effect::Call(
+            Request::StationItems {
+                station: "s1".into()
+            },
+            ReplyTag::StationItems {
+                station: "s1".into()
+            }
+        )));
+    }
+
+    #[test]
+    fn station_updated_refreshes_current_items_only() {
+        let mut m = Model::new();
+        m.current_station = Some("s1".into());
+        let fx = m.apply(UiMsg::Event(Event::StationUpdated {
+            station: "s1".into(),
+        }));
+        assert_eq!(fx.len(), 2);
+        let fx = m.apply(UiMsg::Event(Event::StationUpdated {
+            station: "s2".into(),
+        }));
+        assert_eq!(
+            fx,
+            vec![Effect::Call(Request::StationList, ReplyTag::Stations)]
+        );
+    }
+
+    #[test]
+    fn station_put_uses_selected_mode() {
+        let mut m = Model::new();
+        m.current_station = Some("s1".into());
+        m.station_mode = StoreMode::Copy;
+        let fx = m.station_put(vec![std::path::PathBuf::from("/a/b.txt")], 1_000);
+        let (req, _) = station_call(&fx).unwrap();
+        assert_eq!(
+            req,
+            Request::StationPut {
+                station: "s1".into(),
+                item: StationPutItem::Paths {
+                    paths: vec!["/a/b.txt".into()]
+                },
+                mode: StoreMode::Copy,
+                expires_at: None,
+            }
+        );
+    }
+
+    #[test]
+    fn expiry_choice_sets_expires_at() {
+        let mut m = Model::new();
+        m.current_station = Some("s1".into());
+        m.station_expiry = ExpiryChoice::Day7;
+        let fx = m.station_put_text("a".into(), 1_000);
+        let Some((Request::StationPut { expires_at, .. }, _)) = station_call(&fx) else {
+            panic!("expected StationPut");
+        };
+        assert_eq!(expires_at, Some(1_000 + 7 * 86_400_000));
+        m.station_expiry = ExpiryChoice::Never;
+        let fx = m.station_put_text("a".into(), 1_000);
+        let Some((Request::StationPut { expires_at, .. }, _)) = station_call(&fx) else {
+            panic!("expected StationPut");
+        };
+        assert_eq!(expires_at, None);
+    }
+
+    #[test]
+    fn pin_emits_set_pinned() {
+        let mut m = Model::new();
+        m.current_station = Some("s1".into());
+        let fx = m.station_set_pinned("i1".into(), true);
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::Call(
+                Request::StationSetPinned { station, item, pinned: true },
+                _
+            ) if station == "s1" && item == "i1"
+        )));
+    }
+
+    #[test]
+    fn put_blobs_to_station_uses_blobs_item() {
+        let mut m = Model::new();
+        let fx = m.put_blobs_to_station("s1".into(), vec!["h".into()]);
+        let (req, _) = station_call(&fx).unwrap();
+        assert_eq!(
+            req,
+            Request::StationPut {
+                station: "s1".into(),
+                item: StationPutItem::Blobs {
+                    hashes: vec!["h".into()]
+                },
+                mode: StoreMode::Reference,
+                expires_at: None,
+            }
+        );
+    }
+
+    #[test]
+    fn station_items_reply_for_other_station_is_dropped() {
+        let mut m = Model::new();
+        m.current_station = Some("s1".into());
+        m.apply(reply(
+            ReplyTag::StationItems {
+                station: "s2".into(),
+            },
+            Response::StationItems { value: vec![] },
+        ));
+        assert!(m.station_items.is_empty());
+        assert_eq!(m.station_putting, 0);
+    }
+
+    #[test]
+    fn station_put_failure_releases_busy_and_toasts_by_code() {
+        let mut m = Model::new();
+        m.current_station = Some("s1".into());
+        m.station_put_text("a".into(), 1_000);
+        assert_eq!(m.station_putting, 1);
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::StationPut,
+            result: Err(ApiError {
+                code: ErrorCode::PeerOffline,
+                message: "x".into(),
+            }),
+        });
+        assert_eq!(m.station_putting, 0);
+        assert_eq!(
+            m.toast.as_deref(),
+            Some(error_text(&ErrorCode::PeerOffline))
+        );
+    }
+
+    #[test]
+    fn station_conversations_are_not_listed_in_chats() {
+        let mut m = Model::new();
+        let mut st = summary("st", Some(5));
+        st.kind = ConvKind::Station;
+        m.apply(reply(
+            ReplyTag::Conversations,
+            Response::Conversations {
+                value: vec![summary("a", Some(1)), st],
+            },
+        ));
+        assert_eq!(m.convs.len(), 1);
+    }
+
+    #[test]
+    fn station_putting_cleared_when_connection_drops() {
+        for msg in [
+            UiMsg::Disconnected("x".into()),
+            UiMsg::DaemonQuit,
+            UiMsg::LaunchFailed("x".into()),
+        ] {
+            let mut m = Model::new();
+            m.current_station = Some("s1".into());
+            m.station_put_text("a".into(), 1_000);
+            assert_eq!(m.station_putting, 1);
+            m.apply(msg);
+            assert_eq!(m.station_putting, 0);
+        }
+    }
+
+    #[test]
+    fn station_put_in_flight_shows_busy_without_failure_toast() {
+        // 连接中（回复尚未到达）：计数为 1，没有任何失败提示；成功回复后释放
+        let mut m = Model::new();
+        m.current_station = Some("s1".into());
+        m.station_put_text("a".into(), 1_000);
+        assert_eq!(m.station_putting, 1);
+        assert!(m.toast.is_none());
+        m.apply(reply(ReplyTag::StationPut, Response::Ok));
+        assert_eq!(m.station_putting, 0);
+        assert!(m.toast.is_none());
     }
 }

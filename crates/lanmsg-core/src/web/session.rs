@@ -474,6 +474,8 @@ impl WebHost {
                 p.clone(),
                 BlobLocalKind::Source,
                 now_millis(),
+                // 不抢占已有且仍可读的本地行（例如消息附件的原始路径）。
+                true,
             )
             .await?;
             items.push(meta);
@@ -1119,6 +1121,8 @@ impl Shared {
             dest.to_path_buf(),
             BlobLocalKind::Downloaded,
             now_millis(),
+            // 已有同内容且仍可读的本地副本时保留原登记。
+            true,
         )
         .await?;
         let id = self.insert_guest_message(&conv, &pseudo, MsgBody::Files { items: vec![meta] })?;

@@ -845,6 +845,8 @@ pub struct StationView {
     pub name: String,
     pub host_device: String,
     pub host_online: bool,
+    /// 站点由本机托管（`host == 本机设备`）。
+    pub is_local: bool,
     pub item_count: u32,
 }
 

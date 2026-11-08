@@ -1,0 +1,68 @@
+# wind-installer 清单模板。build-dist.ps1 替换 @VERSION@ / @ARCH@ 后生成临时清单再打包。
+# 字段含义见 wind-installer 仓库的 app.toml 与 README。
+# 暂不声明 url_protocol = "lanmsg"：桌面端尚未处理 lanmsg:// 参数（与 Linux/macOS 一致，见 P5 修订附录 T19）。
+
+[app]
+id                = "LanMsg"
+display_name      = "LanMsg"
+version           = "@VERSION@"
+publisher         = "LanMsg"
+description       = "局域网聊天式文件互传"
+main_exe          = "lanmsg.exe"
+setting_exe       = "lanmsg.exe"
+start_menu_folder = "LanMsg"
+process_names     = ["lanmsg", "lanmsgd", "lanmsg-thumb"]
+
+[theme]
+accent = "#2F7BF6"
+
+[paths]
+install  = '%ProgramFiles%\{id}'
+portable = '%USERPROFILE%\{id}'
+# 与 core 的默认数据目录一致（directories 的 data_dir）：%APPDATA%\lanmsg\LanMsg\data
+data     = '%APPDATA%\lanmsg\LanMsg\data'
+# 卸载“删除用户数据”删除整个应用目录（含 data；core 目前只用 data，config 等将来也在其下）
+user_data = '%APPDATA%\lanmsg\LanMsg'
+
+[autostart]
+exe = "lanmsgd.exe"
+
+[[shortcut]]
+target   = "lanmsg.exe"
+name     = "LanMsg"
+location = "start_menu"
+
+[[shortcut]]
+target   = "lanmsg.exe"
+name     = "LanMsg"
+location = "desktop"
+
+# 依赖 Task 7 实现的 --station-put 参数
+[[shortcut]]
+target   = "lanmsg.exe"
+name     = "LanMsg 中转站"
+location = "sendto"
+args     = "--station-put"
+
+[[shortcut]]
+target   = "uninstall.exe"
+name     = "卸载 LanMsg"
+location = "start_menu"
+
+[[firewall]]
+name     = "LanMsg"
+program  = "lanmsgd.exe"
+protocol = "any"
+profiles = ["private", "domain"]
+
+[startup]
+prestart = true
+exe      = "lanmsgd.exe"
+
+[package]
+compression = "lzma"
+source_dir  = "../../target/dist/windows-@ARCH@"
+output_name = "lanmsg-windows-@ARCH@-setup"
+output_dir  = "../../target/dist"
+logo        = "../assets/lanmsg-256.png"
+icon        = "../../crates/lanmsg-desktop/assets/lanmsg.ico"

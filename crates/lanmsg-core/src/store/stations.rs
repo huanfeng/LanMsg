@@ -347,6 +347,17 @@ impl Store {
         Ok(out)
     }
 
+    /// 站点内未删除的条目数。
+    pub fn station_item_count(&self, station: &ConvId) -> Result<u32, StoreError> {
+        let conn = self.conn().map_err(codec)?;
+        let n: i64 = conn.query_row(
+            "SELECT count(*) FROM station_items WHERE station_id = ?1 AND removed = 0",
+            [&station.0[..]],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
     /// 引用了该哈希的未删除条目（已删除条目不保留 station_blobs 行）。
     pub fn station_items_with_blob(
         &self,

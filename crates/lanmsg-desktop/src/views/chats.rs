@@ -14,7 +14,7 @@ use crate::views::chat;
 const SECS_PER_DAY: i64 = 86_400;
 
 /// 从 1970-01-01 起的天数换算公历 (月, 日)。
-fn civil_month_day(days: i64) -> (u32, u32) {
+pub(crate) fn civil_month_day(days: i64) -> (u32, u32) {
     // Howard Hinnant 的 civil_from_days
     let z = days + 719_468;
     let doe = z.rem_euclid(146_097);

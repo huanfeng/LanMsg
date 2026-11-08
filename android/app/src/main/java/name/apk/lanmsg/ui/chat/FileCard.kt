@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -81,6 +82,13 @@ fun FileCard(
     onCancel: (String) -> Unit,
     onOpen: (FileItemView) -> Unit,
     onLongClick: () -> Unit = {},
+    modifier: Modifier = Modifier,
+    /** true 时撑满宽度：文字列占满中间、状态标记贴右（列表页用）；聊天气泡保持默认。 */
+    fillWidth: Boolean = false,
+    /** 并入大小行的附加文字（如时间），显示为“大小 · 附加”。 */
+    sizeSuffix: String? = null,
+    /** 标题前的小图标（如置顶图钉）。 */
+    titlePrefix: (@Composable () -> Unit)? = null,
 ) {
     val clickable = item.state == BlobState.REMOTE || item.state == BlobState.LOCAL
     val onClick = {
@@ -91,23 +99,30 @@ fun FileCard(
         }
     }
     Row(
-        Modifier
-            .widthIn(min = 200.dp)
+        modifier
+            .then(if (fillWidth) Modifier.fillMaxWidth() else Modifier.widthIn(min = 200.dp))
             .combinedClickable(enabled = clickable, onClick = onClick, onLongClick = onLongClick)
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(fileKindIcon(fileKindOf(item.mime)), contentDescription = null, tint = content, modifier = Modifier.size(32.dp))
         Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f, fill = false)) {
+        Column(Modifier.weight(1f, fill = fillWidth)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                titlePrefix?.invoke()
+                Text(
+                    middleEllipsis(item.name),
+                    color = content,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Text(
-                middleEllipsis(item.name),
-                color = content,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                Format.size(item.size.toLong()) + (sizeSuffix?.let { " \u00B7 $it" } ?: ""),
+                color = muted,
+                fontSize = 12.sp,
             )
-            Text(Format.size(item.size.toLong()), color = muted, fontSize = 12.sp)
             fileStatusText(item)?.let { Text(it, color = muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
         }
         Spacer(Modifier.width(10.dp))

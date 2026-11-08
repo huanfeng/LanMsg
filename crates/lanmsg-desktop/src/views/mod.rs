@@ -12,4 +12,5 @@ pub mod pair;
 pub mod preview;
 pub mod settings;
 pub mod shell;
+pub mod stations;
 pub mod wizard;

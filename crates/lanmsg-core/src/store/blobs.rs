@@ -270,6 +270,7 @@ impl Store {
         local: &BlobLocalRow,
         holder: &DeviceId,
         now: i64,
+        keep_existing_local: bool,
     ) -> Result<(), crate::store::StoreError> {
         let mut conn = self
             .conn()
@@ -285,18 +286,33 @@ impl Store {
                 lanmsg_proto::to_cbor(&segment_hashes.to_vec()),
             ],
         )?;
-        tx.execute(
-            "INSERT INTO blob_local(hash, path, kind, size, mtime) VALUES(?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(hash) DO UPDATE SET path = excluded.path, kind = excluded.kind,
-               size = excluded.size, mtime = excluded.mtime",
-            rusqlite::params![
-                &local.hash.0[..],
-                local.path.to_string_lossy(),
-                local.kind.as_str(),
-                local.size as i64,
-                local.mtime,
-            ],
-        )?;
+        let keep = keep_existing_local && {
+            use rusqlite::OptionalExtension;
+            let existing: Option<(String, i64)> = tx
+                .query_row(
+                    "SELECT path, size FROM blob_local WHERE hash = ?1",
+                    [&local.hash.0[..]],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            existing.is_some_and(|(path, size)| {
+                std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == size as u64)
+            })
+        };
+        if !keep {
+            tx.execute(
+                "INSERT INTO blob_local(hash, path, kind, size, mtime) VALUES(?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(hash) DO UPDATE SET path = excluded.path, kind = excluded.kind,
+                   size = excluded.size, mtime = excluded.mtime",
+                rusqlite::params![
+                    &local.hash.0[..],
+                    local.path.to_string_lossy(),
+                    local.kind.as_str(),
+                    local.size as i64,
+                    local.mtime,
+                ],
+            )?;
+        }
         tx.execute(
             "INSERT INTO blob_holders(hash, device_id, updated_at) VALUES(?1, ?2, ?3)
              ON CONFLICT(hash, device_id) DO UPDATE SET updated_at = excluded.updated_at",

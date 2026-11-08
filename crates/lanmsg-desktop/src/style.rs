@@ -229,6 +229,8 @@ pub fn tokens() -> &'static Tokens {
 pub const ICON_CHATS: &[u8] = include_bytes!("../assets/icons/chats.svg");
 pub const ICON_CONTACTS: &[u8] = include_bytes!("../assets/icons/contacts.svg");
 pub const ICON_FILES: &[u8] = include_bytes!("../assets/icons/files.svg");
+pub const ICON_TEXT_SNIPPET: &[u8] = include_bytes!("../assets/icons/text-snippet.svg");
+pub const ICON_STATIONS: &[u8] = include_bytes!("../assets/icons/stations.svg");
 pub const ICON_SETTINGS: &[u8] = include_bytes!("../assets/icons/settings.svg");
 pub const ICON_SEARCH: &[u8] = include_bytes!("../assets/icons/search.svg");
 /// 空状态用的 48px 对话图标。

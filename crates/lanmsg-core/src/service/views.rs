@@ -6,13 +6,17 @@ use std::path::PathBuf;
 
 use lanmsg_api::types::{
     BlobState, ConvKind, ConversationSummary, FileItemView, LastMessageKind, MessageBodyView,
-    MessageState, MessageView, SystemEventView,
+    MessageState, MessageView, StationItemView, StationView, SystemEventView,
 };
 use lanmsg_proto::ids::{DeviceId, MsgId, UserId};
+use lanmsg_proto::station::{StationContent, StationInfo};
 use lanmsg_proto::types::{BlobMeta, MsgBody, SystemEvent};
 
+use crate::service::Inner;
 use crate::settings::SETTING_DATA_DIR;
-use crate::store::{ConvRow, MsgStateRow, PreparingKind, PreparingRow, Store, StoredMessage};
+use crate::store::{
+    ConvRow, MsgStateRow, PreparingKind, PreparingRow, StationItemRow, Store, StoredMessage,
+};
 
 /// 由 Blob 元数据构造文件项视图（P2 Task 13 完整公式）。
 ///
@@ -156,6 +160,81 @@ pub(crate) fn file_item_view_with(
         source_name: name_or(author_display, author_device.short()),
         source_is_me: author_is_me,
         holder_name,
+    }
+}
+
+/// 中转站视图：主机在线 = 主机是本机或已连接；条目数不含已删除。
+pub(crate) fn station_view(inner: &Inner, s: &StationInfo) -> StationView {
+    let me = inner
+        .identity
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .device_id();
+    let host_name = inner
+        .store
+        .get_device(&s.host)
+        .ok()
+        .flatten()
+        .map(|d| d.name)
+        .unwrap_or_else(|| s.host.short());
+    StationView {
+        station: s.station.to_hex(),
+        name: s.name.clone(),
+        host_device: host_name,
+        host_online: s.host == me || inner.conns.is_connected(&s.host),
+        is_local: s.host == me,
+        item_count: inner.store.station_item_count(&s.station).unwrap_or(0),
+    }
+}
+
+/// 中转站条目视图。Folder 取第一个文件的元数据，名字换成文件夹名、大小为总和。
+pub(crate) fn station_item_view(inner: &Inner, row: &StationItemRow) -> StationItemView {
+    let me = inner
+        .identity
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .device_id();
+    let item = &row.item;
+    let added_by = inner
+        .store
+        .get_device(&item.added_by)
+        .ok()
+        .flatten()
+        .map(|d| d.name)
+        .unwrap_or_else(|| item.added_by.short());
+    let peers = inner.conns.peers();
+    let (text, meta) = match &item.content {
+        StationContent::Text { text } => (Some(text.clone()), None),
+        StationContent::File { blob } => (None, Some(blob.clone())),
+        StationContent::Folder { name, entries } => (
+            None,
+            entries.first().map(|first| {
+                let mut m = first.blob.clone();
+                m.name = name.clone();
+                m.size = entries.iter().map(|e| e.blob.size).sum();
+                m
+            }),
+        ),
+    };
+    let file = meta.map(|m| {
+        file_item_view(
+            inner.store.as_ref(),
+            &peers,
+            &item.added_by,
+            &m,
+            &added_by,
+            item.added_by == me,
+        )
+    });
+    StationItemView {
+        item: item.item.to_hex(),
+        added_by,
+        added_at: item.added_at,
+        expires_at: item.expires_at,
+        text,
+        file,
+        pinned: item.pinned,
+        unavailable: (!item.available).then_some(true),
     }
 }
 
@@ -479,6 +558,24 @@ pub fn conv_summary(
             (text, Some(last_message_kind(&m)), Some(m.env.hlc.millis))
         })
         .unwrap_or((None, None, None));
+
+    // 中转站会话：最新条目的文字前 50 字或文件名。
+    let last_text = if conv.kind == crate::store::ConvKindRow::Station {
+        store
+            .station_items(&conv.conv, 0, false)
+            .ok()
+            .and_then(|rows| {
+                rows.into_iter()
+                    .max_by_key(|r| (r.item.updated_at, r.item.added_at))
+            })
+            .map(|r| match r.item.content {
+                StationContent::Text { text } => text.chars().take(50).collect(),
+                StationContent::File { blob } => blob.name,
+                StationContent::Folder { name, .. } => name,
+            })
+    } else {
+        last_text
+    };
 
     let kind = match conv.kind {
         crate::store::ConvKindRow::SelfDevices => ConvKind::SelfDevices,

@@ -43,6 +43,22 @@ use crate::store::{
     BlobLocalKind, BlobLocalRow, ConvKindRow, MessageBlobRow, Store, TransferRow, TransferState,
 };
 
+/// 下载来源：Blob 元数据，加上用来向对端询问持有者的会话（中转站条目没有会话）。
+#[derive(Debug, Clone)]
+struct DlSource {
+    meta: BlobMeta,
+    conv: Option<ConvId>,
+}
+
+impl From<MessageBlobRow> for DlSource {
+    fn from(mb: MessageBlobRow) -> Self {
+        DlSource {
+            meta: mb.meta,
+            conv: Some(mb.conv),
+        }
+    }
+}
+
 /// 传输失败：界面依据的结构化原因 + 英文排障信息。
 type Failure = (TransferFailReason, String);
 
@@ -173,22 +189,62 @@ impl TransferEngine {
             None => None,
         };
         let dest = self.dest_path_for(&settings, &title, &mb.meta.name, rel_dir.as_deref());
+        self.start(mb.into(), dest)
+    }
+
+    /// 以显式目录为落地位置下载（中转站使用）：文件名经 `sanitize_component` 清洗后
+    /// 放在 `dest_dir` 下。不检查本地是否已有该 Blob（调用方明确要一份副本）；
+    /// 同哈希已有活动传输则返回其 id。`size` 以调用方给定的元数据为准。
+    pub async fn download_to(
+        self: Arc<Self>,
+        meta: BlobMeta,
+        dest_dir: &Path,
+    ) -> Result<String, CoreError> {
+        let _guard = self.download_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(row) = self.store.transfer_for_hash(&meta.hash)? {
+            return Ok(row.transfer_id);
+        }
+        let dest = dest_dir.join(sanitize_component(&meta.name));
+        self.start(DlSource { meta, conv: None }, dest)
+    }
+
+    /// 中转站条目的下载目录：`<下载目录>/Station/<站点名>/<相对目录各段>`。
+    pub fn station_dest_dir(
+        &self,
+        settings: &SettingsDto,
+        station_name: &str,
+        sub_dirs: &[String],
+    ) -> PathBuf {
+        let base = if settings.download_dir.trim().is_empty() {
+            self.data_dir.join("downloads")
+        } else {
+            PathBuf::from(&settings.download_dir)
+        };
+        let mut p = base.join("Station").join(sanitize_component(station_name));
+        for seg in sub_dirs {
+            p = p.join(sanitize_component(seg));
+        }
+        p
+    }
+
+    /// 建传输行并启动后台任务（调用方已持有 `download_lock`）。
+    fn start(self: &Arc<Self>, src: DlSource, dest: PathBuf) -> Result<String, CoreError> {
         let mut part = dest.clone().into_os_string();
         part.push(".part");
         let row = TransferRow {
             transfer_id: new_transfer_id(),
-            hash,
+            hash: src.meta.hash,
             state: TransferState::Queued,
             part_path: PathBuf::from(part),
             dest_path: dest,
-            total: mb.meta.size,
+            total: src.meta.size,
             segment_hashes: Vec::new(),
             done_segments: Vec::new(),
             error: None,
         };
         self.store.upsert_transfer(&row)?;
         let id = row.transfer_id.clone();
-        self.spawn_download(row, mb);
+        self.spawn_download(row, src);
         Ok(id)
     }
 
@@ -238,15 +294,19 @@ impl TransferEngine {
     /// 时沿用 done_segments 继续，否则在后台任务里重置后重新开始。
     pub async fn resume_all(self: Arc<Self>) -> Result<(), CoreError> {
         for row in self.store.active_transfers()? {
-            let Some(mb) = self
+            let src = match self
                 .store
                 .message_blobs_by_hash(&row.hash)?
                 .into_iter()
                 .next()
-            else {
-                continue;
+            {
+                Some(mb) => DlSource::from(mb),
+                None => match self.store.station_blob(&row.hash)? {
+                    Some((_, meta, _)) => DlSource { meta, conv: None },
+                    None => continue,
+                },
             };
-            self.spawn_download(row, mb);
+            self.spawn_download(row, src);
         }
         Ok(())
     }
@@ -284,7 +344,7 @@ impl TransferEngine {
     // ---- 内部 ----
 
     /// 启动后台传输任务。
-    fn spawn_download(self: &Arc<Self>, row: TransferRow, mb: MessageBlobRow) {
+    fn spawn_download(self: &Arc<Self>, row: TransferRow, mb: DlSource) {
         let token = CancellationToken::new();
         self.tasks
             .lock()
@@ -300,7 +360,7 @@ impl TransferEngine {
     async fn run_transfer(
         self: Arc<Self>,
         mut row: TransferRow,
-        mb: MessageBlobRow,
+        mb: DlSource,
         token: CancellationToken,
     ) {
         let id = row.transfer_id.clone();
@@ -335,12 +395,12 @@ impl TransferEngine {
     async fn download_segments(
         self: Arc<Self>,
         row: &mut TransferRow,
-        mb: &MessageBlobRow,
+        mb: &DlSource,
         token: &CancellationToken,
     ) -> Option<Failure> {
         let mut candidates = self.candidates(&row.hash);
         if candidates.is_empty() {
-            self.solicit(&row.hash, &mb.conv, token).await;
+            self.solicit(&row.hash, mb.conv.as_ref(), token).await;
             if token.is_cancelled() {
                 return None;
             }
@@ -455,7 +515,7 @@ impl TransferEngine {
                 return Some(f);
             }
             // 全部候选耗尽：等一轮持有者应答，出现新候选则重试。
-            self.solicit(&row.hash, &mb.conv, token).await;
+            self.solicit(&row.hash, mb.conv.as_ref(), token).await;
             if token.is_cancelled() {
                 return None;
             }
@@ -663,13 +723,10 @@ impl TransferEngine {
 
     /// 候选为空时：向已连接的自己设备与该会话对端设备发 BlobQuery，
     /// 等待 BLOB_QUERY_WAIT 让持有者应答回填。
-    async fn solicit(&self, hash: &BlobHash, conv: &ConvId, token: &CancellationToken) {
+    async fn solicit(&self, hash: &BlobHash, conv: Option<&ConvId>, token: &CancellationToken) {
         let self_user = self.identity.read().unwrap().user_id();
-        let peer_user = self
-            .store
-            .get_conversation(conv)
-            .ok()
-            .flatten()
+        let peer_user = conv
+            .and_then(|c| self.store.get_conversation(c).ok().flatten())
             .and_then(|c| c.peer_user);
         let targets: Vec<DeviceId> = self
             .conns
@@ -798,7 +855,18 @@ impl TransferEngine {
             size: hashed.size,
             mtime: hashed.mtime,
         };
-        if let Err(e) = self.store.set_local(&local) {
+        // 已有仍可读的本地行时不覆盖（例如中转站副本不应抢走消息附件的来源路径）。
+        let existing_ok = self
+            .store
+            .get_local(&row.hash)
+            .ok()
+            .flatten()
+            .is_some_and(|l| {
+                std::fs::metadata(&l.path).is_ok_and(|m| m.is_file() && m.len() == l.size)
+            });
+        if existing_ok {
+            // 保留既有行。
+        } else if let Err(e) = self.store.set_local(&local) {
             return Some((
                 TransferFailReason::Io,
                 format!("failed to write local record: {e}"),
@@ -864,6 +932,20 @@ impl TransferEngine {
                     msg: message_view(self.store.as_ref(), self_device, &peers, &sm),
                 });
             }
+        }
+        // 引用该 blob 的中转站：通知界面刷新条目状态。
+        let mut stations: Vec<ConvId> = self
+            .store
+            .station_items_with_blob(&row.hash)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| r.station)
+            .collect();
+        stations.dedup();
+        for station in stations {
+            let _ = self.events.send(Event::StationUpdated {
+                station: station.to_hex(),
+            });
         }
         None
     }

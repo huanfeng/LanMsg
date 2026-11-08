@@ -7,7 +7,7 @@ use crate::model::Page;
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
-use crate::views::{chats, contacts, files, pair, preview, settings, wizard};
+use crate::views::{chats, contacts, files, pair, preview, settings, stations, wizard};
 
 /// 页面内容。
 fn page_view(ui: &UiState, p: Page) -> Element {
@@ -16,6 +16,7 @@ fn page_view(ui: &UiState, p: Page) -> Element {
         Page::Chats => chats::chats_page(ui),
         Page::Contacts => contacts::contacts_page(ui),
         Page::Files => files::files_page(ui),
+        Page::Stations => stations::stations_page(ui),
         Page::Settings => settings::settings_page(ui),
     }
 }
@@ -142,6 +143,13 @@ pub fn shell(ui: &UiState) -> Element {
             Page::Files,
             style::ICON_FILES,
             strings::NAV_FILES,
+            None,
+        ))
+        .child(nav_item(
+            ui,
+            Page::Stations,
+            style::ICON_STATIONS,
+            strings::NAV_STATIONS,
             None,
         ))
         .child(nav_item(

@@ -266,7 +266,7 @@ pub fn status_parts(f: &FileView) -> String {
     source_status(&f.item)
 }
 
-fn meta_label(text: impl Into<TextContent>, role: Role) -> Element {
+pub(crate) fn meta_label(text: impl Into<TextContent>, role: Role) -> Element {
     Element::label(text)
         .font_size(style::FONT_META)
         .fg_role(role)
@@ -321,6 +321,7 @@ fn menu_builder(
             move |_| ui_fwd.open_forward(vec![hash.clone()]),
             false,
         ));
+        v.push(put_station_item(&ui, &item.hash));
         let (ui_loc, conv) = (ui.clone(), f.conv.clone());
         v.push(MenuItem::run(
             strings::FILES_MENU_LOCATE,
@@ -360,8 +361,34 @@ fn menu_builder(
     }
 }
 
+/// 菜单项“放入中转站”：子菜单列出已知站点（连接后与站点变化时刷新），没有站点时置灰。
+fn put_station_item(ui: &UiState, hash: &str) -> MenuItem {
+    let stations = ui.read(|m| m.stations.clone());
+    if stations.is_empty() {
+        let mut item = MenuItem::run(strings::FILES_PUT_STATION_NONE, |_| {}, false);
+        item.enabled = false;
+        return item;
+    }
+    let subs = stations
+        .into_iter()
+        .map(|s| {
+            let (ui, hash, id) = (ui.clone(), hash.to_string(), s.station.clone());
+            MenuItem::run(
+                s.name,
+                move |_| ui.act(|m| m.put_blobs_to_station(id.clone(), vec![hash.clone()])),
+                false,
+            )
+        })
+        .collect();
+    MenuItem::submenu(strings::FILES_PUT_STATION, subs)
+}
+
 /// 缩略图（或类型图标）：`size` 见方。
-fn thumb_or_icon(item: &lanmsg_api::types::FileItemView, size: i32, radius: f32) -> Element {
+pub(crate) fn thumb_or_icon(
+    item: &lanmsg_api::types::FileItemView,
+    size: i32,
+    radius: f32,
+) -> Element {
     match &item.thumb_path {
         Some(p) => Element::image(p)
             .fit(Fit::Cover)
@@ -384,7 +411,11 @@ fn thumb_or_icon(item: &lanmsg_api::types::FileItemView, size: i32, radius: f32)
 
 /// 列表项右侧的操作区：待下载 -> 下载；下载中 -> 进度 + 取消；已在本地 -> 打开 / 打开所在文件夹；
 /// 源离线、准备中 -> 文字。按钮一律是小号描边按钮。
-fn file_actions(ui: &UiState, item: &lanmsg_api::types::FileItemView, status: String) -> Element {
+pub(crate) fn file_actions(
+    ui: &UiState,
+    item: &lanmsg_api::types::FileItemView,
+    status: String,
+) -> Element {
     let key = {
         let it = item.clone();
         ui.derive(move |m| state_code(&effective_state(&it, m)))

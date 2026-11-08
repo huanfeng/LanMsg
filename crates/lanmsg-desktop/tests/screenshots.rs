@@ -34,6 +34,7 @@ fn every_demo_page_renders() {
         "files",
         "files-grid",
         "settings",
+        "stations",
         "preview-image",
         "preview-text",
     ] {

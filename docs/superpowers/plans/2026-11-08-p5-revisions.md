@@ -61,6 +61,15 @@
     - `accept_remote` 重复投递已删除的条目会让它复活。需要定墓碑语义：已删除的条目不因旧投递复活。
     - `put_paths` 中途失败时可能留下孤儿副本目录，可由 `sweep` 清理。
 - **T6**：`TransferEngine::download` 是 `self: Arc<Self>`，`spawn_download` 绑定 `MessageBlobRow`（transfer.rs:142、287）。先把下载来源抽象出来，再加 `download_to`。权限错误用稳定的英文键。
+  - 实施结果（7083eac 及收尾提交）：
+    - 签名：`TransferEngine::download_to(meta: BlobMeta, dest_dir: &Path)`（不是计划的 `(hash, name, size, dest_dir)`，下载过程要把分段表写回 `blobs`）；不检查本地是否已有该 Blob，`DownloadBlob` 在调用前自行返回 `already downloaded`。`station_dest_dir` 给出 `<下载目录>/Station/<站点名>/<子目录>`，目录名用英文。
+    - `synced_until` 语义：只由 Snapshot 推进（取收到条目的最大 `updated_at`，不是 `now`），Delta 不推进；重连 Subscribe 的 `since` 回退 1 秒，重复项靠「updated_at 取新者」和「墓碑不可逆」去重。
+    - 应答错误文本：主机对 `Rejected/InvalidArgument/NotFound` 只发内层文本，拉取端统一包成 `Rejected(文本)`，最终 `ApiError.message` 不带变体前缀。
+    - 复制条目由主机顺序拉取，失败由 60 秒周期任务重试（重试失败只记 debug）；孤儿副本目录一小时后由 `sweep` 清理。
+    - `sweep_orphan_dirs` 以条目目录自身的 mtime 判断是否过期：复制耗时超过 1 小时的大文件夹，在条目入库前有极低概率被误删。
+    - 对非自己设备的拒绝应答固定 `req = 0` 且静默（对方不处理，也无法据此探测站点是否存在）。
+    - 未测：文件夹条目的端到端拉取与按哈希下载（子目录注入）、站点名含特殊字符时的落地目录；联系人 Subscribe 只能验证「看不到站点」，拒绝应答本身无法在测试里观察。
+- **T7 实施补充**：`StationView` 追加 `is_local: bool`（C5 追加，`host == 本机设备`；Android 的 uniffi 绑定重新生成后 Kotlin 构造处需补该字段）；`--station-put` 用它找本机站点，找不到时创建后重新列出并取最早的本机站点（多个进程同时放入时可能各建一个，留下的空站点需手动删除）；`--station-put` 失败只写 `logs/lanmsg.log` 并以退出码 1 结束：windui 的系统通知依赖托盘，无窗口、无托盘的进程不能用，Windows 上没有失败弹窗（已知限制）；断线 / 后台退出 / 拉起失败时 `station_putting` 清零；中转站会话不进桌面会话列表，因此不计入未读。
 - **T7**：文案全部进 `strings.rs`；`--station-put` 加到 `parse_cli`（main.rs:50）；`Effect` 以现有定义为准。
 - **T8**：错误状态存 `ErrorCode`。Android outbox 的 7 天清理不得删除中转站引用、主机尚未拉取的副本，要补测试。
 - **T9 / T10**：照原计划，日志和错误改英文。LocalSend 协议字段以官方 v2 协议文档为准，需要联网核对。
@@ -100,8 +109,16 @@
 - **T17**：在 wind-installer 仓库（/home/dufeng/develop/windinput/wind-installer）实施，提权复用 `util/admin.rs`。遵守该仓库 AGENTS.md 和 `--only` 提交纪律，**不推送**。
 - **T18**：托盘文案进 strings.rs；`--add-firewall-rule` 的命令行输出用英文。
 - **T19**：图标已有（`crates/lanmsg-desktop/assets/lanmsg.ico`、`scripts/gen-win-icon.py`），不需要占位图标；`packaging/assets` 从这里生成或引用。
+  - 实施补充：`app.toml` 的 icon/logo 直接引用 `crates/lanmsg-desktop/assets/lanmsg.ico` 与 `packaging/assets/lanmsg-256.png`，不另存副本。暂不写 `url_protocol = "lanmsg"`（桌面端尚未处理 `lanmsg://`，与 Linux/macOS 一致，启用时一并处理）。sendto 快捷方式的 `--station-put` 依赖 T7。`build-dist.ps1` 增加 `-Version`（默认取 workspace 版本）、`-WindInstallerTag`（CI 用，Task 22 提供包含 firewall/sendto 能力的 wind-installer tag；未给 `-WindInstallerDir` 且无 tag 时报错）、`-SkipBuild`；wind-installer 只发布 x64 stub，arm64 安装包也用 x64 stub（经模拟运行）。脚本仿照 wind-installer 的 `pack.ps1`：先做 zip，再注入并加工卸载器（`prep-uninstaller`），最后 `build`。`scoop/lanmsg.json` 的仓库用 `@REPO@` 占位，由 `update-manifest.sh` 的 `REPO_SLUG`（默认 `huanfeng/lanmsg`）填充。`scripts/check-packaging.sh` 汇总 shellcheck、app.toml 解析、scoop 清单、macOS dry-run 与 Linux 安装测试（`--fast` 跳过后者），本机无 pwsh，ps1 未做语法检查，需在 CI（windows runner）验证；清单已用 wind-installer 的 `ProjectConfig::from_toml_str` 实测解析通过。Task 22 接入 CI 时调用 `scripts/check-packaging.sh`。
+  - 第 2 轮：`[paths] data` 改为 `%APPDATA%\lanmsg\LanMsg\data`（core 默认数据目录不变，保护已有配对数据），去掉 `[localdata]`（缓存与日志在数据目录内）。已确认 wind-installer 原先的 `paths.data` 只是向导里数据目录输入框的初值，卸载“删除用户数据”写死删 `%APPDATA%\{app.id}`。第 3 轮：wind-installer 新增可选清单字段 `[paths] user_data`（提交 693db55，本地未推送；缺省行为不变，须以 `%APPDATA%\` / `%LOCALAPPDATA%\` 开头、其下至少一级、无 `..`/盘符/其他变量），LanMsg 用 `user_data = %APPDATA%\lanmsg\LanMsg`（directories 的应用目录；core 只用其下的 `data`，`config_dir`/`cache_dir` 当前代码未使用，`cache`、`logs` 均在 `data` 内；删整个应用目录可覆盖将来可能出现的 `config`，空的 `%APPDATA%\lanmsg` 会留下）。CI 下载的 wind-installer tag 必须包含该字段。`paths.rs` 的 Windows 路径注释已更正。scoop `autoupdate` 加 `hash.url = $baseurl/SHA256SUMS`（scoop 对 `<hash>  <文件名>` 多行格式按下载 URL 的文件名自动匹配，release 须上传 `SHA256SUMS` 资产）。
+  - 后续核对（未做）：合并后核对防火墙规则名与 `lanmsgd --add-firewall-rule` 的 `FIREWALL_RULE_NAME` 一致（安装器按“规则名 + 程序路径”标识规则）；核对 `--station-put` 参数已由 T7 实现。已知局限：`SHA256SUMS` 与 wind-installer 工具来自同一 release，无独立信任根，靠固定 tag 缓解。
 - **T20**：把 `lanmsgd` 的 windui 依赖改为 optional，归入 `desktop` feature。
+  - 实施补充：`LANMSG_BASE_URL` 现为发布页根（默认 `https://github.com/huanfeng/lanmsg/releases`），下载目录为 `<根>/latest/download` 或 `<根>/download/<版本>`；`LANMSG_NO_SYSTEMD=1` 跳过 systemd 操作（测试用）。安装时二进制先复制到临时名再 `mv` 原子替换，服务已运行则 `restart`；`--prefix` 含空白、`|`、`&`、`\` 时拒绝；解压前预检成员路径。
+  - 后续（未做）：`lanmsg.desktop` 暂不声明 `MimeType=x-scheme-handler/lanmsg`，待桌面端处理 `lanmsg://` 参数（T7/T15）后一并启用；`lanmsgd.service` 去掉了对用户单元无效的 `After=network-online.target`，桌面版若在图形会话就绪前启动会以无头运行，是否改为依赖 `graphical-session.target` 需评估。
 - **T21**：只写脚本，在 CI 的 macOS runner 上产出未签名 dmg；本地无法验证，记为外部依赖。
+  - 实施补充：未创建 `name.apk.lanmsg.daemon.plist`（LaunchAgent 由 `autostart.rs` 以标识 `app.lanmsg.daemon` 写入，与 bundle id `name.apk.lanmsg` 是两回事）。`build-dmg.sh` 支持 `--dry-run`（Linux 上只组装目录布局并打印 macOS 命令），测试为 `packaging/macos/test-build-dmg.sh`；`NSLocalNetworkUsageDescription` 默认英文，中文放 `zh-Hans.lproj/InfoPlist.strings`。`scripts/check-packaging.sh` 属 Task 19，尚未存在，Task 22 接入 CI 时把 `test-build-dmg.sh` 与 shellcheck 加上。lipo/sips/iconutil/hdiutil/签名公证未在 macOS 上实跑，记为外部依赖。
+  - 第 2 轮：公证凭据存进构建时创建、退出时删除的临时 keychain（`store-credentials lanmsg-ci`），提交与 staple 用 `--keychain-profile`；`store-credentials` 一次性在命令行带密码，CI runner 单租户可接受。codesign 不再用 `--deep`，先逐个签 `Contents/MacOS/*` 再签 app。`CFBundleVersion` 只取版本号的点分数字部分，`CFBundleShortVersionString` 保留完整版本。
+  - 后续（未做）：`Info.plist` 暂不注册 `lanmsg://`（`CFBundleURLTypes`），待 macOS 端处理 Apple Event `kAEGetURL` 时（与 T7/T15 的 `lanmsg://` 参数处理一起）启用；app 本身未 staple（只 staple 了 dmg，离线首次打开 app 时需联网校验）。
 - **T22**：windui 依赖改为 `{ git = "https://github.com/huanfeng/wind-ui-rust", tag = "<tag>" }`。本地开发在 `.cargo/config.toml` 里用 `[patch."https://github.com/huanfeng/wind-ui-rust"]` 指回本地路径。注意：LanMsg 目前依赖 windui v0.31.0 之后的 12 个提交，其中 11 个还没推送，所以需要用户先在 windui 仓库发布新 tag（如 v0.32.0）并推送，CI 才能跑通。LanMsg 仓库地址为 `huanfeng/lanmsg`，**不推送、不创建远程仓库**，需要时由用户操作。
 
 ## 执行顺序

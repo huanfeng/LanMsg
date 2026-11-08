@@ -1,5 +1,6 @@
 // LanMsg 界面进程入口。
-// 参数：`--data-dir <PATH>`、`--open-conv <CONV>`、`--demo <页>`（离线演示，不连后台服务），
+// 参数：`--data-dir <PATH>`、`--open-conv <CONV>`、`--demo <页>`（离线演示，不连后台服务）、
+// `--station-put <PATH>...`（不开窗口，放入本机中转站）、`--theme dark|light`，
 // 以及 windui 自带的 `--screenshot <PNG>` 等截图参数（由 windui 自行解析，这里忽略）。
 // 注释中文，标识符英文。
 
@@ -14,6 +15,7 @@ mod error_text;
 mod event_text;
 mod fixtures;
 mod model;
+mod station_put;
 mod strings;
 mod style;
 mod tz;
@@ -44,6 +46,10 @@ struct Cli {
     data_dir: Option<PathBuf>,
     open_conv: Option<String>,
     demo: Option<String>,
+    /// `--station-put <PATH>...`：把这些路径放进本机中转站后退出（不开窗口）。
+    station_put: Option<Vec<PathBuf>>,
+    /// `--theme dark|light`：强制明暗主题（截图与排查用），缺省跟随系统。
+    theme_dark: Option<bool>,
 }
 
 /// 从 argv 里挑出自有参数，其余原样忽略（单实例转发的 argv 同样走这里）。
@@ -55,6 +61,25 @@ fn parse_cli(args: &[String]) -> Cli {
             "--data-dir" => cli.data_dir = it.next().map(PathBuf::from),
             "--open-conv" => cli.open_conv = it.next().cloned(),
             "--demo" => cli.demo = it.next().cloned(),
+            "--theme" => {
+                cli.theme_dark = match it.next().map(String::as_str) {
+                    Some("dark") => Some(true),
+                    Some("light") => Some(false),
+                    _ => None,
+                }
+            }
+            // 后面直到下一个以 -- 开头的参数都是路径
+            "--station-put" => {
+                let mut paths = Vec::new();
+                while let Some(next) = it.clone().next() {
+                    if next.starts_with("--") {
+                        break;
+                    }
+                    paths.push(PathBuf::from(next));
+                    it.next();
+                }
+                cli.station_put = Some(paths);
+            }
             _ => {}
         }
     }
@@ -85,13 +110,24 @@ fn main() {
             }
         },
     };
-    decoders::register_media_decoders();
     let data_dir = cli
         .data_dir
         .clone()
         .unwrap_or_else(lanmsg_core::paths::default_data_dir);
+    // “发送到”入口：不创建窗口、不注册单实例，放完即退出。
+    if let Some(paths) = cli.station_put.clone() {
+        if let Err(e) = station_put::run_station_put(&data_dir, paths) {
+            tracing::error!("station-put failed: {e}");
+            station_put::log_failure(&data_dir, &e);
+            std::process::exit(1);
+        }
+        return;
+    }
+    decoders::register_media_decoders();
 
-    let dark = windui::event::system_prefers_dark();
+    let dark = cli
+        .theme_dark
+        .unwrap_or_else(windui::event::system_prefers_dark);
     let mut app = App::new(strings::APP_TITLE, WINDOW_SIZE.0, WINDOW_SIZE.1)
         .min_size(WINDOW_MIN.0, WINDOW_MIN.1)
         .icon(style::window_icon())
@@ -207,6 +243,41 @@ mod tests {
         assert_eq!(cli.data_dir, Some(PathBuf::from("/d")));
         assert_eq!(cli.open_conv.as_deref(), Some("abc"));
         assert_eq!(cli.demo.as_deref(), Some("chat"));
+    }
+
+    #[test]
+    fn station_put_arg_parses_paths() {
+        let cli = parse_cli(&argv(&[
+            "lanmsg",
+            "--station-put",
+            "a",
+            "b c",
+            "--data-dir",
+            "/d",
+        ]));
+        assert_eq!(
+            cli.station_put,
+            Some(vec![PathBuf::from("a"), PathBuf::from("b c")])
+        );
+        assert_eq!(cli.data_dir, Some(PathBuf::from("/d")));
+        // 没有路径时是空列表（由入口报错），不是 None
+        assert_eq!(
+            parse_cli(&argv(&["lanmsg", "--station-put"])).station_put,
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn theme_arg_forces_dark_or_light() {
+        assert_eq!(
+            parse_cli(&argv(&["lanmsg", "--theme", "dark"])).theme_dark,
+            Some(true)
+        );
+        assert_eq!(
+            parse_cli(&argv(&["lanmsg", "--theme", "light"])).theme_dark,
+            Some(false)
+        );
+        assert_eq!(parse_cli(&argv(&["lanmsg"])).theme_dark, None);
     }
 
     #[test]

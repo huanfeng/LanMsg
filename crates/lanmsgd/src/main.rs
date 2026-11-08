@@ -18,11 +18,15 @@ use tracing_subscriber::fmt::writer::MakeWriter;
 use lanmsg_proto::consts::SERVICE_PORT;
 
 mod ipc_server;
+#[cfg(feature = "desktop")]
 mod launch;
+#[cfg(feature = "desktop")]
 mod notify;
 mod runtime;
+#[cfg(feature = "desktop")]
 mod strings;
 mod thumbnailer;
+#[cfg(feature = "desktop")]
 mod tray;
 
 /// 同时写 stdout 与日志文件的 tracing writer。
@@ -125,6 +129,7 @@ fn run() -> Result<()> {
         tracing::info!("running in headless mode");
         rt.block_until_shutdown();
     } else {
+        #[cfg(feature = "desktop")]
         tray::run_tray(rt, data_dir);
     }
     Ok(())

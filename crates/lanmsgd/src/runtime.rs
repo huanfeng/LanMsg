@@ -187,11 +187,13 @@ impl DaemonRuntime {
     }
 
     /// tokio 运行时句柄：界面线程用 `handle.block_on` 调用 `Service::handle`。
+    #[cfg(feature = "desktop")]
     pub fn handle(&self) -> tokio::runtime::Handle {
         self.rt.handle().clone()
     }
 
     /// 退出通知触发时在运行时线程上执行一次 `f`（托盘据此经 channel 回界面线程退出）。
+    #[cfg(feature = "desktop")]
     pub fn on_shutdown(&self, f: impl FnOnce() + Send + 'static) {
         let mut rx = self.shutdown_tx.subscribe();
         self.rt.spawn(async move {
@@ -201,6 +203,7 @@ impl DaemonRuntime {
     }
 
     /// 把核心事件转发给回调（在运行时线程上调用 `f`，回调需自行跨线程投递到界面线程）。
+    #[cfg(feature = "desktop")]
     pub fn spawn_event_forwarder(&self, f: impl Fn(lanmsg_api::Event) + Send + 'static) {
         let mut events = self.service.subscribe();
         self.rt.spawn(async move {
@@ -215,6 +218,7 @@ impl DaemonRuntime {
     }
 
     /// 关闭服务并停止运行时（托盘退出后使用）。
+    #[cfg(feature = "desktop")]
     pub fn shutdown(self) {
         let service = self.service.clone();
         self.shutdown_tx.send_replace(true);
@@ -296,7 +300,8 @@ impl SignalSet {
 /// Linux 在 `DISPLAY` 与 `WAYLAND_DISPLAY` 都为空时无头。
 /// 注意：只看环境变量，不保证显示服务真的可用；连不上时由 Task 9 的 `run_tray` 兜底降级。
 pub fn is_headless(env: &dyn Fn(&str) -> Option<String>, force: bool) -> bool {
-    if force {
+    // 未编入 desktop（无托盘/界面）时恒为无头
+    if force || !cfg!(feature = "desktop") {
         return true;
     }
     if !cfg!(target_os = "linux") {
@@ -314,7 +319,7 @@ mod tests {
     fn headless_detection_without_display_env() {
         let none = |_: &str| None;
         let x11 = |k: &str| (k == "DISPLAY").then(|| ":0".to_string());
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "desktop"))]
         {
             let empty = |_: &str| Some(String::new());
             assert!(is_headless(&none, false));
