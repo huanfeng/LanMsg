@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -54,6 +55,7 @@ class StationViewModel(
     private val transfers = mutableMapOf<String, String>()
     private var pending = 0
     private var refreshJob: Job? = null
+    private var peerJob: Job? = null
 
     init {
         viewModelScope.launch { core.events.collect(::onEvent) }
@@ -90,7 +92,14 @@ class StationViewModel(
         viewModelScope.launch {
             _state.update { it.copy(refreshing = true) }
             try {
-                refresh().join()
+                // 被更新的刷新取消时，等到当前最新的刷新结束才复位
+                var j = refresh()
+                while (true) {
+                    j.join()
+                    val latest = refreshJob
+                    if (latest == null || latest === j) break
+                    j = latest
+                }
             } finally {
                 _state.update { it.copy(refreshing = false) }
             }
@@ -160,6 +169,14 @@ class StationViewModel(
     private fun onEvent(e: Event) {
         when (e) {
             is Event.StationUpdated -> if (e.station == station) refresh()
+            // StationView.host_device 是设备名而不是 id，无法可靠匹配主机：任意设备上下线都防抖重取
+            is Event.PeerOnline, is Event.PeerOffline -> {
+                peerJob?.cancel()
+                peerJob = viewModelScope.launch {
+                    delay(PEER_DEBOUNCE_MS)
+                    refresh()
+                }
+            }
             is Event.TransferProgress -> {
                 transfers[e.hash] = e.transfer
                 _state.update { it.copy(progress = it.progress + (e.hash to (e.done to e.total))) }
@@ -175,6 +192,7 @@ class StationViewModel(
 
     companion object {
         private const val TAG = "StationViewModel"
+        private const val PEER_DEBOUNCE_MS = 300L
         private const val DAY_MILLIS = 86_400_000L
     }
 }

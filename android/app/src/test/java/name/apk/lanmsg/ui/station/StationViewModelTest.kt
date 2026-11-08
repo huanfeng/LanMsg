@@ -229,6 +229,8 @@ class StationViewModelTest {
         advanceUntilIdle()
         assertTrue(vm.state.value.refreshing)
         vm.refresh() // 取消在途刷新
+        advanceUntilIdle()
+        assertTrue(vm.state.value.refreshing) // 第二次刷新未结束前仍在刷新
         gate.complete(Unit)
         advanceUntilIdle()
         assertFalse(vm.state.value.refreshing)
@@ -281,5 +283,16 @@ class StationViewModelTest {
         assertTrue(fake.requests.none { it is Request.StationPut })
         assertEquals(ErrorCode.INVALID_ARGUMENT, vm.state.value.error)
         assertFalse(vm.state.value.busy)
+    }
+
+    @Test fun peer_online_and_offline_events_refresh_with_debounce() = runTest {
+        val fake = fake()
+        vm(fake)
+        advanceUntilIdle()
+        val before = fake.requests.count { it is Request.StationItems }
+        fake.emit(Event.PeerOffline("d1"))
+        fake.emit(Event.PeerOnline(Fixtures.peer("d1")))
+        advanceUntilIdle()
+        assertEquals(before + 1, fake.requests.count { it is Request.StationItems })
     }
 }

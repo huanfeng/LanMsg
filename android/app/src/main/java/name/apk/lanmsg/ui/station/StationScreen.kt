@@ -54,6 +54,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.draw.alpha
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -137,6 +140,8 @@ fun StationContent(
     val snackbar = remember { SnackbarHostState() }
     val errorText = state.error?.let { stringResource(errorTextRes(it)) }
     LaunchedEffect(errorText) { errorText?.let { snackbar.showSnackbar(it); onDismissError() } }
+    val scope = rememberCoroutineScope()
+    val offlineText = stringResource(R.string.station_host_offline_banner)
     var expiryMenu by remember { mutableStateOf(false) }
     var addMenu by remember { mutableStateOf(false) }
     var textDialog by remember { mutableStateOf(false) }
@@ -186,7 +191,14 @@ fun StationContent(
         },
         floatingActionButton = {
             Box {
-                FloatingActionButton(onClick = { addMenu = true }, containerColor = c.signalFill, contentColor = c.onFill) {
+                // 主机离线时放入只会白白导入 outbox 再失败：降透明并提示，不弹添加菜单
+                val hostOffline = !state.hostOnline && !state.loading
+                FloatingActionButton(
+                    onClick = { if (hostOffline) scope.launch { snackbar.showSnackbar(offlineText) } else addMenu = true },
+                    containerColor = c.signalFill,
+                    contentColor = c.onFill,
+                    modifier = Modifier.alpha(if (hostOffline) 0.5f else 1f),
+                ) {
                     Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.station_add))
                 }
                 DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }, containerColor = c.surface) {
