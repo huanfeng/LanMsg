@@ -7,11 +7,14 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 tmp=$(mktemp -d)
 server_pid=""
+daemon_pid=""
 cleanup() {
     [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null || true
+    [ -n "$daemon_pid" ] && kill "$daemon_pid" 2>/dev/null || true
     rm -rf "$tmp"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -47,7 +50,10 @@ port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); pr
 (cd "$OUT_DIR" && exec python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1) &
 server_pid=$!
 sleep 1
-export LANMSG_BASE_URL="http://127.0.0.1:$port"
+# 发布页目录结构：<根>/latest/download 与 <根>/download/<版本>
+mkdir -p "$OUT_DIR/releases/latest" "$OUT_DIR/releases/download/v9.9.9"
+ln -s ../.. "$OUT_DIR/releases/latest/download" 2>/dev/null || true
+export LANMSG_BASE_URL="http://127.0.0.1:$port/releases"
 
 echo "== desktop install"
 prefix="$tmp/prefix"
@@ -78,6 +84,47 @@ sh "$here/install.sh" --headless --prefix "$prefix2" >/dev/null || fail "headles
 [ -x "$prefix2/bin/lanmsg-cli" ] || fail "headless missing lanmsg-cli"
 [ ! -e "$prefix2/bin/lanmsg" ] || fail "headless must not ship lanmsg"
 grep -q "^ExecStart=$prefix2/bin/lanmsgd --headless\$" "$svc" || fail "headless service lacks --headless"
+
+echo "== reinstall while lanmsgd is running"
+mkdir -p "$tmp/rundata"
+"$prefix2/bin/lanmsgd" --headless --data-dir "$tmp/rundata" --port 0 --no-multicast >/dev/null 2>&1 &
+daemon_pid=$!
+sleep 1
+kill -0 "$daemon_pid" 2>/dev/null || fail "test daemon did not start"
+sh "$here/install.sh" --headless --prefix "$prefix2" >/dev/null || fail "reinstall over running daemon failed"
+kill "$daemon_pid" 2>/dev/null || true
+wait "$daemon_pid" 2>/dev/null || true
+daemon_pid=""
+
+echo "== --version path"
+cp "$OUT_DIR/$headless_name" "$OUT_DIR/SHA256SUMS" "$OUT_DIR/releases/download/v9.9.9/"
+prefix4="$tmp/prefix4"
+sh "$here/install.sh" --headless --version v9.9.9 --prefix "$prefix4" >/dev/null || fail "--version install failed"
+[ -x "$prefix4/bin/lanmsgd" ] || fail "--version install missing lanmsgd"
+if sh "$here/install.sh" --headless --version v0.0.0 --prefix "$tmp/prefix5" >/dev/null 2>&1; then
+    fail "nonexistent version was accepted"
+fi
+
+echo "== unsafe prefix rejected"
+for bad in "$tmp/with space" "$tmp/a|b" "$tmp/a&b" "$tmp/a\\b"; do
+    if sh "$here/install.sh" --headless --prefix "$bad" >/dev/null 2>&1; then
+        fail "unsafe prefix accepted: $bad"
+    fi
+done
+
+echo "== unsafe tarball members rejected"
+python3 - "$OUT_DIR/releases/download/v9.9.9/$headless_name" <<'PY'
+import io, sys, tarfile
+with tarfile.open(sys.argv[1], "w:gz") as t:
+    data = b"x"
+    info = tarfile.TarInfo("../evil")
+    info.size = len(data)
+    t.addfile(info, io.BytesIO(data))
+PY
+(cd "$OUT_DIR/releases/download/v9.9.9" && sha256sum "$headless_name" > SHA256SUMS)
+if sh "$here/install.sh" --headless --version v9.9.9 --prefix "$tmp/prefix6" >/dev/null 2>&1; then
+    fail "tarball with .. member accepted"
+fi
 
 echo "== purge asks for confirmation"
 mkdir -p "$XDG_DATA_HOME/lanmsg"

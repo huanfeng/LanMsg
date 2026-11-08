@@ -6,5 +6,4 @@ Comment[zh_CN]=局域网聊天式文件互传
 Exec=lanmsg %U
 Icon=lanmsg
 Categories=Network;FileTransfer;
-MimeType=x-scheme-handler/lanmsg;
 Terminal=false

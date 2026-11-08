@@ -46,7 +46,8 @@ fi
 
 bin_dir=$tgt/$triple/$profile
 stage=$(mktemp -d)
-trap 'rm -rf "$stage"' EXIT INT TERM
+trap 'rm -rf "$stage"' EXIT
+trap 'exit 130' INT TERM
 
 mkdir -p "$stage/bin" "$stage/lib/systemd/user"
 for b in $bins; do
