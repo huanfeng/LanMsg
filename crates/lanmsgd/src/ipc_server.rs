@@ -62,22 +62,31 @@ pub(crate) async fn serve_connection(
         })
     };
 
-    // 防火墙规则缺失：连接建立时按当前值补发一次，之后值变为“缺失”时再推送。
+    // 防火墙状态：连接建立时若已缺失则补发 `FirewallMissing`，之后每次变化推送
+    // （变为缺失 `FirewallMissing`，变为已放行 `FirewallOk`）。
     // 状态由后台检查写入共享的 watch，这里不跑 netsh。
     let fw_task = {
         let sink = sink.clone();
         let mut rx = firewall;
         tokio::spawn(async move {
+            let mut missing = firewall_missing_now(&mut rx);
+            let mut announce = missing;
             loop {
-                if firewall_missing_now(&mut rx) {
-                    let ev = IpcFrame::Event(lanmsg_api::types::Event::FirewallMissing);
-                    if sink.lock().await.send(ev).await.is_err() {
+                if announce {
+                    let ev = if missing {
+                        lanmsg_api::types::Event::FirewallMissing
+                    } else {
+                        lanmsg_api::types::Event::FirewallOk
+                    };
+                    if sink.lock().await.send(IpcFrame::Event(ev)).await.is_err() {
                         break;
                     }
                 }
                 if rx.changed().await.is_err() {
                     break;
                 }
+                missing = firewall_missing_now(&mut rx);
+                announce = true;
             }
         })
     };
@@ -278,6 +287,29 @@ mod tests {
             .expect("event within 3s")
             .unwrap();
         assert_eq!(ev, lanmsg_api::types::Event::FirewallMissing);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn firewall_ok_is_pushed_when_rule_becomes_present() {
+        let (fw_tx, fw_rx) = tokio::sync::watch::channel(true);
+        let (_svc, ep, _o, _dir) = setup_with_firewall(fw_rx).await;
+        let client = IpcClient::connect(&ep).await.unwrap();
+        let mut events = client.events();
+        client.call(Request::GetSelf).await.unwrap();
+        fw_tx.send_replace(false);
+        // 连接时的补发（若未被漏掉）之后，必须收到 FirewallOk
+        let mut got_ok = false;
+        for _ in 0..2 {
+            let ev = tokio::time::timeout(std::time::Duration::from_secs(3), events.recv())
+                .await
+                .expect("event within 3s")
+                .unwrap();
+            if ev == lanmsg_api::types::Event::FirewallOk {
+                got_ok = true;
+                break;
+            }
+        }
+        assert!(got_ok);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

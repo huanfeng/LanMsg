@@ -1005,6 +1005,10 @@ impl Model {
                 self.firewall_missing = true;
                 Vec::new()
             }
+            Event::FirewallOk => {
+                self.firewall_missing = false;
+                Vec::new()
+            }
             Event::ConversationUpdated { summary } => {
                 match self.convs.iter_mut().find(|c| c.conv == summary.conv) {
                     Some(slot) => *slot = summary,
@@ -4578,5 +4582,7 @@ mod tests {
         assert_eq!(m.interfaces.len(), 1);
         m.apply(UiMsg::Event(Event::FirewallMissing));
         assert!(m.firewall_missing);
+        m.apply(UiMsg::Event(Event::FirewallOk));
+        assert!(!m.firewall_missing);
     }
 }

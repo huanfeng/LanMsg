@@ -50,8 +50,10 @@ fn start_firewall_elevation(firewall: std::sync::Arc<tokio::sync::watch::Sender<
     std::thread::spawn(move || {
         match std::env::current_exe() {
             Ok(exe) => match lanmsg_core::firewall::elevate_add_rule(&exe) {
+                // 命令退出码 0 即规则已添加：直接置为已放行，不依赖解析 netsh 输出复查
+                // （非中英文的 Windows 上解析不了，会永久显示缺失并重复添加规则）
                 Ok(true) => {
-                    firewall.send_replace(crate::firewall_cmd::check_missing());
+                    firewall.send_replace(false);
                 }
                 // 用户取消 UAC：保持现状
                 Ok(false) => tracing::info!("firewall elevation cancelled or failed"),

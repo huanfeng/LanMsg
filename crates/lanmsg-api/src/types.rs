@@ -368,6 +368,8 @@ pub enum Event {
     WebSessionChanged {
         info: Option<WebSessionInfo>,
     },
+    /// 防火墙放行规则已就绪（P5 追加）：`FirewallMissing` 之后规则被放行时推送，界面据此隐藏提示。
+    FirewallOk,
 }
 
 // ===== DTO =====
