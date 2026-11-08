@@ -18,8 +18,12 @@ use crate::views::message_row::human_size;
 const PAGE_PAD: i32 = style::SPACE_XL;
 /// 左侧站点列表宽度。
 const LIST_W: i32 = 220;
-/// 条目右侧操作区宽度。
-const ACTIONS_W: i32 = 208;
+/// 条目行高：所有状态（按钮 / 进度条 / 灰字）都放得下，行与行之间不抖动。
+const ROW_H: i32 = 64;
+/// 主操作区（复制 / 下载状态 / 失效说明）宽度，内容整体靠右。
+const MAIN_W: i32 = 196;
+/// 置顶 / 删除两个链接的固定列宽。
+const SIDE_W: i32 = 64;
 /// 文字条目名称的显示字数上限。
 const TEXT_PREVIEW_CHARS: usize = 80;
 const SECS_PER_DAY: i64 = 86_400;
@@ -179,18 +183,22 @@ fn item_row(ui: &UiState, it: &StationItemView, confirm: ConfirmState) -> Elemen
         (None, Some(f)) => f.name.clone(),
         (None, None) => String::new(),
     };
-    let mut name_row = Element::row().spacing(style::SPACE_SM).cross(Align::Center);
+    // 标题起点固定；置顶标记放在标题右侧
+    let mut name_row = Element::row()
+        .width_match()
+        .spacing(style::SPACE_SM)
+        .cross(Align::Center)
+        .child(
+            Element::label(title)
+                .font_size(style::FONT_BODY)
+                .fg_role(Role::Text)
+                .max_lines(1)
+                .truncate(Truncate::End)
+                .weight(1.0),
+        );
     if it.pinned {
         name_row = name_row.child(style::pill(strings::STATION_PINNED_TAG));
     }
-    name_row = name_row.child(
-        Element::label(title)
-            .font_size(style::FONT_BODY)
-            .fg_role(Role::Text)
-            .max_lines(1)
-            .truncate(Truncate::End)
-            .weight(1.0),
-    );
     // 信息行：大小、谁在什么时候放的、过期时间
     let mut parts = Vec::new();
     if let Some(f) = &it.file {
@@ -230,7 +238,9 @@ fn item_row(ui: &UiState, it: &StationItemView, confirm: ConfirmState) -> Elemen
             .size(40, 40)
             .corner(style::RADIUS_CONTROL)
             .bg_when(|| style::tokens().signal_soft)
-            .child(style::icon(style::ICON_FILE_TEXT, 24, Role::AccentText).align(Align::Center)),
+            .child(
+                style::icon(style::ICON_TEXT_SNIPPET, 24, Role::AccentText).align(Align::Center),
+            ),
     };
 
     // 主操作：文字 -> 复制；文件 -> 下载状态区；失效 -> 灰字说明
@@ -252,8 +262,11 @@ fn item_row(ui: &UiState, it: &StationItemView, confirm: ConfirmState) -> Elemen
 
     let (ui_pin, id_pin, pinned) = (ui.clone(), it.item.clone(), it.pinned);
     let id_del = it.item.clone();
-    let secondary = Element::row()
-        .spacing(style::SPACE_LG)
+    // 置顶 / 删除：固定宽的窄列，两个链接上下排
+    let side = Element::col()
+        .width(SIDE_W)
+        .spacing(style::SPACE_XS)
+        .cross(Align::End)
         .child(
             Element::link(if pinned {
                 strings::STATION_UNPIN
@@ -270,12 +283,15 @@ fn item_row(ui: &UiState, it: &StationItemView, confirm: ConfirmState) -> Elemen
                 action: strings::STATION_DELETE,
             })
         }));
+    // 主操作区：固定宽、内容靠右，各种状态的对齐方式一致
+    let main = Element::col().width(MAIN_W).cross(Align::End).child(main);
 
     Element::col()
         .width_match()
         .child(
             Element::row()
                 .width_match()
+                .height(ROW_H)
                 .padding_edges(Insets {
                     top: style::SPACE_SM,
                     bottom: style::SPACE_SM,
@@ -286,13 +302,8 @@ fn item_row(ui: &UiState, it: &StationItemView, confirm: ConfirmState) -> Elemen
                 .cross(Align::Center)
                 .child(lead)
                 .child(info)
-                .child(
-                    Element::col()
-                        .width(ACTIONS_W)
-                        .spacing(style::SPACE_SM)
-                        .child(main)
-                        .child(secondary),
-                ),
+                .child(main)
+                .child(side),
         )
         .child(Element::divider())
 }

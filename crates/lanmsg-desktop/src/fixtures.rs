@@ -875,6 +875,7 @@ pub fn demo_model(p: DemoPage) -> Model {
                     name: "办公室中转站".into(),
                     host_device: "我的电脑".into(),
                     host_online: true,
+                    is_local: true,
                     item_count: 6,
                 },
                 StationView {
@@ -882,6 +883,7 @@ pub fn demo_model(p: DemoPage) -> Model {
                     name: "家里的 NAS".into(),
                     host_device: "书房主机".into(),
                     host_online: false,
+                    is_local: false,
                     item_count: 2,
                 },
             ];

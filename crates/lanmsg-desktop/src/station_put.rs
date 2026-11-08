@@ -60,28 +60,36 @@ async fn put(data_dir: &Path, paths: Vec<PathBuf>) -> Result<(), Failure> {
                 .map_err(|e| format!("{:?}: {}", e.code, error_text(&e.code)))
         }
     };
-    let me = match call(Request::GetSelf).await? {
-        Response::SelfInfo { value } if value.initialized => value,
+    match call(Request::GetSelf).await? {
+        Response::SelfInfo { value } if value.initialized => {}
         _ => return Err("this device is not initialized".into()),
+    }
+    // 本机托管的站点（core 在 StationView 里标了 is_local）。
+    let list = || async {
+        match call(Request::StationList).await? {
+            Response::Stations { value } => Ok(value),
+            _ => Err(Failure::from("unexpected reply to StationList")),
+        }
     };
-    // 本机托管的站点：主机名等于本机设备名（StationView 给的是主机设备名）。
-    let stations = match call(Request::StationList).await? {
-        Response::Stations { value } => value,
-        _ => return Err("unexpected reply to StationList".into()),
-    };
-    let station = match stations
-        .into_iter()
-        .find(|s| Some(&s.host_device) == me.device_name.as_ref())
-    {
+    let station = match list().await?.into_iter().find(|s| s.is_local) {
         Some(s) => s.station,
-        None => match call(Request::StationCreate {
-            name: strings::STATION_DEFAULT_NAME.to_string(),
-        })
-        .await?
-        {
-            Response::ConvId { value } => value,
-            _ => return Err("unexpected reply to StationCreate".into()),
-        },
+        None => {
+            let created = match call(Request::StationCreate {
+                name: strings::STATION_DEFAULT_NAME.to_string(),
+            })
+            .await?
+            {
+                Response::ConvId { value } => value,
+                _ => return Err("unexpected reply to StationCreate".into()),
+            };
+            // 多个进程同时放入时可能各建了一个：重新列出，大家都用最早的本机站点。
+            list()
+                .await?
+                .into_iter()
+                .find(|s| s.is_local)
+                .map(|s| s.station)
+                .unwrap_or(created)
+        }
     };
     call(Request::StationPut {
         station,
