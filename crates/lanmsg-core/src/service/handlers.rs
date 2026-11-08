@@ -114,6 +114,17 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
                 value: id.to_string(),
             })
         }
+        Request::WebStart => Ok(Response::WebSession {
+            value: inner.web.start().await?,
+        }),
+        Request::WebStop => {
+            inner.web.stop().await;
+            Ok(Response::Ok)
+        }
+        Request::WebRespond { request, allow } => {
+            inner.web.respond(&request, allow)?;
+            Ok(Response::Ok)
+        }
         Request::StationCreate { name } => station_create(inner, &name),
         Request::StationPut {
             station,
@@ -423,6 +434,12 @@ async fn open_dm(inner: &Inner, user: String) -> Result<Response, ApiError> {
 
 async fn send_text(inner: &Inner, conv: String, text: String) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
+    if inner.web.is_guest_conv(&conv) {
+        let id = inner.web.send_text(&conv, &text).await?;
+        return Ok(Response::MsgId {
+            value: id.to_string(),
+        });
+    }
     let msg_id = inner.msg.send(&conv, MsgBody::Text { text }).await?;
     Ok(Response::MsgId {
         value: msg_id.to_string(),
@@ -432,7 +449,13 @@ async fn send_text(inner: &Inner, conv: String, text: String) -> Result<Response
 /// SendFiles：发送文件消息，返回预留的 MsgId（后台完成哈希后入库投递）。
 async fn send_files(inner: &Inner, conv: String, paths: Vec<String>) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
-    let paths = paths.into_iter().map(std::path::PathBuf::from).collect();
+    let paths: Vec<std::path::PathBuf> = paths.into_iter().map(std::path::PathBuf::from).collect();
+    if inner.web.is_guest_conv(&conv) {
+        let id = inner.web.send_files(&conv, &paths).await?;
+        return Ok(Response::MsgId {
+            value: id.to_string(),
+        });
+    }
     let msg_id = inner.msg.send_files(&conv, paths).await?;
     Ok(Response::MsgId {
         value: msg_id.to_string(),
@@ -442,6 +465,9 @@ async fn send_files(inner: &Inner, conv: String, paths: Vec<String>) -> Result<R
 /// SendFolder：发送文件夹消息。
 async fn send_folder(inner: &Inner, conv: String, path: String) -> Result<Response, ApiError> {
     let conv = parse_conv(&conv)?;
+    if inner.web.is_guest_conv(&conv) {
+        return Err(invalid_arg("web transfer does not support folders".into()));
+    }
     let msg_id = inner
         .msg
         .send_folder(&conv, std::path::PathBuf::from(path))
