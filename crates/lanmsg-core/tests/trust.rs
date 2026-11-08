@@ -547,6 +547,24 @@ async fn stranger_inbound_over_tunnel_is_rejected() {
     assert!(trust.accept_peer(&outbound, Status::Online, false));
 }
 
+/// 手动添加过的设备：Vpn 路径下对方主动连入也被接受。
+#[tokio::test]
+async fn manual_vpn_device_accepted_inbound() {
+    let (trust, store, _self_cert, _self_device) = rules_env().await;
+    let stranger = cert_for(&UserKey::generate(), DeviceId([0x42u8; 32]));
+    let inbound = peer_info(Some(stranger.clone()), PathClass::Vpn, false);
+    assert!(!store.is_manual_device(&stranger.device).unwrap());
+    assert!(!trust.accept_peer(&inbound, Status::Online, false));
+    store.add_manual_peer("192.168.2.9:53320", 1).unwrap();
+    store
+        .bind_manual_peer("192.168.2.9:53320", &stranger.device)
+        .unwrap();
+    assert!(trust.accept_peer(&inbound, Status::Online, false));
+    // Internet 路径不因手动添加而放行。
+    let inet = peer_info(Some(stranger), PathClass::Internet, false);
+    assert!(!trust.accept_peer(&inet, Status::Online, false));
+}
+
 /// accept_peer 七条准入规则逐条断言。
 #[tokio::test]
 async fn accept_peer_rules_table() {

@@ -2,6 +2,7 @@
 // Store 基于 rusqlite，所有方法 &self、同步执行，不跨 .await 持锁。
 // 注释中文，标识符英文。
 
+pub mod addresses;
 pub mod blobs;
 pub mod contacts;
 pub mod convs;
@@ -11,6 +12,7 @@ pub mod schema;
 pub mod search_index;
 pub mod users;
 
+pub use addresses::{AddrSource, KnownAddrRow};
 pub use blobs::{
     BlobLocalKind, BlobLocalRow, MessageBlobRow, PreparingKind, PreparingRow, TransferRow,
     TransferState,

@@ -314,10 +314,22 @@ impl Service {
         }));
 
         tokio::spawn(routing_task(inner.clone(), conn_rx, disc_rx));
+        tokio::spawn(address_book_task(inner.clone()));
         // 重启后：为已知地址的受信设备恢复重连任务。
         redial::resume_all(&inner);
         for addr in static_peers {
             register_static_peer(&inner, addr, false);
+        }
+        // 重启后恢复手动添加的对端（持久化在 manual_peers）。
+        match inner.store.list_manual_peers() {
+            Ok(list) => {
+                for (addr, _) in list {
+                    if let Ok(addr) = addr.parse() {
+                        register_static_peer(&inner, addr, false);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("loading manual peers failed: {e}"),
         }
 
         // 旧库的文件 / 文字搜索索引回填：后台执行，不阻塞启动（完成后写标记，只做一次）。
@@ -601,6 +613,28 @@ async fn routing_task(
                             tracing::debug!(peer = %d, "connection no longer registered when frame arrived, dropped");
                         }
                     }
+                    // 地址簿：合并后唤醒相关设备的重连任务。
+                    Frame::AddressBook(book) => {
+                        if let Some(pi) = inner.conns.peer(&d) {
+                            let self_user = inner.state.read().unwrap().self_user;
+                            match crate::net::addrbook::merge_devices(
+                                &inner.store,
+                                self_user,
+                                &pi,
+                                &book,
+                                now_millis(),
+                            ) {
+                                Ok(devices) => {
+                                    for dev in devices {
+                                        redial::addresses_changed(&inner, dev);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(peer = %d, error = %e, "AddressBook merge failed");
+                                }
+                            }
+                        }
+                    }
                     // Blob 持有者查询/应答分派给 BlobServer（P2 Task 11）。
                     Frame::BlobQuery(q) => inner.blob.handle_blob_query(&inner, d, q).await,
                     Frame::BlobHave(h) => inner.blob.handle_blob_have(d, h).await,
@@ -629,6 +663,12 @@ async fn on_up(inner: &Arc<Inner>, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJo
         tracing::debug!(peer = %peer.device, "uninitialized peer connection (pairing only)");
         return;
     };
+    // 出站连接不经 accept_filter：对端在握手期间被吊销时，这里补一道检查并断开。
+    if inner.store.is_revoked(&peer.device).unwrap_or(false) {
+        tracing::info!(peer = %peer.device, "revoked device connected, disconnecting");
+        inner.conns.disconnect(&peer.device).await;
+        return;
+    }
     let now = now_millis();
     let _ = inner.store.upsert_device(&DeviceRow {
         device: peer.device,
@@ -647,8 +687,12 @@ async fn on_up(inner: &Arc<Inner>, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJo
         is_self: false,
         updated_at: now,
     });
+    if let Err(e) = crate::net::addrbook::on_peer_up_record(&inner.store, &peer, now) {
+        tracing::warn!(peer = %peer.device, error = %e, "recording peer address failed");
+    }
     redial::ensure_task(inner, peer.device);
     let self_user = inner.state.read().unwrap().self_user;
+    push_address_books(inner);
     let _ = inner.events.send(Event::PeerOnline {
         peer: views::peer_view(&inner.store, &peer, self_user.as_ref()),
     });
@@ -661,6 +705,58 @@ async fn on_up(inner: &Arc<Inner>, peer: PeerInfo, sync_tx: &mpsc::Sender<SyncJo
     // 作者据此判定“已送达”。排在 SyncOffer 之后，同一连接只发这一次。
     try_enqueue(sync_tx, SyncJob::HaveBlobs(peer), &device);
 }
+
+/// 向所有在线的自己设备与已接受联系人发送各自可见的地址簿（空簿不发）。
+/// 触发时机：对端上线、联系人变化后、定时兜底——新设备记录与新地址到达的先后顺序不固定。
+fn push_address_books(inner: &Arc<Inner>) {
+    let Some(self_user) = inner.state.read().unwrap().self_user else {
+        return;
+    };
+    for p in inner.conns.peers() {
+        let Some(peer_user) = p.cert.as_ref().map(|c| c.user) else {
+            continue;
+        };
+        let book = match crate::net::addrbook::build_for(&inner.store, &self_user, &peer_user) {
+            Ok(b) if !b.entries.is_empty() => b,
+            _ => continue,
+        };
+        let inner = inner.clone();
+        let device = p.device;
+        // 发送可能等待写队列，放到后台任务里，不阻塞调用方。
+        tokio::spawn(async move {
+            let _ = inner.conns.send(&device, Frame::AddressBook(book)).await;
+        });
+    }
+}
+
+/// 地址簿兜底推送任务：联系人变化后（稍等对端同步完成）与定时各推一次。
+async fn address_book_task(inner: Arc<Inner>) {
+    let mut events = inner.events.subscribe();
+    let mut tick = tokio::time::interval(ADDRESS_BOOK_INTERVAL);
+    tick.tick().await;
+    loop {
+        tokio::select! {
+            _ = tick.tick() => push_address_books(&inner),
+            ev = events.recv() => match ev {
+                Ok(Event::ContactsChanged) => {
+                    let inner = inner.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(ADDRESS_BOOK_DELAY).await;
+                        push_address_books(&inner);
+                    });
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                _ => {}
+            },
+            _ = inner.conns.wait_shutdown() => break,
+        }
+    }
+}
+
+/// 地址簿定时推送间隔。
+const ADDRESS_BOOK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// 联系人变化后延迟多久再推，留给对端同步联系人与设备记录的时间。
+const ADDRESS_BOOK_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// 非阻塞入队：队列满（对端不读我方数据）则丢弃并告警。丢弃安全：
 /// SyncOffer 可由对端或下次上线重发。返回是否入队成功。

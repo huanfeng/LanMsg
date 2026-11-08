@@ -13,7 +13,7 @@ use lanmsg_api::types::{
 };
 use lanmsg_core::discovery::MemoryBus;
 
-use common::{node, node_offline, node_offline_static, pair, wait_until, TestNode};
+use common::{node, node_offline, node_offline_static, pair, sees_no_peer, wait_until, TestNode};
 
 // ===== 辅助 =====
 
@@ -835,6 +835,9 @@ async fn removed_device_is_disconnected_and_refused() {
 
     // C 重连 B 被拒：3 秒内 B 无 PeerOnline(C)。拨号因 accept_filter 拒绝
     // 而报错属预期，忽略。
+    // 先等 B 与 C 的旧连接断开并清掉旧事件：地址簿让 B 在被移除之前就可能已经连过 C。
+    wait_until(|| async { sees_no_peer(&b, &c_dev).await }, 5).await;
+    while b.events.try_recv().is_ok() {}
     let b_addr = b.svc.local_addr().to_string();
     let _ = c.try_call(Request::AddManualPeer { addr: b_addr }).await;
     b.no_event(

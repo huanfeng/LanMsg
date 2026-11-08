@@ -133,9 +133,13 @@ pub fn classify(peer: IpAddr, ifaces: &[LocalIface], via_multicast: bool) -> Pat
         };
     }
 
-    // 枚举不到网卡（例如 Android 11+ 限制 netlink）时，私网地址按局域网处理，
+    // 枚举不到网卡，或枚举到的非隧道网卡都没有私网地址（例如 Android 上只看到 rmnet 的
+    // 公网/CGNAT 地址，Wi-Fi 网卡被系统隐藏）时，私网地址按局域网处理，
     // 否则陌生人配对会全部被拒。
-    if ifaces.is_empty() && is_private_lan_addr(peer) {
+    let has_private_iface = ifaces
+        .iter()
+        .any(|i| i.tunnel.is_none() && is_private_lan_addr(i.addr));
+    if !has_private_iface && is_private_lan_addr(peer) {
         return PathClass::Lan;
     }
 
@@ -407,6 +411,39 @@ mod tests {
         assert_eq!(
             classify("8.8.8.8".parse().unwrap(), &none, false),
             PathClass::Internet
+        );
+    }
+
+    #[test]
+    fn only_cellular_ifaces_private_addr_is_lan() {
+        let ifaces = vec![
+            LocalIface {
+                name: "rmnet_data0".into(),
+                addr: "100.80.1.2".parse().unwrap(),
+                prefix: 30,
+                tunnel: None,
+            },
+            LocalIface {
+                name: "rmnet_data1".into(),
+                addr: "2408:8000::1".parse().unwrap(),
+                prefix: 64,
+                tunnel: None,
+            },
+        ];
+        assert_eq!(
+            classify("192.168.1.20".parse().unwrap(), &ifaces, false),
+            PathClass::Lan
+        );
+        // 有普通私网网卡时不再回退：不同网段的私网地址仍是 VPN。
+        let with_lan = vec![LocalIface {
+            name: "wlan0".into(),
+            addr: "192.168.1.10".parse().unwrap(),
+            prefix: 24,
+            tunnel: None,
+        }];
+        assert_eq!(
+            classify("192.168.2.20".parse().unwrap(), &with_lan, false),
+            PathClass::Vpn
         );
     }
 }

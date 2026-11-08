@@ -151,13 +151,16 @@ pub(crate) fn kick_device(inner: &Inner, device: &DeviceId) {
 
 /// 平台通知网络变化：2 秒去抖后清零退避立即重拨，并重新通告一次。
 pub(crate) fn network_changed(inner: &Arc<Inner>) {
+    // 缓存作废放在去抖早退之前：窗口内每次通知都要让后续握手看到最新网卡。
+    crate::net::path::invalidate_ifaces_cache();
     if inner.redial.net_pending.swap(true, Ordering::SeqCst) {
         return; // 窗口内已有待触发的通知，合并
     }
-    crate::net::path::invalidate_ifaces_cache();
     let inner = inner.clone();
     tokio::spawn(async move {
         tokio::time::sleep(NET_DEBOUNCE).await;
+        // 窗口结束时再作废一次：网卡变化可能发生在窗口内、首次作废之后。
+        crate::net::path::invalidate_ifaces_cache();
         inner.redial.net_pending.store(false, Ordering::SeqCst);
         tracing::info!("network changed, redialing trusted peers now");
         inner.redial.net.send_modify(|g| *g += 1);
@@ -197,6 +200,30 @@ fn known_addr(inner: &Inner, device: &DeviceId) -> Option<SocketAddr> {
         .and_then(|r| r.last_addr)
         .and_then(|a| a.parse().ok());
     pick_addr(inner.discovered.addr_with_age(device), stored)
+}
+
+/// 拨号候选地址：先 [`known_addr`]，再 known_addresses（路径优先、最近优先），去重。
+fn candidate_addrs(inner: &Inner, device: &DeviceId) -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = known_addr(inner, device).into_iter().collect();
+    if let Ok(rows) = inner.store.addresses_of(device) {
+        for r in rows {
+            if !out.contains(&r.addr) {
+                out.push(r.addr);
+            }
+        }
+    }
+    out
+}
+
+/// 地址簿带来了新地址：补建任务并要求清零退避、立即试一次。
+pub(crate) fn addresses_changed(inner: &Arc<Inner>, device: DeviceId) {
+    ensure_task(inner, device);
+    let sig = inner.redial.tasks.lock().unwrap().get(&device).cloned();
+    if let Some(sig) = sig {
+        sig.reset.store(true, Ordering::SeqCst);
+        sig.discovered.store(true, Ordering::SeqCst);
+        sig.notify.notify_one();
+    }
 }
 
 /// 为受信设备确保有一个重连任务（已有则什么都不做）。
@@ -286,7 +313,7 @@ async fn redial_task(inner: Arc<Inner>, device: DeviceId, signals: Arc<TaskSigna
     let mut alive_since: Option<Instant> = None;
     // 不在同网段的地址：先等到网络变化 / 发现事件（或最长退避）再拨一次。
     let mut off_subnet_released = false;
-    while !inner.conns.is_shut_down() {
+    'redial: while !inner.conns.is_shut_down() {
         inner.redial.loops.fetch_add(1, Ordering::SeqCst);
         if !is_trusted(&inner, &device) {
             break;
@@ -353,7 +380,8 @@ async fn redial_task(inner: Arc<Inner>, device: DeviceId, signals: Arc<TaskSigna
             }
             continue;
         }
-        let Some(addr) = known_addr(&inner, &device) else {
+        let addrs = candidate_addrs(&inner, &device);
+        if addrs.is_empty() {
             // 还没有任何地址：只等发现事件或网络变化，不轮询。
             attempt = 0;
             tokio::select! {
@@ -362,8 +390,8 @@ async fn redial_task(inner: Arc<Inner>, device: DeviceId, signals: Arc<TaskSigna
                 _ = inner.conns.wait_shutdown() => break,
             }
             continue;
-        };
-        if !on_local_subnet(&addr) && !off_subnet_released {
+        }
+        if !addrs.iter().any(on_local_subnet) && !off_subnet_released {
             // 不在同网段：用最长退避间隔，网络变化或该设备的发现事件到来时立即试一次。
             let sleep = tokio::time::sleep(REDIAL_MAX);
             tokio::pin!(sleep);
@@ -384,28 +412,33 @@ async fn redial_task(inner: Arc<Inner>, device: DeviceId, signals: Arc<TaskSigna
             continue;
         }
         off_subnet_released = false;
-        // 与发现触发的拨号共用在途登记：同一地址不并发两次 TLS。
-        if !inner.dialing.lock().unwrap().insert(addr) {
-            attempt = attempt.saturating_add(1);
-            continue;
-        }
-        let _guard = DialingGuard {
-            inner: inner.clone(),
-            addr,
-        };
-        inner.redial.attempts.fetch_add(1, Ordering::SeqCst);
-        if attempt == 0 {
-            tracing::info!(peer = %device, %addr, "redialing trusted peer");
-        } else {
-            tracing::debug!(peer = %device, %addr, attempt, "redial attempt");
-        }
-        let result = tokio::select! {
-            r = inner.conns.connect_expecting(addr, Some(device)) => r,
-            _ = inner.conns.wait_shutdown() => break,
-        };
-        match result {
-            Ok(_) => tracing::info!(peer = %device, %addr, "redial succeeded"),
-            Err(e) => tracing::debug!(peer = %device, %addr, error = %e, "redial failed"),
+        // 按候选顺序逐个尝试，第一个成功即止。
+        for addr in addrs {
+            // 与发现触发的拨号共用在途登记：同一地址不并发两次 TLS。
+            if !inner.dialing.lock().unwrap().insert(addr) {
+                continue;
+            }
+            let _guard = DialingGuard {
+                inner: inner.clone(),
+                addr,
+            };
+            inner.redial.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                tracing::info!(peer = %device, %addr, "redialing trusted peer");
+            } else {
+                tracing::debug!(peer = %device, %addr, attempt, "redial attempt");
+            }
+            let result = tokio::select! {
+                r = inner.conns.connect_expecting(addr, Some(device)) => r,
+                _ = inner.conns.wait_shutdown() => break 'redial,
+            };
+            match result {
+                Ok(_) => {
+                    tracing::info!(peer = %device, %addr, "redial succeeded");
+                    break;
+                }
+                Err(e) => tracing::debug!(peer = %device, %addr, error = %e, "redial failed"),
+            }
         }
         attempt = attempt.saturating_add(1);
     }

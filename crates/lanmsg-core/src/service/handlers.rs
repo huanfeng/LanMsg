@@ -435,20 +435,45 @@ async fn send_folder(inner: &Inner, conv: String, path: String) -> Result<Respon
     })
 }
 
-/// 解析 `ip:port` 或 `host:port` 并拨号。
+/// 解析 `host[:port]`（无端口用 SERVICE_PORT；IPv6 需 `[ip]:port`），持久化后拨号。
 async fn add_manual_peer(inner: &Arc<Inner>, addr: String) -> Result<Response, ApiError> {
-    let addr: SocketAddr = match addr.parse() {
-        Ok(a) => a,
-        Err(_) => tokio::net::lookup_host(&addr)
-            .await
-            .map_err(|_| invalid_arg(format!("cannot resolve address: {addr}")))?
-            .next()
-            .ok_or_else(|| invalid_arg(format!("cannot resolve address: {addr}")))?,
-    };
-    inner.conns.connect(addr, false).await?;
-    // 连上后登记为静态对端：断线（含对端重启、无 FIN 消失）后按退避自动重连。
+    let addr = parse_manual_addr(&addr).await?;
+    inner
+        .store
+        .add_manual_peer(&addr.to_string(), now_millis())
+        .map_err(crate::error::CoreError::from)?;
+    // 登记为静态对端：断线（含对端重启、无 FIN 消失）后按退避自动重连；重启后也会恢复。
+    // 绑定到设备由连接建立时的 on_peer_up_record 完成。
+    if inner.conns.connect(addr, false).await.is_err() {
+        super::register_static_peer(inner, addr, false);
+        return Err(CoreError::PeerOffline.into());
+    }
     super::register_static_peer(inner, addr, true);
     Ok(Response::Ok)
+}
+
+/// 解析手动添加的地址：`ip`、`ip:port`、`[ipv6]:port`、`host`、`host:port`。
+async fn parse_manual_addr(input: &str) -> Result<SocketAddr, ApiError> {
+    use lanmsg_proto::consts::SERVICE_PORT;
+    let input = input.trim();
+    let bad = || invalid_arg(format!("cannot resolve address: {input}"));
+    if let Ok(a) = input.parse::<SocketAddr>() {
+        return Ok(a);
+    }
+    if let Ok(ip) = input.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        return Ok(SocketAddr::new(ip, SERVICE_PORT));
+    }
+    let target = match input.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => input.to_string(),
+        Some(_) => return Err(bad()),
+        None if !input.is_empty() => format!("{input}:{SERVICE_PORT}"),
+        None => return Err(bad()),
+    };
+    tokio::net::lookup_host(target)
+        .await
+        .map_err(|_| bad())?
+        .next()
+        .ok_or_else(bad)
 }
 
 // ---- P2 Task 5：联系人双向确认与准入过滤 ----

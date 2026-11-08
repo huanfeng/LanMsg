@@ -1,6 +1,7 @@
 // P1 核心骨架：网络层（Task 8）。TLS 配置、路径等级判定、控制连接与连接管理器。
 // 注释中文，标识符英文。
 
+pub mod addrbook;
 pub mod conn;
 pub mod manager;
 pub mod path;

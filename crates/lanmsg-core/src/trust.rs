@@ -79,7 +79,8 @@ pub(crate) fn accept_rules(
     // 规则 7：陌生人按路径与方向：LAN 接受；VPN 仅出站接受；其余拒绝。
     match p.path {
         PathClass::Lan => true,
-        PathClass::Vpn => p.outbound,
+        // 用户手动添加过的设备，之后由对方主动连入也接受。
+        PathClass::Vpn => p.outbound || store.is_manual_device(&p.device).unwrap_or(false),
         PathClass::Internet | PathClass::Relay => false,
     }
 }
@@ -182,7 +183,9 @@ impl Trust {
         // 规则 6：路径过滤：非 Lan 且非（Vpn 且出站）→ Drop。
         let path_ok = match from.path {
             PathClass::Lan => true,
-            PathClass::Vpn => from.outbound,
+            PathClass::Vpn => {
+                from.outbound || self.store.is_manual_device(&from.device).unwrap_or(false)
+            }
             PathClass::Internet | PathClass::Relay => false,
         };
         if !path_ok {
