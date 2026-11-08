@@ -53,7 +53,7 @@ out=$(APPLE_DEVELOPER_ID=id APPLE_ID=a APPLE_TEAM_ID=b APPLE_APP_PASSWORD='s3/cr
     bash "$here/build-dmg.sh" --dry-run 0.0.0) || fail "signed run failed"
 for s in "codesign --force --options runtime --timestamp -s id" "MacOS/lanmsgd" "notarytool store-credentials lanmsg-ci" \
     "--keychain-profile lanmsg-ci" "stapler staple" "security create-keychain"; do
-    echo "$out" | grep -q "$s" || fail "missing step: $s"
+    echo "$out" | grep -qF -e "$s" || fail "missing step: $s"
 done
 
 if echo "$out" | grep -q -e '--deep'; then fail "--deep used"; fi
