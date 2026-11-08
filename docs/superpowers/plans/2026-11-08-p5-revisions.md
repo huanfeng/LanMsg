@@ -66,6 +66,8 @@
     - `synced_until` 语义：只由 Snapshot 推进（取收到条目的最大 `updated_at`，不是 `now`），Delta 不推进；重连 Subscribe 的 `since` 回退 1 秒，重复项靠「updated_at 取新者」和「墓碑不可逆」去重。
     - 应答错误文本：主机对 `Rejected/InvalidArgument/NotFound` 只发内层文本，拉取端统一包成 `Rejected(文本)`，最终 `ApiError.message` 不带变体前缀。
     - 复制条目由主机顺序拉取，失败由 60 秒周期任务重试（重试失败只记 debug）；孤儿副本目录一小时后由 `sweep` 清理。
+    - `sweep_orphan_dirs` 以条目目录自身的 mtime 判断是否过期：复制耗时超过 1 小时的大文件夹，在条目入库前有极低概率被误删。
+    - 对非自己设备的拒绝应答固定 `req = 0` 且静默（对方不处理，也无法据此探测站点是否存在）。
     - 未测：文件夹条目的端到端拉取与按哈希下载（子目录注入）、站点名含特殊字符时的落地目录；联系人 Subscribe 只能验证「看不到站点」，拒绝应答本身无法在测试里观察。
 - **T7**：文案全部进 `strings.rs`；`--station-put` 加到 `parse_cli`（main.rs:50）；`Effect` 以现有定义为准。
 - **T8**：错误状态存 `ErrorCode`。Android outbox 的 7 天清理不得删除中转站引用、主机尚未拉取的副本，要补测试。

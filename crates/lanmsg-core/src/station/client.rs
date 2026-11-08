@@ -235,10 +235,16 @@ fn owned_station(
     station: &ConvId,
 ) -> Result<StationInfo, CoreError> {
     let info = inner.station.hosted(station)?;
+    check_owner(&info, peer)?;
+    Ok(info)
+}
+
+/// 对端的用户必须是站点主人。
+fn check_owner(info: &StationInfo, peer: &PeerInfo) -> Result<(), CoreError> {
     if peer.cert.as_ref().map(|c| c.user) != Some(info.owner) {
         return Err(CoreError::Rejected("access denied".into()));
     }
-    Ok(info)
+    Ok(())
 }
 
 /// 应答里的错误文本：带固定前缀的变体只发内层文本，拉取端再包成 Rejected 时不会叠前缀。
@@ -778,6 +784,49 @@ mod tests {
         assert_eq!(error_text(&CoreError::NotFound("x".into())), "x");
         assert_eq!(error_text(&CoreError::InvalidArgument("y".into())), "y");
         assert_eq!(error_text(&CoreError::PeerOffline), "peer device offline");
+    }
+
+    fn peer_of(user: UserId) -> PeerInfo {
+        use lanmsg_proto::sign::UserKey;
+        use lanmsg_proto::types::{DeviceCert, DeviceType, PathClass};
+        let device = DeviceId([5u8; 32]);
+        let mut cert = DeviceCert::issue(
+            &UserKey::generate(),
+            device,
+            "p".into(),
+            DeviceType::Desktop,
+            1,
+        );
+        cert.user = user;
+        PeerInfo {
+            device,
+            cert: Some(cert),
+            display_name: "p".into(),
+            addr: "127.0.0.1:1".parse().unwrap(),
+            dial_addr: "127.0.0.1:1".parse().unwrap(),
+            path: PathClass::Lan,
+            caps: Vec::new(),
+            outbound: false,
+            tls_exporter: [0u8; 32],
+        }
+    }
+
+    #[test]
+    fn check_owner_rejects_other_users_with_stable_text() {
+        let owner = UserId([1u8; 32]);
+        let info = StationInfo {
+            station: ConvId([2u8; 32]),
+            name: "s".into(),
+            host: DeviceId([3u8; 32]),
+            owner,
+            acl: lanmsg_proto::station::StationAcl::OwnerOnly,
+            created_at: 1,
+            deleted: false,
+        };
+        assert!(check_owner(&info, &peer_of(owner)).is_ok());
+        let err = check_owner(&info, &peer_of(UserId([9u8; 32]))).unwrap_err();
+        assert!(matches!(&err, CoreError::Rejected(s) if s == "access denied"));
+        assert_eq!(error_text(&err), "access denied");
     }
 
     #[test]
