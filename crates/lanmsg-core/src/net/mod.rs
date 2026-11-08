@@ -6,6 +6,7 @@ pub mod conn;
 pub(crate) mod dialback;
 pub mod manager;
 pub mod path;
+pub mod scan;
 pub mod timing;
 pub mod tls;
 

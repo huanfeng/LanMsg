@@ -55,6 +55,7 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
         Request::RemoveManualPeer { addr } => remove_manual_peer(inner, addr).await,
         Request::ListManualPeers => list_manual_peers(inner),
         Request::ListInterfaces => Ok(list_interfaces()),
+        Request::ScanSubnet { cidr } => scan_subnet(inner, cidr),
         Request::NetworkChanged => {
             super::redial::network_changed(inner);
             Ok(Response::Ok)
@@ -654,6 +655,29 @@ async fn pair_cancel(inner: &Inner, session: String) -> Result<Response, ApiErro
 
 // ---- P2 Task 4：设置与资料 ----
 
+/// ScanSubnet：同步校验网段，通过即返回 Ok，扫描在后台进行，完成时发 `ScanFinished`。
+/// 同一时刻只允许一个扫描。
+fn scan_subnet(inner: &Arc<Inner>, cidr: String) -> Result<Response, ApiError> {
+    use std::sync::atomic::Ordering;
+    let net = crate::net::scan::validate_scan_cidr(&cidr)?;
+    if inner.scanning.swap(true, Ordering::SeqCst) {
+        return Err(invalid_arg("a scan is already in progress".into()));
+    }
+    let inner = inner.clone();
+    tokio::spawn(async move {
+        let report =
+            crate::net::scan::scan(inner.conns.clone(), net, lanmsg_proto::consts::SERVICE_PORT)
+                .await;
+        inner.scanning.store(false, Ordering::SeqCst);
+        let _ = inner.events.send(Event::ScanFinished {
+            cidr: net.to_string(),
+            probed: report.probed,
+            found: report.found,
+        });
+    });
+    Ok(Response::Ok)
+}
+
 /// ListInterfaces：列出本机非回环网卡及隧道类型。
 fn list_interfaces() -> Response {
     let value = crate::net::path::local_ifaces()
@@ -684,7 +708,10 @@ async fn set_settings(inner: &Inner, settings: SettingsDto) -> Result<Response, 
 
     let mut settings = settings;
     settings.device_name = crate::identity::validate_device_name(&settings.device_name)?;
+    // 单播通告目标先校验：非法则拒绝保存。
+    let unicast = crate::discovery::unicast::parse_unicast_targets(&settings.unicast_targets)?;
     crate::settings::save_settings(&inner.store, &settings)?;
+    inner.discovery.set_unicast_targets(unicast);
 
     // 设备名写入独立 setting。
     let old = inner

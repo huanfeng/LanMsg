@@ -200,3 +200,72 @@ async fn hostname_manual_peer_is_bound_after_peer_comes_online() {
     )
     .await;
 }
+
+/// ScanSubnet：非法网段同步拒绝；合法网段立即返回，扫描期间重复请求被拒，完成后发 ScanFinished。
+#[tokio::test]
+async fn scan_subnet_request_validates_and_reports_finish() {
+    let mut a = node(&MemoryBus::new()).await;
+    a.init_first("A").await;
+    for bad in ["10.0.0.0/8", "abc", "fd00::/120", "10.0.0.0/21"] {
+        let err = a
+            .try_call(Request::ScanSubnet { cidr: bad.into() })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad}");
+    }
+    // TEST-NET-1：探测会超时，扫描需要几秒，足够触发“重复请求”。
+    a.call(Request::ScanSubnet {
+        cidr: "192.0.2.0/24".into(),
+    })
+    .await;
+    let err = a
+        .try_call(Request::ScanSubnet {
+            cidr: "192.0.2.0/24".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    let ev = a
+        .wait_event(|e| matches!(e, Event::ScanFinished { .. }), 30)
+        .await;
+    let Event::ScanFinished {
+        cidr,
+        probed,
+        found,
+    } = ev
+    else {
+        unreachable!()
+    };
+    assert_eq!(cidr, "192.0.2.0/24");
+    assert_eq!(probed, 254);
+    assert_eq!(found, 0);
+}
+
+/// SetSettings 先校验单播目标：非法（过大网段、主机名）拒绝保存，合法保存。
+#[tokio::test]
+async fn set_settings_validates_unicast_targets() {
+    let a = node(&MemoryBus::new()).await;
+    a.init_first("A").await;
+    let Response::Settings { value } = a.call(Request::GetSettings).await else {
+        panic!("expected Settings");
+    };
+    for bad in ["10.0.0.0/16", "example.com", "fd00::/120"] {
+        let mut s = value.clone();
+        s.unicast_targets = vec![bad.into()];
+        let err = a
+            .try_call(Request::SetSettings { settings: s })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad}");
+    }
+    let mut ok = value.clone();
+    ok.unicast_targets = vec!["10.9.0.0/30".into(), "192.168.1.5:7000".into()];
+    a.call(Request::SetSettings {
+        settings: ok.clone(),
+    })
+    .await;
+    let Response::Settings { value: got } = a.call(Request::GetSettings).await else {
+        panic!("expected Settings");
+    };
+    assert_eq!(got.unicast_targets, ok.unicast_targets);
+}

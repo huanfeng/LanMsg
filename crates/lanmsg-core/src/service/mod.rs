@@ -93,6 +93,8 @@ pub(crate) struct Inner {
     pub(crate) manual_tasks: StdMutex<HashMap<String, tokio::task::AbortHandle>>,
     /// 最近一次发给各对端的地址簿指纹：内容未变则不重复推送。
     address_book_sent: StdMutex<HashMap<DeviceId, u64>>,
+    /// 网段扫描进行中标志：同一时刻只允许一个扫描。
+    pub(crate) scanning: std::sync::atomic::AtomicBool,
     /// 发现触发的在途拨号地址：同一地址拨号未结束时不重复发起。
     dialing: StdMutex<HashSet<SocketAddr>>,
     /// 受信对端的重连状态（任务登记、唤醒信号、尝试计数）。
@@ -252,6 +254,14 @@ impl Service {
         let (disc_tx, disc_rx) = mpsc::channel::<DiscoveryEvent>(64);
         let self_device = identity.read().unwrap().device_id();
         let discovery = Discovery::spawn(discovery, self_device, announce_rx, disc_tx);
+        // 用户配置的单播通告目标（解析失败的配置项在保存时已拒绝，这里兜底忽略）。
+        match crate::settings::load_settings(&store) {
+            Ok(st) => match crate::discovery::unicast::parse_unicast_targets(&st.unicast_targets) {
+                Ok(targets) => discovery.set_unicast_targets(targets),
+                Err(e) => tracing::warn!(error = %e, "ignoring invalid stored unicast targets"),
+            },
+            Err(e) => tracing::warn!(error = %e, "loading settings for unicast targets failed"),
+        }
 
         // 「我的设备」配对（P2 Task 7）。
         let discovered = Arc::new(DiscoveredTable::new());
@@ -296,6 +306,7 @@ impl Service {
             static_peers: StdMutex::new(HashSet::new()),
             manual_tasks: StdMutex::new(HashMap::new()),
             address_book_sent: StdMutex::new(HashMap::new()),
+            scanning: std::sync::atomic::AtomicBool::new(false),
             dialing: StdMutex::new(HashSet::new()),
             redial: redial::RedialState::new(),
         });

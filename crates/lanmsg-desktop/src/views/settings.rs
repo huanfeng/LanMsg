@@ -138,9 +138,11 @@ pub fn parse_targets(s: &str) -> Result<Vec<String>, String> {
         if line.is_empty() {
             continue;
         }
+        // 规则与 lanmsg-core 的 parse_unicast_targets 一致：IP、IP:端口（端口非 0）、
+        // 前缀不小于 /24 的 IPv4 网段（IPv6 网段不接受）。
         let ok = line.parse::<IpAddr>().is_ok()
-            || line.parse::<SocketAddr>().is_ok()
-            || line.parse::<IpNet>().is_ok();
+            || line.parse::<SocketAddr>().is_ok_and(|a| a.port() != 0)
+            || matches!(line.parse::<IpNet>(), Ok(IpNet::V4(n)) if n.prefix_len() >= 24);
         if !ok {
             return Err(strings::settings_target_invalid(i + 1, line));
         }
@@ -752,9 +754,9 @@ mod tests {
         assert_eq!(s.localsend_enabled, base.localsend_enabled);
         assert_eq!(s.unicast_targets, base.unicast_targets);
 
-        let n = network_dto(&base, false, "10.1.1.1\n10.2.0.0/16").expect("合法");
+        let n = network_dto(&base, false, "10.1.1.1\n10.2.0.0/24").expect("合法");
         assert!(!n.localsend_enabled);
-        assert_eq!(n.unicast_targets, vec!["10.1.1.1", "10.2.0.0/16"]);
+        assert_eq!(n.unicast_targets, vec!["10.1.1.1", "10.2.0.0/24"]);
         assert_eq!(n.download_dir, base.download_dir);
         assert_eq!(n.auto_file_max, base.auto_file_max);
         assert_eq!(n.device_name, base.device_name);
@@ -808,6 +810,10 @@ mod tests {
         );
         // 主机名不在允许范围内
         assert!(parse_targets("example.com").is_err());
+        // 与 core 的 parse_unicast_targets 同一套规则：网段不得小于 /24、不接受 IPv6 网段与端口 0。
+        assert!(parse_targets("10.0.0.0/16").is_err());
+        assert!(parse_targets("fd00::/120").is_err());
+        assert!(parse_targets("10.0.0.1:0").is_err());
     }
 
     #[test]

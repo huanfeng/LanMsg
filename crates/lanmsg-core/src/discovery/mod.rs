@@ -4,6 +4,7 @@
 
 pub mod memory;
 pub mod multicast;
+pub mod unicast;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -105,6 +106,8 @@ impl DiscoveredTable {
 /// 发现任务的句柄。
 pub struct Discovery {
     shutdown: Arc<Notify>,
+    /// 单播通告目标（仅组播模式生效）。
+    unicast: Arc<Mutex<Vec<SocketAddr>>>,
 }
 
 impl Discovery {
@@ -137,6 +140,7 @@ impl Discovery {
             }
             DiscoveryMode::Disabled => {} // 收发通道随即关闭，主循环直接退出
         }
+        let unicast = Arc::new(Mutex::new(Vec::new()));
         tokio::spawn(main_loop(
             self_device,
             announce_rx,
@@ -144,9 +148,16 @@ impl Discovery {
             inbox_rx,
             outbox_tx,
             via_multicast,
+            unicast.clone(),
             shutdown.clone(),
         ));
-        Discovery { shutdown }
+        Discovery { shutdown, unicast }
+    }
+
+    /// 设置单播通告目标：之后每次周期通告，除组播外还向每个目标单播同一份通告字节。
+    /// 内存总线与关闭模式下为空操作。
+    pub fn set_unicast_targets(&self, targets: Vec<SocketAddr>) {
+        *self.unicast.lock().unwrap_or_else(|e| e.into_inner()) = targets;
     }
 
     /// 请求发现任务停止；任务在下一个轮询点退出。
@@ -156,6 +167,7 @@ impl Discovery {
 }
 
 /// 发现主循环：通告发送（启动、值变化、周期）、包处理与回应。
+#[allow(clippy::too_many_arguments)] // 发现主循环的各通道与共享状态，拆开反而更绕。
 async fn main_loop(
     self_device: DeviceId,
     mut announce_rx: watch::Receiver<Option<Announce>>,
@@ -163,11 +175,17 @@ async fn main_loop(
     mut inbox_rx: mpsc::Receiver<(Vec<u8>, SocketAddr)>,
     outbox: mpsc::Sender<OutPkt>,
     via_multicast: bool,
+    unicast: Arc<Mutex<Vec<SocketAddr>>>,
     shutdown: Arc<Notify>,
 ) {
     // 启动时立即通告一次（值存在时）。
     if announce_rx.borrow_and_update().is_some() {
-        send_announce(&announce_rx, &outbox).await;
+        send_announce(
+            &announce_rx,
+            &outbox,
+            &current_targets(&unicast, via_multicast),
+        )
+        .await;
     }
     let mut ticker = interval_at(
         tokio::time::Instant::now() + ANNOUNCE_INTERVAL,
@@ -182,12 +200,12 @@ async fn main_loop(
                     break; // 所有 watch 发送端已关闭，任务退出
                 }
                 if announce_rx.borrow().is_some() {
-                    send_announce(&announce_rx, &outbox).await;
+                    send_announce(&announce_rx, &outbox, &current_targets(&unicast, via_multicast)).await;
                 }
             }
             _ = ticker.tick() => {
                 if announce_rx.borrow().is_some() {
-                    send_announce(&announce_rx, &outbox).await;
+                    send_announce(&announce_rx, &outbox, &current_targets(&unicast, via_multicast)).await;
                 }
             }
             pkt = inbox_rx.recv() => {
@@ -204,20 +222,41 @@ async fn main_loop(
     }
 }
 
-/// 当前通告存在时，以组播（`to: None`）发出一份自己的通告。
+/// 取当前单播目标（只有组播模式才发单播通告）。
+fn current_targets(unicast: &Mutex<Vec<SocketAddr>>, via_multicast: bool) -> Vec<SocketAddr> {
+    if via_multicast {
+        unicast.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    } else {
+        Vec::new()
+    }
+}
+
+/// 一次周期通告要发的包：一份组播，外加向每个单播目标发同一份字节。
+fn announce_packets(own: &Announce, targets: &[SocketAddr]) -> Vec<OutPkt> {
+    let bytes = to_cbor(own);
+    let mut pkts = vec![OutPkt {
+        bytes: bytes.clone(),
+        to: None,
+    }];
+    pkts.extend(targets.iter().map(|t| OutPkt {
+        bytes: bytes.clone(),
+        to: Some(*t),
+    }));
+    pkts
+}
+
+/// 当前通告存在时，以组播（`to: None`）并向单播目标发出一份自己的通告。
 async fn send_announce(
     announce_rx: &watch::Receiver<Option<Announce>>,
     outbox: &mpsc::Sender<OutPkt>,
+    targets: &[SocketAddr],
 ) {
     // 先把通告值 clone 出来，释放 watch::Ref（非 Send），再做 await。
     let own = announce_rx.borrow().as_ref().cloned();
     if let Some(own) = own {
-        let _ = outbox
-            .send(OutPkt {
-                bytes: to_cbor(&own),
-                to: None,
-            })
-            .await;
+        for pkt in announce_packets(&own, targets) {
+            let _ = outbox.send(pkt).await;
+        }
     }
 }
 
@@ -252,6 +291,9 @@ async fn on_packet(
         tracing::debug!(peer = %from, "received own announce, dropped");
         return;
     }
+    // 来自本机网段之外的包只能是单播（用户配置的跨网段目标及其回应），不算组播。
+    let via_multicast = via_multicast
+        && crate::net::path::on_local_subnet(from.ip(), &crate::net::path::cached_ifaces());
     if events
         .send(DiscoveryEvent {
             announce: ann.clone(),
@@ -413,5 +455,29 @@ mod tests {
             evt_b_tx,
         );
         expect_silent(&mut evt_b_rx, 500).await;
+    }
+
+    #[test]
+    fn announce_packets_add_unicast_per_target() {
+        let ann = test_announce("A", 7000);
+        let targets: Vec<SocketAddr> = vec![
+            "10.1.1.1:53320".parse().unwrap(),
+            "10.1.1.2:53320".parse().unwrap(),
+        ];
+        let pkts = announce_packets(&ann, &targets);
+        assert_eq!(pkts.len(), 3);
+        assert!(pkts[0].to.is_none());
+        assert_eq!(pkts[1].to, Some(targets[0]));
+        assert_eq!(pkts[2].to, Some(targets[1]));
+        assert!(pkts.iter().all(|p| p.bytes == to_cbor(&ann)));
+        // 无目标时只有组播一份。
+        assert_eq!(announce_packets(&ann, &[]).len(), 1);
+    }
+
+    #[test]
+    fn memory_mode_ignores_unicast_targets() {
+        let unicast = Mutex::new(vec!["10.1.1.1:53320".parse().unwrap()]);
+        assert!(current_targets(&unicast, false).is_empty());
+        assert_eq!(current_targets(&unicast, true).len(), 1);
     }
 }
