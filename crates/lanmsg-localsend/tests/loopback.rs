@@ -437,3 +437,114 @@ async fn body_exceeding_declared_size_is_rejected_and_cleaned() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(std::fs::read_dir(b.download_dir()).unwrap().count(), 0);
 }
+
+/// 接收方回 200（而不是 204）时，文字消息应作为文件内容上传。
+#[tokio::test]
+async fn send_text_falls_back_to_upload_when_receiver_returns_200() {
+    use axum::extract::{Query, State};
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    type Got = Arc<Mutex<Option<(HashMap<String, String>, Vec<u8>)>>>;
+    let got: Got = Arc::new(Mutex::new(None));
+    let app = Router::new()
+        .route(
+            "/api/localsend/v2/prepare-upload",
+            post(|Json(req): Json<PrepareUploadRequest>| async move {
+                let files = req
+                    .files
+                    .keys()
+                    .map(|k| (k.clone(), "tok".to_string()))
+                    .collect();
+                Json(PrepareUploadResponse {
+                    session_id: "s1".into(),
+                    files,
+                })
+            }),
+        )
+        .route(
+            "/api/localsend/v2/upload",
+            post(
+                |State(got): State<Got>,
+                 Query(q): Query<HashMap<String, String>>,
+                 body: axum::body::Bytes| async move {
+                    *got.lock().unwrap() = Some((q, body.to_vec()));
+                },
+            ),
+        )
+        .with_state(got.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let a = node(LsDecision::Accept).await;
+    let mut info = a.ls.info();
+    info.port = port;
+    info.protocol = lanmsg_localsend::LsProtocol::Http;
+    let peer = LsPeer {
+        info,
+        ip: "127.0.0.1".parse().unwrap(),
+    };
+    a.ls.send_text(&peer, "fallback 文字").await.unwrap();
+
+    let (q, body) = got.lock().unwrap().clone().expect("upload was not called");
+    assert_eq!(q["sessionId"], "s1");
+    assert_eq!(q["token"], "tok");
+    assert_eq!(body, "fallback 文字".as_bytes());
+}
+
+/// 多文件并发上传中途失败：发送方中止其余上传并发 /cancel，接收方不留 .part 与半成品。
+#[tokio::test]
+async fn multi_file_failure_aborts_cancels_and_cleans_part_files() {
+    let a = node(LsDecision::Accept).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let b = LocalSend::start(config(&dir, 0), tx).await.unwrap();
+    let b_peer = LsPeer {
+        info: b.info(),
+        ip: "127.0.0.1".parse().unwrap(),
+    };
+
+    let big = a.dir.path().join("a.bin");
+    let doomed = a.dir.path().join("b.bin");
+    std::fs::write(&big, vec![1u8; 48 * 1024 * 1024]).unwrap();
+    std::fs::write(&doomed, b"small").unwrap();
+
+    // 接收方在批准前删除第二个文件：发送方已算完哈希，上传时打开失败
+    let (fin_tx, mut fin_rx) = mpsc::unbounded_channel();
+    let doomed_c = doomed.clone();
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                LsEvent::IncomingFiles { reply, .. } => {
+                    std::fs::remove_file(&doomed_c).unwrap();
+                    let _ = reply.send(LsDecision::Accept);
+                }
+                LsEvent::SessionFinished { ok, error, .. } => {
+                    let _ = fin_tx.send((ok, error));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let (ptx, _prx) = mpsc::channel(1024);
+    let res = a.ls.send_files(&b_peer, &[big, doomed], ptx).await;
+    assert!(res.is_err(), "{res:?}");
+
+    let (ok, error) = tokio::time::timeout(Duration::from_secs(5), fin_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!ok);
+    assert_eq!(error.as_deref(), Some("cancelled by sender"));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("dl"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}

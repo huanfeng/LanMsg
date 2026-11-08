@@ -567,6 +567,10 @@ impl Drop for UploadGuard {
             }
         }
         if let Some(part) = self.part.take() {
+            // 先同步删一次（写盘线程已结束的常见情况），失败再交给后台重试
+            if std::fs::remove_file(&part).is_ok() {
+                return;
+            }
             // 写盘线程可能尚未释放文件（Windows 下删除会失败），放到阻塞线程里重试
             let remove = move || {
                 for _ in 0..20 {
