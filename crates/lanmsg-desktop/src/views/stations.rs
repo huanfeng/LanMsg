@@ -655,10 +655,10 @@ mod tests {
     fn expires_label_uses_local_month_day() {
         // 2026-03-05 23:30 UTC，东八区已是 3月6日
         let t = 1_772_753_400_000;
-        assert_eq!(expires_label(Some(t), 0).as_deref(), Some("· 3月5日 过期"));
+        assert_eq!(expires_label(Some(t), 0).as_deref(), Some("3月5日 过期"));
         assert_eq!(
             expires_label(Some(t), 8 * 3600).as_deref(),
-            Some("· 3月6日 过期")
+            Some("3月6日 过期")
         );
         assert_eq!(expires_label(None, 0), None);
     }

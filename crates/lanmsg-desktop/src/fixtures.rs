@@ -639,7 +639,19 @@ fn demo_station_items() -> Vec<StationItemView> {
     stale.unavailable = Some(true);
     let mut expiring = station_item("i6", "我的手机", 5, Some("取件码 6-2-1048"), None);
     expiring.expires_at = Some(real_now() + 2 * 86_400_000);
-    vec![pinned, expiring, image, video, offline, stale]
+    let downloading = station_item(
+        "i7",
+        "我的电脑",
+        40,
+        None,
+        Some(file_item(
+            "设计稿.zip",
+            "application/zip",
+            96_000_000,
+            BlobState::Downloading,
+        )),
+    );
+    vec![pinned, expiring, image, video, downloading, offline, stale]
 }
 
 pub fn demo_model(p: DemoPage) -> Model {
@@ -876,7 +888,7 @@ pub fn demo_model(p: DemoPage) -> Model {
                     host_device: "我的电脑".into(),
                     host_online: true,
                     is_local: true,
-                    item_count: 6,
+                    item_count: 7,
                 },
                 StationView {
                     station: "s2".into(),
@@ -889,6 +901,16 @@ pub fn demo_model(p: DemoPage) -> Model {
             ];
             m.current_station = Some("s1".into());
             m.station_items = demo_station_items();
+            // 下载中的条目：约 42%，3.1 MB/s
+            m.transfers.insert(
+                "hash-设计稿.zip".into(),
+                TransferInfo {
+                    hash: "hash-设计稿.zip".into(),
+                    done: 40_300_000,
+                    total: 96_000_000,
+                    bytes_per_sec: 3_250_000,
+                },
+            );
         }
     }
     m
