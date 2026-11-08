@@ -84,9 +84,14 @@ pub(crate) async fn resolve(key: &str) -> Result<SocketAddr, CoreError> {
     if let Ok(a) = key.parse::<SocketAddr>() {
         return Ok(a);
     }
-    tokio::net::lookup_host(key)
+    // IPv4 优先：监听端口默认绑定 IPv4，而 localhost 之类可能先解析出 ::1。
+    let mut found: Vec<SocketAddr> = tokio::net::lookup_host(key)
         .await
         .map_err(|_| CoreError::InvalidArgument(format!("cannot resolve address: {key}")))?
+        .collect();
+    found.sort_by_key(|a| a.is_ipv6());
+    found
+        .into_iter()
         .next()
         .ok_or_else(|| CoreError::InvalidArgument(format!("cannot resolve address: {key}")))
 }
@@ -113,7 +118,7 @@ pub(crate) fn start(inner: &Arc<Inner>, key: String, connected: bool) {
                 }
             }
         };
-        super::static_peer_task(task_inner, addr, connected).await;
+        super::static_peer_task(task_inner, addr, connected, Some(task_key)).await;
     });
     tasks.insert(key, handle.abort_handle());
 }

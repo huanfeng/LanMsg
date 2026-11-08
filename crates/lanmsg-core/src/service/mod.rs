@@ -518,6 +518,7 @@ async fn routing_task(
                 Some(ConnEvent::Down(device)) => {
                     sync_workers.remove(&device);
                     book_limiter.forget(&device);
+                    inner.address_book_sent.lock().unwrap().remove(&device);
                     inner.sync.on_peer_down(&device);
                     // 关系可能在连接期间才变成受信（刚加联系人），断开时补建重连任务。
                     redial::ensure_task(&inner, device);
@@ -977,13 +978,18 @@ impl Drop for DialingGuard {
 /// `connected`：调用方刚连上该地址，任务先等一个周期再拨，避免与刚建立的连接并发重复拨号。
 pub(crate) fn register_static_peer(inner: &Arc<Inner>, addr: SocketAddr, connected: bool) {
     if inner.static_peers.lock().unwrap().insert(addr) {
-        tokio::spawn(static_peer_task(inner.clone(), addr, connected));
+        tokio::spawn(static_peer_task(inner.clone(), addr, connected, None));
     }
 }
 
 /// 静态对端后台拨号：失败按 RETRY_MIN..RETRY_MAX 指数退避，连上后断开再重试。
 /// 退避睡眠与进行中的拨号都会被关停信号打断。
-async fn static_peer_task(inner: Arc<Inner>, addr: SocketAddr, connected: bool) {
+async fn static_peer_task(
+    inner: Arc<Inner>,
+    addr: SocketAddr,
+    connected: bool,
+    manual_key: Option<String>,
+) {
     let mut delay = RETRY_MIN;
     if connected && sleep_or_shutdown(&inner, RETRY_MIN).await {
         return;
@@ -994,7 +1000,13 @@ async fn static_peer_task(inner: Arc<Inner>, addr: SocketAddr, connected: bool) 
             _ = inner.conns.wait_shutdown() => return,
         };
         match result {
-            Ok(_) => {
+            Ok(device) => {
+                // 手动对端（尤其是主机名条目）按存储键绑定到连上的设备。
+                if let Some(key) = &manual_key {
+                    if let Err(e) = inner.store.bind_manual_peer(key, &device) {
+                        tracing::warn!(error = %e, "binding manual peer failed");
+                    }
+                }
                 delay = RETRY_MIN;
                 if sleep_or_shutdown(&inner, RETRY_MIN).await {
                     return;

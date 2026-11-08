@@ -39,7 +39,14 @@ async fn manual_peer_connects_and_is_remembered() {
 
 #[tokio::test]
 async fn address_book_lets_my_devices_find_contact() {
-    // 节点都在回环地址上：测试期间允许地址簿交换回环地址。
+    // 节点都在回环地址上：测试期间允许地址簿交换回环地址，结束时复位。
+    struct ResetLoopback;
+    impl Drop for ResetLoopback {
+        fn drop(&mut self) {
+            lanmsg_core::net::addrbook::allow_loopback_for_tests(false);
+        }
+    }
+    let _reset = ResetLoopback;
     lanmsg_core::net::addrbook::allow_loopback_for_tests(true);
     let bus1 = MemoryBus::new();
     let bus2 = MemoryBus::new();
@@ -135,4 +142,61 @@ async fn manual_peer_count_is_limited() {
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
+}
+
+/// 主机名条目离线添加（PeerOffline），对端之后上线：后台任务连上后按存储键绑定设备。
+#[tokio::test]
+async fn hostname_manual_peer_is_bound_after_peer_comes_online() {
+    use lanmsg_api::types::InitMode;
+    use lanmsg_core::discovery::DiscoveryMode;
+    use lanmsg_core::keystore::FileKeyStore;
+    use lanmsg_core::{Service, ServiceConfig};
+    use std::sync::Arc;
+
+    let a = node(&MemoryBus::new()).await;
+    a.init_first("A").await;
+    // 取一个空闲端口，先让它保持无人监听。
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let key = format!("localhost:{port}");
+    let err = a
+        .try_call(Request::AddManualPeer { addr: key.clone() })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PeerOffline);
+
+    // 对端之后在该端口上线。
+    let dir = tempfile::tempdir().unwrap();
+    let b = Service::start(ServiceConfig {
+        data_dir: dir.path().to_path_buf(),
+        listen_port: port,
+        discovery: DiscoveryMode::Disabled,
+        keystore: Arc::new(FileKeyStore::new(dir.path().join("keys"))),
+        static_peers: Vec::new(),
+        platform: PlatformHooks::default(),
+        localsend_port: 0,
+    })
+    .await
+    .unwrap();
+    b.handle(Request::Init {
+        display_name: "B".into(),
+        device_name: "B".into(),
+        mode: InitMode::FirstDevice,
+    })
+    .await
+    .unwrap();
+
+    common::wait_until(
+        || async {
+            matches!(
+                a.try_call(Request::ListManualPeers).await,
+                Ok(Response::ManualPeers { value })
+                    if value.len() == 1 && value[0].addr == key && value[0].device_id.is_some()
+            )
+        },
+        15,
+    )
+    .await;
 }

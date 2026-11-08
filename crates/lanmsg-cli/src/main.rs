@@ -63,6 +63,10 @@ enum Cmd {
     Watch,
     /// 手动添加对端地址并连接
     AddPeer { addr: String },
+    /// 删除手动添加的对端地址并停止重连
+    RemovePeer { addr: String },
+    /// 列出手动添加的对端地址及其已绑定的设备
+    ListManualPeers,
     /// 切换在线状态
     Status { state: String },
     /// 以新设备加入现有用户（需另一台已有设备发起 pair-start）
@@ -332,6 +336,33 @@ async fn main() -> Result<()> {
                 .map_err(api_err)?;
             match resp {
                 Response::Ok => println!("connected"),
+                other => println!("{other:?}"),
+            }
+        }
+        Cmd::RemovePeer { addr } => {
+            let resp = client
+                .call(Request::RemoveManualPeer { addr })
+                .await
+                .map_err(api_err)?;
+            match resp {
+                Response::Ok => println!("removed"),
+                other => println!("{other:?}"),
+            }
+        }
+        Cmd::ListManualPeers => {
+            let resp = client
+                .call(Request::ListManualPeers)
+                .await
+                .map_err(api_err)?;
+            match resp {
+                Response::ManualPeers { value } => {
+                    if value.is_empty() {
+                        println!("no manual peers");
+                    }
+                    for p in value {
+                        println!("{}\t{}", p.addr, p.device_id.as_deref().unwrap_or("-"));
+                    }
+                }
                 other => println!("{other:?}"),
             }
         }
