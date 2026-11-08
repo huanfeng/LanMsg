@@ -1,0 +1,27 @@
+[package]
+name = "lanmsg-localsend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+socket2 = { version = "0.5", features = ["all"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs"] }
+sha2 = "0.10"
+axum = "0.7"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+uuid = { version = "1", features = ["v4"] }
+mime_guess = "2"
+tokio-stream = "0.1"
+rustls = "0.23"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-no-provider", "json", "stream"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }

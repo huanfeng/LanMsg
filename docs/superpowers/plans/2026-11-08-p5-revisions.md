@@ -50,6 +50,10 @@
   - T10 的 `client.rs` 复用 T9 中构造宽松 TLS 客户端的函数，不要另建一个。`announce_enabled=false` 时不发通告、不 register，这条行为的测试在 T10 补上。
   - 已知限制：组播只加入默认网卡（discovery.rs `join_multicast_v4(.., UNSPECIFIED)`），联调时再决定是否按网卡逐个加入。
 - **T11**：对端指纹先统一转成小写，再入库、计算 `ConvId::localsend` 和设备 ID。新增设置项 `localsend_port`（默认 53317，用户询问后追加；端口被占用时的提示里指引用户改端口）。 `RequestView.preview` 用 `RequestPreviewView::Files{..}`；新增 PIN 系统事件变体（全局修订 4）；把 `ServiceConfig.localsend_port`（mod.rs:52、141）接入。
+  - 同一指纹可能在多个 IP 下有多条记录（`LocalSend::peers()` 键为 (ip, 指纹)）；桥不得按指纹取第一条。
+  - `trusted` 自动接受须同时核对：来源 IP 与该指纹上次记录的 IP 一致（`LsEvent` 的 `peer.ip`），并按 `classify` 过滤非 Lan 来源。
+  - 审批通过后若发送方收到 409（会话被占用）：界面按“对方忙”处理，不重复弹窗；`prepare-upload` 待审批名额有限（全局 8、每源 IP 1，超出 429）。
+  - `LocalSend::shutdown` 目前只停服务与发现，不清理进行中会话的 `.part`，也不发 `SessionFinished`；T11 接入开关时处理。
 - **T12（安全审阅后修订，已实现）**：
   - HKDF 输出 128 字节：`k_page | k_host | k_enc_p2h | k_enc_h2p`（各 32）。加密按方向分离：页面发往宿主用 `k_enc_p2h`，宿主发往页面用 `k_enc_h2p`，防反射。`SessionKeys` 提供 `seal_to_page` / `open_from_page`（宿主端）与 `seal_to_host` / `open_from_host`（页面侧、测试用），原 `k_enc`、`seal`、`open` 删除。`vectors.json` 的每种模式含 `k_enc_p2h`、`k_enc_h2p`、`sealed_p2h`、`sealed_h2p`。
   - `derive` 与 `host_respond` 返回 `Result<_, CoreError>`：X25519 共享密钥非贡献性（零点等低阶公钥）时返回 `InvalidArgument`。
@@ -57,7 +61,7 @@
   - `SessionKeys`、`WebSecrets` 实现 `ZeroizeOnDrop`，不再 `Clone`。
   - 配对码规范化 `normalize_code`：仅 ASCII 大写并去除空白。JS 侧必须做同样处理。
 - **T13（对 T12 的补充）**：`crypto.js` 的 `derive` 返回 `{kPage, kHost, kEncP2h, kEncH2p, th}`，页面发送用 `kEncP2h`、接收用 `kEncH2p`；JS 配对码输入只做 ASCII 大写与去空白，输入 `0`、`1`、`I`、`O` 时提示“配对码不含 0、1、I、O”（字母表 `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` 含 `L`，`L` 不得改写）。
-- **T14（对 T12 的补充）**：加密帧的明文头必须带 `seq`（u64，每个方向独立、严格递增，收到不大于已见值的帧一律拒绝，防重放）；文件分块帧另带 `file_id` 与 `chunk_idx`，并在认证范围内（放在明文头中随 secretbox 一起认证），防止分块被换位或跨文件替换。配对码确认失败走 `CodeGuard::record_failure`，成功走 `record_success`（只在 `verify_page_mac` 通过后调用；denied、超时不清零），达到上限时 `rotate_code`。
+- **T14（对 T12 的补充）**：加密帧的明文头必须带 `seq`（u64，每个方向独立；接收方按下方 T13 落地约定的滑动窗口拒绝已见值与过旧值，防重放）；文件分块帧另带 `file_id` 与 `chunk_idx`，并在认证范围内（放在明文头中随 secretbox 一起认证），防止分块被换位或跨文件替换。配对码确认失败走 `CodeGuard::record_failure`，成功走 `record_success`（只在 `verify_page_mac` 通过后调用；denied、超时不清零），达到上限时 `rotate_code`。
 - **T13（落地约定，供 T14 对齐，第 2 轮修订）**：
   - **seq**：页面到宿主的所有加密 JSON（WS 消息、`upload/init`、请求头）与分块都带页面侧唯一递增的 `seq`，重试也换新 `seq`。宿主到页面的所有加密 JSON 与分块也带 `seq`，是**会话级单调计数器**（WS 帧与 HTTP 加密响应共用，不随 WS 重连重置）。两个方向的接收方都用“拒绝已见值与过旧值”的滑动窗口（窗口 4096，`crypto.js` 的 `newSeqWindow`），而不是严格连续，因为并发请求与 WS 会交错到达。
   - **分块明文**：`seq(u64 BE) || fid_len(u8) || fid(ASCII) || chunk_idx(u32 BE) || data`，下载响应同格式（页面校验 fid、idx 与 seq）。

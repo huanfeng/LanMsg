@@ -21,7 +21,7 @@ socket2 = { version = "0.5", features = ["all"] }
 if-addrs = "0.13"
 rustls = "0.23"
 tokio-rustls = "0.26"
-rcgen = "0.13"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs"] }
 x509-parser = "0.16"
 ipnet = "2"
 time = "0.3"

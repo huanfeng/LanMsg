@@ -21,6 +21,11 @@ use crate::error::CoreError;
 use lanmsg_proto::ids::DeviceId;
 use lanmsg_proto::sign::DeviceKey;
 
+/// 显式使用 aws-lc-rs，不依赖进程级默认 provider（同一进程里可能还有别的 rustls 使用者）。
+fn provider() -> CryptoProvider {
+    rustls::crypto::aws_lc_rs::default_provider()
+}
+
 /// SNI 固定值。
 pub const TLS_SNI: &str = "lanmsg";
 
@@ -98,8 +103,7 @@ impl ServerClientCertVerifier for AnyClientCertVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        let provider = CryptoProvider::get_default()
-            .ok_or_else(|| TlsError::General("no signature verification provider".into()))?;
+        let provider = provider();
         verify_tls13_signature(
             message,
             cert,
@@ -164,8 +168,7 @@ impl ClientServerCertVerifier for AnyServerCertVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TlsError> {
-        let provider = CryptoProvider::get_default()
-            .ok_or_else(|| TlsError::General("no signature verification provider".into()))?;
+        let provider = provider();
         verify_tls13_signature(
             message,
             cert,
@@ -194,26 +197,28 @@ pub fn make_tls_configs_expecting(
 ) -> Result<(Arc<rustls::ServerConfig>, Arc<rustls::ClientConfig>), CoreError> {
     let (cert_der, key_der) = build_self_signed_cert(device)?;
 
-    let server_config =
-        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .with_client_cert_verifier(Arc::new(AnyClientCertVerifier))
-            .with_single_cert(
-                vec![CertificateDer::from(cert_der.clone())],
-                PrivateKeyDer::try_from(key_der.clone())
-                    .map_err(|e| CoreError::Tls(format!("invalid private key format: {e}")))?,
-            )
-            .map_err(|e| CoreError::Tls(format!("failed to build server config: {e}")))?;
+    let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| CoreError::Tls(format!("unsupported TLS versions: {e}")))?
+        .with_client_cert_verifier(Arc::new(AnyClientCertVerifier))
+        .with_single_cert(
+            vec![CertificateDer::from(cert_der.clone())],
+            PrivateKeyDer::try_from(key_der.clone())
+                .map_err(|e| CoreError::Tls(format!("invalid private key format: {e}")))?,
+        )
+        .map_err(|e| CoreError::Tls(format!("failed to build server config: {e}")))?;
 
-    let client_config =
-        rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AnyServerCertVerifier { expect }))
-            .with_client_auth_cert(
-                vec![CertificateDer::from(cert_der)],
-                PrivateKeyDer::try_from(key_der)
-                    .map_err(|e| CoreError::Tls(format!("invalid private key format: {e}")))?,
-            )
-            .map_err(|e| CoreError::Tls(format!("failed to build client config: {e}")))?;
+    let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| CoreError::Tls(format!("unsupported TLS versions: {e}")))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AnyServerCertVerifier { expect }))
+        .with_client_auth_cert(
+            vec![CertificateDer::from(cert_der)],
+            PrivateKeyDer::try_from(key_der)
+                .map_err(|e| CoreError::Tls(format!("invalid private key format: {e}")))?,
+        )
+        .map_err(|e| CoreError::Tls(format!("failed to build client config: {e}")))?;
 
     Ok((Arc::new(server_config), Arc::new(client_config)))
 }
@@ -347,16 +352,17 @@ mod tests {
     ) -> (bool, bool) {
         let (cert_der, key_der) = build_self_signed_cert(server_device).unwrap();
         let got = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let server_config =
-            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                .with_client_cert_verifier(Arc::new(RecordingClientVerifier {
-                    got_client_cert: got.clone(),
-                }))
-                .with_single_cert(
-                    vec![CertificateDer::from(cert_der)],
-                    PrivateKeyDer::try_from(key_der).unwrap(),
-                )
-                .unwrap();
+        let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(Arc::new(RecordingClientVerifier {
+                got_client_cert: got.clone(),
+            }))
+            .with_single_cert(
+                vec![CertificateDer::from(cert_der)],
+                PrivateKeyDer::try_from(key_der).unwrap(),
+            )
+            .unwrap();
         let (_, client_config) = make_tls_configs_expecting(client_device, expect).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
