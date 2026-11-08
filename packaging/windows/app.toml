@@ -1,0 +1,69 @@
+# wind-installer 清单模板。build-dist.ps1 替换 @VERSION@ / @ARCH@ 后生成临时清单再打包。
+# 字段含义见 wind-installer 仓库的 app.toml 与 README。
+# 暂不声明 url_protocol = "lanmsg"：桌面端尚未处理 lanmsg:// 参数（与 Linux/macOS 一致，见 P5 修订附录 T19）。
+
+[app]
+id                = "LanMsg"
+display_name      = "LanMsg"
+version           = "@VERSION@"
+publisher         = "LanMsg"
+description       = "局域网聊天式文件互传"
+main_exe          = "lanmsg.exe"
+setting_exe       = "lanmsg.exe"
+start_menu_folder = "LanMsg"
+process_names     = ["lanmsg", "lanmsgd", "lanmsg-thumb"]
+
+[theme]
+accent = "#2F7BF6"
+
+[paths]
+install  = '%ProgramFiles%\{id}'
+portable = '%USERPROFILE%\{id}'
+data     = '%APPDATA%\{id}'
+
+[autostart]
+exe = "lanmsgd.exe"
+
+[[shortcut]]
+target   = "lanmsg.exe"
+name     = "LanMsg"
+location = "start_menu"
+
+[[shortcut]]
+target   = "lanmsg.exe"
+name     = "LanMsg"
+location = "desktop"
+
+# 依赖 Task 7 实现的 --station-put 参数
+[[shortcut]]
+target   = "lanmsg.exe"
+name     = "LanMsg 中转站"
+location = "sendto"
+args     = "--station-put"
+
+[[shortcut]]
+target   = "uninstall.exe"
+name     = "卸载 LanMsg"
+location = "start_menu"
+
+[[firewall]]
+name     = "LanMsg"
+program  = "lanmsgd.exe"
+protocol = "any"
+profiles = ["private", "domain"]
+
+[startup]
+prestart = true
+exe      = "lanmsgd.exe"
+
+[localdata]
+cache_dirs            = ["cache", "logs"]
+remove_dir_when_empty = true
+
+[package]
+compression = "lzma"
+source_dir  = "../../target/dist/windows-@ARCH@"
+output_name = "lanmsg-windows-@ARCH@-setup"
+output_dir  = "../../target/dist"
+logo        = "../assets/lanmsg-256.png"
+icon        = "../../crates/lanmsg-desktop/assets/lanmsg.ico"
