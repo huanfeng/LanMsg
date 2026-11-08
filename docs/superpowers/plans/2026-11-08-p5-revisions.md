@@ -38,6 +38,7 @@
   - 手动对端主机名解析优先 IPv4，解析出的多个地址逐个尝试、失败回退下一个（每轮重连重新解析）。
 - **T3B（新增）：NAT 下数据通道反向建立**。问题：`open_data` 固定向 `peer.dial_addr` 拨号（manager.rs:430），对端在 NAT 或端口转发后面、只能由它连进来时，文件传输失败。
   - 实施补充：反向数据连接使用新的通道字节 `CHANNEL_DATA_DIAL_BACK = 0x03`（DataHello 之后紧跟 `DataFrame::DialBack`，类型号 7），原因是普通数据连接在 DataHello 之后直接进入请求/应答，接受方无法预读下一帧来区分；令牌设备不符时不消耗令牌；拨回只拨对端自己的监听地址，不会被诱导去连第三方；测试钩子 `override_dial_addr_for_test` 模拟直拨不通。
+  - 限制与提示：被请求方每设备并发 4、10 秒内 16 次、全局并发 32，超出丢弃（不回拒绝帧，避免新帧）；一个 Blob 下载最多 1 条元数据连接 + 4 条工作者连接，多文件并发下载经 NAT 对端时可能触及限制，由下载重试兜底。请求方最坏要 3 秒直拨超时 + 10 秒等待共约 13 秒才报 `PeerOffline`——T7/T15 界面任务注意：连接中状态期间不要显示失败。频率记录在对端 Down 后保留一个窗口。
   - 新帧 `Frame::DataDialBack { token: [u8; 16] }`，`TYPE_DATA_DIAL_BACK = 44`。
   - 新数据帧 `DataFrame::DialBack { token }`，在 `DataHello` 之后发送。
   - `open_data`：直拨失败（连接错误，或 3 秒超时）时，生成随机 token，登记一个 oneshot 等待者，经控制连接发出 `DataDialBack`，最多等 10 秒，超时返回 `PeerOffline`。

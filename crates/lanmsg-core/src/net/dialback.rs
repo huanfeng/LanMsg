@@ -25,7 +25,7 @@ const MAX_INFLIGHT_PER_DEVICE: usize = 4;
 const MAX_INFLIGHT_GLOBAL: usize = 32;
 /// 每个对端的拨回频率限制：窗口内最多次数。
 const RATE_WINDOW: Duration = Duration::from_secs(10);
-const RATE_MAX: usize = 8;
+const RATE_MAX: usize = 16;
 /// 同类日志的最小间隔（限速，避免刷屏）。
 const LOG_INTERVAL: Duration = Duration::from_secs(10);
 /// 记录“来源 IP → 上次日志时间”的条目上限。
@@ -95,6 +95,13 @@ impl DialBackLimiter {
         now: Instant,
     ) -> Option<DialBackPermit> {
         let mut st = lock(&self.state);
+        // 清扫：没有并发且频率窗口已过的设备记录。
+        st.per.retain(|_, d| {
+            d.inflight > 0
+                || d.recent
+                    .back()
+                    .is_some_and(|t| now.duration_since(*t) < RATE_WINDOW)
+        });
         if st.global >= MAX_INFLIGHT_GLOBAL {
             return None;
         }
@@ -131,14 +138,18 @@ impl DialBackLimiter {
         true
     }
 
-    /// 对端断开：清掉它的频率记录（仍在进行的拨回照常释放名额）。
-    pub(crate) fn forget(&self, device: &DeviceId) {
+    /// 对端断开：频率记录保留到窗口结束（防止断线重连绕过限速），由 `try_acquire`
+    /// 的清扫在窗口过后回收；这里只回收已经没有并发且窗口已过的记录。
+    pub(crate) fn forget(&self, device: &DeviceId, now: Instant) {
         let mut st = lock(&self.state);
-        if let Some(d) = st.per.get_mut(device) {
-            d.recent.clear();
-            if d.inflight == 0 {
-                st.per.remove(device);
-            }
+        let expired = st.per.get(device).is_some_and(|d| {
+            d.inflight == 0
+                && d.recent
+                    .back()
+                    .is_none_or(|t| now.duration_since(*t) >= RATE_WINDOW)
+        });
+        if expired {
+            st.per.remove(device);
         }
     }
 }
@@ -307,13 +318,15 @@ mod tests {
             l.try_acquire(d, t0 + RATE_WINDOW).is_some(),
             "window slides"
         );
-        // 断开后清理频率记录。
+        // 断开后频率记录保留到窗口结束，不能借断线重连绕过限速。
         let l2 = Arc::new(DialBackLimiter::default());
         for _ in 0..RATE_MAX {
             drop(l2.try_acquire(d, t0).unwrap());
         }
-        l2.forget(&d);
-        assert!(l2.try_acquire(d, t0).is_some());
+        l2.forget(&d, t0);
+        assert!(l2.try_acquire(d, t0).is_none());
+        l2.forget(&d, t0 + RATE_WINDOW);
+        assert!(l2.try_acquire(d, t0 + RATE_WINDOW).is_some());
     }
 
     #[test]

@@ -619,7 +619,10 @@ impl ConnManager {
 
     /// 对端断开：清理它的拨回限速状态。
     pub(crate) fn forget_dial_back(&self, device: &DeviceId) {
-        self.read_inner().dial_back.limiter.forget(device);
+        self.read_inner()
+            .dial_back
+            .limiter
+            .forget(device, std::time::Instant::now());
     }
 
     /// 直拨地址：生产环境即对端的 dial_addr；测试钩子可覆盖以模拟直拨不通。
@@ -1608,7 +1611,7 @@ mod tests {
         let (mgr_a, mgr_b, dev_a, _dev_b) = connected_pair().await;
         let mut dialed = 0;
         let mut dropped = 0;
-        for _ in 0..20 {
+        for _ in 0..40 {
             match mgr_b.serve_dial_back(&dev_a, [0u8; 16]).await {
                 // 已拨号：A 因令牌未知关闭连接，B 端因未设置处理器返回此错误。
                 Err(CoreError::Rejected(m)) if m == "data channel not enabled" => dialed += 1,
@@ -1616,8 +1619,8 @@ mod tests {
                 other => panic!("unexpected result: {other:?}"),
             }
         }
-        assert_eq!(dialed, 8, "only 8 requests per window may dial");
-        assert_eq!(dropped, 12);
+        assert_eq!(dialed, 16, "only 16 requests per window may dial");
+        assert_eq!(dropped, 24);
         let _ = mgr_a;
     }
 }
