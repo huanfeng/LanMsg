@@ -13,6 +13,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: [p5-ci]  # TEMP: dry-run verification before the workflow exists on main
   workflow_dispatch:
     inputs:
       dry_run:
