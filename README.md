@@ -4,6 +4,17 @@
 
 ## 安装与启动
 
+### 从发布包安装
+
+发布页：<https://github.com/huanfeng/lanmsg/releases>（资产名不含版本号，校验和见 `SHA256SUMS`）。
+
+- Linux（桌面版或 NAS 无头版）：`curl -fsSL https://github.com/huanfeng/lanmsg/releases/latest/download/install.sh | sh`
+- Windows：运行 `lanmsg-windows-x64-setup.exe`（ARM64 机器用 `lanmsg-windows-arm64-setup.exe`），或使用 scoop：`scoop bucket add lanmsg https://github.com/huanfeng/lanmsg` 后 `scoop install lanmsg`
+- macOS：打开 `lanmsg-macos-universal.dmg`（未签名，首次打开需在“系统设置 → 隐私与安全性”中放行）
+- Android：安装 `lanmsg-android.apk`
+
+仓库保持私有期间匿名无法下载发布资产，上述方式需要公开后才能使用。
+
 ### 构建
 
 ```sh
@@ -60,3 +71,19 @@ Windows 下文件名带 `.exe`。
 ```sh
 python3 scripts/check-no-cjk.py
 ```
+
+### 依赖与联调
+
+- `windui` 以 git tag 方式依赖（`https://github.com/huanfeng/wind-ui-rust`，见 `crates/lanmsg-desktop/Cargo.toml` 与 `crates/lanmsgd/Cargo.toml`）。需要联调本地的 windui 时，不要改 `Cargo.toml` 也不要提交 `[patch]`，用 `--config` 临时覆盖（该命令会改动 `Cargo.lock`，提交前请 `git checkout Cargo.lock`）：
+
+```sh
+cargo --config 'patch."https://github.com/huanfeng/wind-ui-rust".windui.path="/绝对路径/wind-ui-rust"' build -p lanmsg-desktop
+```
+
+### 版本与发布
+
+- 版本号只有一个来源：根 `Cargo.toml` 的 `[workspace.package].version`。Android 的 `versionName` 与 `versionCode`（`major*10000 + minor*100 + patch`）由 `android/app/build.gradle.kts` 解析该文件得到，不要手写。
+- 升版本：`scripts/bump-version.sh <x.y.z>`（同步 `Cargo.toml`、`Cargo.lock`，并把 `CHANGELOG.md` 的 `[Unreleased]` 归入新版本）。提交后推送 `v<x.y.z>` tag，`release.yml` 构建全部安装包、生成 `SHA256SUMS`、创建 GitHub Release（说明取自 `CHANGELOG.md` 对应小节）并把 `bucket/lanmsg.json` 提交回 `main`。
+- `release.yml` 也可手动触发（`workflow_dispatch`，`dry_run` 默认为 true）：只构建、不发布。
+- Android 正式签名使用仓库 Secrets `ANDROID_SIGNING_KEYSTORE_BASE64`、`ANDROID_SIGNING_STORE_PASSWORD`、`ANDROID_SIGNING_KEY_ALIAS`、`ANDROID_SIGNING_KEY_PASSWORD`；本地签名见 `docs/android-build.md`。
+- 提交前的打包检查：`bash scripts/check-packaging.sh --fast`。

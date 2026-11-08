@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2016  # 工作流检查里的 ${{ }} 与 $arch 都是字面量
 # 打包相关的静态与可在 Linux 上跑的检查（CI ubuntu 运行）。
 # 用法：bash scripts/check-packaging.sh [--fast]   --fast 跳过耗时的 Linux 安装端到端测试
 set -euo pipefail
@@ -14,7 +15,27 @@ fast=0
 [ "${1:-}" = "--fast" ] && fast=1
 
 echo "== shellcheck"
-shellcheck packaging/linux/*.sh packaging/macos/*.sh packaging/scoop/*.sh scripts/check-packaging.sh
+shellcheck packaging/linux/*.sh packaging/macos/*.sh packaging/scoop/*.sh scripts/check-packaging.sh scripts/bump-version.sh scripts/changelog-section.sh
+
+echo "== workflows"
+if command -v actionlint >/dev/null 2>&1; then
+    actionlint .github/workflows/*.yml
+else
+    echo "actionlint not found; skipping workflow lint"
+fi
+# 发布资产名必须同时出现在 release.yml 与引用它们的脚本/模板中
+for name in lanmsg-windows-x64.zip lanmsg-windows-arm64.zip; do
+    grep -q "$name" packaging/scoop/lanmsg.json || fail "scoop template lacks $name"
+    grep -q "$name" packaging/scoop/update-manifest.sh || fail "update-manifest.sh lacks $name"
+done
+grep -qF 'lanmsg-windows-${{ matrix.arch }}.zip' .github/workflows/release.yml || fail "release.yml does not publish lanmsg-windows-<arch>.zip"
+grep -qF 'lanmsg-windows-${{ matrix.arch }}-setup.exe' .github/workflows/release.yml || fail "release.yml does not publish the windows setup"
+grep -qF 'lanmsg-linux-$arch.tar.gz' packaging/linux/install.sh || fail "install.sh does not use lanmsg-linux-<arch>.tar.gz"
+grep -qF 'lanmsgd-linux-$arch-musl.tar.gz' packaging/linux/install.sh || fail "install.sh does not use lanmsgd-linux-<arch>-musl.tar.gz"
+grep -qF 'lanmsg-linux-${{ matrix.arch }}.tar.gz' .github/workflows/release.yml || fail "release.yml does not publish lanmsg-linux-<arch>.tar.gz"
+grep -qF 'lanmsgd-linux-${{ matrix.arch }}-musl.tar.gz' .github/workflows/release.yml || fail "release.yml does not publish lanmsgd-linux-<arch>-musl.tar.gz"
+grep -qF 'lanmsg-macos-universal.dmg' .github/workflows/release.yml || fail "release.yml does not publish the dmg"
+grep -qF 'lanmsg-macos-universal.dmg' packaging/macos/build-dmg.sh || fail "build-dmg.sh does not produce lanmsg-macos-universal.dmg"
 
 echo "== windows app.toml"
 for arch in x64 arm64; do
