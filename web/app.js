@@ -312,7 +312,7 @@
     var lastErr = null;
     for (var attempt = 0; attempt < 3; attempt++) {
       try {
-        var r = await secureFetch("GET", "/api/web/download/" + fid + "/" + idx, null, { fid: fid, idx: idx });
+        var r = await secureFetch("GET", "/api/web/download/" + fid + "/" + idx, null, { op: "download", fid: fid, idx: idx });
         if (!r.ok) throw new Error("status " + r.status);
         var pt = keys && C.open(keys.kEncH2p, new Uint8Array(await r.arrayBuffer()));
         var p = pt && C.parseChunk(pt);
@@ -405,7 +405,7 @@
           }
         };
         await Promise.all([worker(), worker(), worker()]);
-        r = await secureFetch("POST", "/api/web/upload/" + init.fid + "/finish", null, { fid: init.fid });
+        r = await secureFetch("POST", "/api/web/upload/" + init.fid + "/finish", null, { op: "finish", fid: init.fid });
         if (r.ok) {
           var done = openJson(new Uint8Array(await r.arrayBuffer()));
           if (!done || done.fid !== init.fid) throw new Error("bad finish");

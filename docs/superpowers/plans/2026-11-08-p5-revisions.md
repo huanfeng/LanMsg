@@ -60,7 +60,9 @@
 - **T13（落地约定，供 T14 对齐，第 2 轮修订）**：
   - **seq**：页面到宿主的所有加密 JSON（WS 消息、`upload/init`、请求头）与分块都带页面侧唯一递增的 `seq`，重试也换新 `seq`。宿主到页面的所有加密 JSON 与分块也带 `seq`，是**会话级单调计数器**（WS 帧与 HTTP 加密响应共用，不随 WS 重连重置）。两个方向的接收方都用“拒绝已见值与过旧值”的滑动窗口（窗口 4096，`crypto.js` 的 `newSeqWindow`），而不是严格连续，因为并发请求与 WS 会交错到达。
   - **分块明文**：`seq(u64 BE) || fid_len(u8) || fid(ASCII) || chunk_idx(u32 BE) || data`，下载响应同格式（页面校验 fid、idx 与 seq）。
-  - **请求认证头**：`finish` 与 `download` 带 `X-LanMsg-Req: b64u(seal(k_enc_p2h, JSON{seq, fid[, idx]}))`，宿主校验 fid、idx 与路径一致且 `seq` 未重放。
+  - **请求认证头**：`finish` 与 `download` 带 `X-LanMsg-Req: b64u(seal(k_enc_p2h, JSON{op, seq, fid[, idx]}))`，`op` 为 `"finish"` 或 `"download"`；宿主校验 `op` 与请求路径一致、fid（及 idx）与路径一致且 `seq` 未重放。`PUT` 分块明文中的 fid 与 chunk_idx 同样必须与 URL 路径一致，不一致拒绝。
+  - **seq 计数器**：从 1 开始，保持在 2^53 以内（JS 安全整数）；超限则结束会话。宿主重试下载同一分块时必须重新封包、分配新 seq，不得缓存密文。
+  - **T14 测试要求**：断言 HTTP 响应头含 CSP（含 `frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
   - **响应回显**：`upload/init` 响应（密封 JSON）回显 `client_key`；`finish` 响应（成功与 409）回显 `fid`；页面校验不符即失败。
   - **页面安全头（T14 在 HTTP 响应头发出）**：`Content-Security-Policy: default-src 'self'; connect-src 'self'; img-src 'self' blob:; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`（`frame-ancestors` 不能放 meta，只能放响应头）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
   - 页面读出 `#k=` 后立刻 `history.replaceState` 清除地址栏片段；会话结束时清零并丢弃密钥。
