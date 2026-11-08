@@ -1,8 +1,9 @@
 //! LocalSend 组播发现：收发 UDP 通告，并对 `announce: true` 的通告走 HTTP register 回复。
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
@@ -14,6 +15,9 @@ use crate::{LsError, LOCALSEND_MCAST};
 
 /// 周期性通告间隔。
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// 同一 (ip, 指纹) 的 register 去重窗口。
+const REGISTER_DEDUP: Duration = Duration::from_secs(30);
 
 /// 发现事件。
 #[derive(Debug, Clone)]
@@ -95,17 +99,15 @@ pub fn spawn(
 ) -> Result<LsDiscovery, LsError> {
     let sock = Arc::new(bind_socket(mcast_port)?);
     let task = tokio::spawn(async move {
-        let client = match reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .timeout(Duration::from_secs(5))
-            .build()
-        {
+        let client = match lenient_client() {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("localsend http client build failed: {e}");
                 return;
             }
         };
+        // (ip, fingerprint) -> 上次发起 register 的时间，30 秒内不重复
+        let mut recent: HashMap<(IpAddr, String), Instant> = HashMap::new();
         let mut tick = tokio::time::interval(ANNOUNCE_INTERVAL);
         let mut buf = vec![0u8; 4096];
         loop {
@@ -129,11 +131,17 @@ pub fn spawn(
                     if events.send(LsPeerEvent::Seen(peer.clone())).await.is_err() {
                         return;
                     }
-                    if wants_reply && announce_enabled {
+                    let now = Instant::now();
+                    recent.retain(|_, t| now.duration_since(*t) < REGISTER_DEDUP);
+                    let fresh = recent
+                        .insert((peer.ip, peer.info.fingerprint.clone()), now)
+                        .is_none();
+                    if wants_reply && announce_enabled && fresh {
                         let (client, me, sock, events) = (client.clone(), me.clone(), sock.clone(), events.clone());
                         tokio::spawn(async move {
                             match register_reply(&client, &me, &peer).await {
                                 Ok(info) => {
+                                    // 接收端已关闭说明发现被停用，忽略发送失败
                                     let _ = events.send(LsPeerEvent::Seen(LsPeer { info, ip: peer.ip })).await;
                                 }
                                 Err(e) => {
@@ -150,20 +158,36 @@ pub fn spawn(
     Ok(LsDiscovery { task })
 }
 
+/// 构造访问 LocalSend 对端用的 HTTP 客户端。
+///
+/// LocalSend 的 HTTPS 使用各设备自签证书，身份靠指纹在首次使用时记住（TOFU），
+/// 而不是 CA 链，所以这里不校验证书链。
+pub fn lenient_client() -> Result<reqwest::Client, LsError> {
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| LsError::Http(e.to_string()))
+}
+
+/// 对端 register 接口的 URL，scheme 跟随对端通告的协议。
+pub(crate) fn register_url(peer: &LsPeer) -> String {
+    let scheme = match peer.info.protocol {
+        crate::LsProtocol::Http => "http",
+        crate::LsProtocol::Https => "https",
+    };
+    let addr = SocketAddr::new(peer.ip, peer.info.port);
+    format!("{scheme}://{addr}/api/localsend/v2/register")
+}
+
 /// 向对端 `POST /api/localsend/v2/register`，返回对端信息。
 pub async fn register_reply(
     client: &reqwest::Client,
     me: &LsInfo,
     peer: &LsPeer,
 ) -> Result<LsInfo, LsError> {
-    let scheme = match peer.info.protocol {
-        crate::LsProtocol::Http => "http",
-        crate::LsProtocol::Https => "https",
-    };
-    let addr = SocketAddr::new(peer.ip, peer.info.port);
-    let url = format!("{scheme}://{addr}/api/localsend/v2/register");
     let resp = client
-        .post(url)
+        .post(register_url(peer))
         .json(me)
         .send()
         .await
@@ -207,5 +231,119 @@ mod tests {
     fn parse_datagram_rejects_garbage() {
         let ip: IpAddr = "192.168.1.5".parse().unwrap();
         assert!(parse_datagram(b"not json", ip, "me").is_none());
+    }
+
+    fn info(protocol: crate::LsProtocol, port: u16) -> LsInfo {
+        LsInfo {
+            alias: "peer".into(),
+            version: "2.0".into(),
+            device_model: None,
+            device_type: None,
+            fingerprint: "fp".into(),
+            port,
+            protocol,
+            download: false,
+        }
+    }
+
+    #[test]
+    fn register_url_follows_protocol_and_port() {
+        let p = LsPeer {
+            info: info(crate::LsProtocol::Https, 12345),
+            ip: "192.168.1.9".parse().unwrap(),
+        };
+        assert_eq!(
+            register_url(&p),
+            "https://192.168.1.9:12345/api/localsend/v2/register"
+        );
+        let p = LsPeer {
+            info: info(crate::LsProtocol::Http, 53317),
+            ip: "::1".parse().unwrap(),
+        };
+        assert_eq!(
+            register_url(&p),
+            "http://[::1]:53317/api/localsend/v2/register"
+        );
+    }
+
+    /// 起一个只回一次固定响应的假 HTTP 服务，返回端口与收到的请求文本。
+    async fn fake_server(response: String) -> (u16, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                let n = s.read(&mut tmp).await.unwrap();
+                buf.extend_from_slice(&tmp[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(pos) = text.find("\r\n\r\n") {
+                    let len = text[..pos]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= pos + 4 + len {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            s.write_all(response.as_bytes()).await.unwrap();
+            s.shutdown().await.ok();
+            String::from_utf8_lossy(&buf).to_string()
+        });
+        (port, h)
+    }
+
+    #[tokio::test]
+    async fn register_reply_returns_peer_info_on_200() {
+        let body = r#"{"alias":"remote","version":"2.0","fingerprint":"rfp","port":53317,"protocol":"http"}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (port, h) = fake_server(resp).await;
+        let peer = LsPeer {
+            info: info(crate::LsProtocol::Http, port),
+            ip: "127.0.0.1".parse().unwrap(),
+        };
+        let got = register_reply(
+            &lenient_client().unwrap(),
+            &info(crate::LsProtocol::Http, 1),
+            &peer,
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.alias, "remote");
+        let req = h.await.unwrap();
+        assert!(req.starts_with("POST /api/localsend/v2/register"));
+        assert!(req.contains("\"alias\":\"peer\""));
+    }
+
+    #[tokio::test]
+    async fn register_reply_maps_4xx_to_status_error() {
+        let resp =
+            "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string();
+        let (port, _h) = fake_server(resp).await;
+        let peer = LsPeer {
+            info: info(crate::LsProtocol::Http, port),
+            ip: "127.0.0.1".parse().unwrap(),
+        };
+        let err = register_reply(
+            &lenient_client().unwrap(),
+            &info(crate::LsProtocol::Http, 1),
+            &peer,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LsError::Status(403)));
     }
 }
