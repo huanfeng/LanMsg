@@ -112,11 +112,11 @@ Write-Step "Built $zip"
 
 # --- temporary manifest next to app.toml (relative paths in it resolve from there) ---
 $manifest = Join-Path $PSScriptRoot "app.generated.toml"
-(Get-Content (Join-Path $PSScriptRoot "app.toml") -Raw).Replace("@VERSION@", $Version).Replace("@ARCH@", $Arch) |
-    Set-Content -Encoding UTF8 -NoNewline $manifest
-
 $uninstallDest = Join-Path $Stage "uninstall.exe"
 try {
+    # Windows PowerShell 5.1 needs explicit UTF-8 in and BOM-less UTF-8 out (the manifest has CJK text).
+    $text = (Get-Content (Join-Path $PSScriptRoot "app.toml") -Raw -Encoding UTF8).Replace("@VERSION@", $Version).Replace("@ARCH@", $Arch)
+    [System.IO.File]::WriteAllText($manifest, $text, (New-Object System.Text.UTF8Encoding($false)))
     Copy-Item $Uninstaller $uninstallDest -Force
     Write-Step "Preparing uninstaller"
     & $Packer prep-uninstaller --config $manifest

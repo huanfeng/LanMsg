@@ -19,7 +19,8 @@ accent = "#2F7BF6"
 [paths]
 install  = '%ProgramFiles%\{id}'
 portable = '%USERPROFILE%\{id}'
-data     = '%APPDATA%\{id}'
+# 与 core 的默认数据目录一致（directories 的 data_dir）：%APPDATA%\lanmsg\LanMsg\data
+data     = '%APPDATA%\lanmsg\LanMsg\data'
 
 [autostart]
 exe = "lanmsgd.exe"
@@ -55,10 +56,6 @@ profiles = ["private", "domain"]
 [startup]
 prestart = true
 exe      = "lanmsgd.exe"
-
-[localdata]
-cache_dirs            = ["cache", "logs"]
-remove_dir_when_empty = true
 
 [package]
 compression = "lzma"

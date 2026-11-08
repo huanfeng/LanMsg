@@ -12,7 +12,7 @@ const APPLICATION: &str = "LanMsg";
 
 /// 返回平台默认数据目录。
 ///
-/// - Windows: `%APPDATA%\LanMsg`
+/// - Windows: `%APPDATA%\lanmsg\LanMsg\data`
 /// - macOS: `~/Library/Application Support/LanMsg`
 /// - Linux: `$XDG_DATA_HOME/lanmsg`（或 `~/.local/share/lanmsg`）
 pub fn default_data_dir() -> PathBuf {

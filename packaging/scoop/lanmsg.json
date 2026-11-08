@@ -21,6 +21,7 @@
     "architecture": {
       "64bit": { "url": "https://github.com/@REPO@/releases/download/v$version/lanmsg-windows-x64.zip" },
       "arm64": { "url": "https://github.com/@REPO@/releases/download/v$version/lanmsg-windows-arm64.zip" }
-    }
+    },
+    "hash": { "url": "$baseurl/SHA256SUMS" }
   }
 }

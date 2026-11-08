@@ -31,6 +31,8 @@ assert d["autostart"]["exe"] == "lanmsgd.exe"
 assert d["firewall"][0]["program"] == "lanmsgd.exe"
 assert any(s["location"] == "sendto" and s["args"] == "--station-put" for s in d["shortcut"])
 assert d["package"]["source_dir"].endswith("windows-" + arch)
+assert d["paths"]["data"] == r"%APPDATA%\lanmsg\LanMsg\data"
+assert "localdata" not in d
 assert d["package"]["output_name"] == "lanmsg-windows-%s-setup" % arch
 PY
 done
@@ -62,6 +64,7 @@ jq -e --arg h64 "$h64" --arg harm "$(echo "$harm" | tr 'B' 'b')" '
     .version == "1.2.3"
     and .architecture."64bit".hash == $h64
     and .architecture.arm64.hash == $harm
+    and .autoupdate.hash.url == "$baseurl/SHA256SUMS"
     and (.architecture."64bit".url | endswith("/v1.2.3/lanmsg-windows-x64.zip"))' \
     "$tmp/out/lanmsg.json" >/dev/null || fail "lanmsg.json content wrong"
 printf '%s  lanmsg-windows-x64.zip\n' "$h64" > "$tmp/bad"
