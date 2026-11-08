@@ -10,6 +10,8 @@ lanmsgd strings.rs）。本脚本把这条规则固定下来。
 - 跳过测试模块：`#[cfg(test)]` / `#[cfg(all(test, ...))]`（属性之间可夹其他属性）
   修饰的 `mod xxx { ... }`，按花括号配对只剔除这个模块本身，模块之后的生产代码照常检查；
 - 白名单文件（界面文案与演示数据）整体放行；
+- 同样的规则适用于 web/ 下的 .js / .html / .css（注释放行；JS 只检查字符串字面量，
+  HTML、CSS 去掉注释后整体检查），web/strings.js、web/vendor/、web/test/ 放行；
 - 放行的非 ASCII 只有省略号 `…`，其余全角标点同样视为界面文案，必须放进 strings.rs。
 有命中时逐行打印 file:line 并以退出码 1 结束；无命中退出码 0。
 
@@ -27,6 +29,8 @@ WHITELIST = {
     "crates/lanmsgd/src/strings.rs",
     "crates/lanmsg-desktop/src/fixtures.rs",
 }
+WEB_WHITELIST_FILES = {"web/strings.js"}
+WEB_WHITELIST_DIRS = ("web/vendor/", "web/test/")
 # CJK 标点与符号、假名、扩展 A、汉字、谚文、全角形式
 CJK = re.compile(r"[　-〿぀-ヿ㐀-䶿一-鿿가-힯＀-￯]")
 
@@ -185,6 +189,58 @@ def cjk_hits(text):
     return hits
 
 
+def js_string_hits(text):
+    """JS：返回含 CJK 的字符串字面量（'..' ".." `..`）所在行号，注释放行。"""
+    hits = []
+    n, i, line = len(text), 0, 1
+    while i < n:
+        c = text[i]
+        if c == "\n":
+            line += 1
+            i += 1
+        elif text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                i += 1
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            line += text.count("\n", i, j)
+            i = j
+        elif c in "'\"`":
+            start_line, j = line, i + 1
+            while j < n and text[j] != c:
+                if text[j] == "\\":
+                    j += 1
+                if j < n and text[j] == "\n":
+                    line += 1
+                j += 1
+            if CJK.search(text[i + 1:j]):
+                hits.append(start_line)
+            i = j + 1
+        else:
+            i += 1
+    return hits
+
+
+def markup_hits(text, comment):
+    """HTML / CSS：去掉注释后含 CJK 的行号。"""
+    stripped = re.sub(comment, lambda m: re.sub(r"[^\n]", " ", m.group(0)), text, flags=re.S)
+    return [k for k, ln in enumerate(stripped.split("\n"), 1) if CJK.search(ln)]
+
+
+def web_hits(rel, text):
+    ext = rel.rsplit(".", 1)[-1]
+    if ext in ("js", "mjs"):
+        return js_string_hits(text)
+    if ext in ("html", "svg"):
+        return markup_hits(text, r"<!--.*?-->")
+    if ext == "css":
+        return markup_hits(text, r"/\*.*?\*/")
+    if ext == "json":
+        return markup_hits(text, r"(?!)")
+    return []
+
+
 def self_test():
     cases = [
         # (名称, 源码, 期望命中行号列表)
@@ -210,10 +266,27 @@ def self_test():
         if got != expect:
             failed += 1
             print(f"FAIL {name}: expect {expect}, got {got}")
+    web_cases = [
+        ("JS 字符串命中", "a.js", 'var s = "中文";\n', [1]),
+        ("JS 单引号与模板命中", "a.js", "var a = 'x';\nvar b = `中`;\n", [2]),
+        ("JS 注释放行", "a.js", "// 中文\n/* 中\n文 */\nvar a = 1;\n", []),
+        ("JS 字符串内的双斜杠不是注释", "a.js", 'var u = "http://x"; var s = "中";\n', [1]),
+        ("HTML 文本命中", "a.html", "<p>中文</p>\n", [1]),
+        ("HTML 注释放行", "a.html", "<!-- 中文 -->\n<p>ok</p>\n", []),
+        ("MJS 字符串命中", "a.mjs", 'const s = "中";\n', [1]),
+        ("SVG 注释放行 / 文本命中", "a.svg", "<!-- 中 -->\n<text>中</text>\n", [2]),
+        ("JSON 命中", "a.json", '{"a": "中"}\n', [1]),
+        ("CSS 注释放行 / 内容命中", "a.css", "/* 中 */\na { content: \"中\"; }\n", [2]),
+    ]
+    for name, rel, src, expect in web_cases:
+        got = web_hits(rel, src)
+        if got != expect:
+            failed += 1
+            print(f"FAIL {name}: expect {expect}, got {got}")
     if failed:
         print(f"{failed} self-test case(s) failed", file=sys.stderr)
         return 1
-    print(f"self-test ok ({len(cases)} cases)")
+    print(f"self-test ok ({len(cases) + len(web_cases)} cases)")
     return 0
 
 
@@ -227,6 +300,12 @@ def main():
             continue
         for lineno, content in cjk_hits(path.read_text(encoding="utf-8")):
             hits.append(f"{rel}:{lineno}: {content.strip()[:60]}")
+    for path in sorted((ROOT / "web").rglob("*")):
+        rel = path.relative_to(ROOT).as_posix()
+        if not path.is_file() or rel in WEB_WHITELIST_FILES or rel.startswith(WEB_WHITELIST_DIRS):
+            continue
+        for lineno in web_hits(rel, path.read_text(encoding="utf-8")):
+            hits.append(f"{rel}:{lineno}: contains CJK text")
     for h in hits:
         print(h)
     if hits:

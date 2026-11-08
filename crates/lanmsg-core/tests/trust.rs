@@ -527,6 +527,26 @@ async fn block_disconnects_and_refuses_reconnect() {
     .await;
 }
 
+/// 隧道网卡同网段的陌生人入站：路径判为 Vpn，被规则 7 拒绝；出站仍接受。
+#[tokio::test]
+async fn stranger_inbound_over_tunnel_is_rejected() {
+    use lanmsg_core::net::{classify, LocalIface, TunnelKind};
+    let (trust, _store, _self_cert, _self_device) = rules_env().await;
+    let ifaces = vec![LocalIface {
+        name: "tailscale0".into(),
+        addr: "100.101.1.1".parse().unwrap(),
+        prefix: 10,
+        tunnel: Some(TunnelKind::Tailscale),
+    }];
+    let path = classify("100.90.2.2".parse().unwrap(), &ifaces, false);
+    assert_eq!(path, PathClass::Vpn);
+    let stranger = cert_for(&UserKey::generate(), DeviceId([9u8; 32]));
+    let inbound = peer_info(Some(stranger.clone()), path.clone(), false);
+    assert!(!trust.accept_peer(&inbound, Status::Online, false));
+    let outbound = peer_info(Some(stranger), path, true);
+    assert!(trust.accept_peer(&outbound, Status::Online, false));
+}
+
 /// accept_peer 七条准入规则逐条断言。
 #[tokio::test]
 async fn accept_peer_rules_table() {

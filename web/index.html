@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; img-src 'self' blob:; style-src 'self'; base-uri 'none'; form-action 'none'">
+<title>LanMsg</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="gate" class="gate" hidden>
+  <p id="gate-text" class="gate-text"></p>
+  <form id="code-form" class="code-form" hidden>
+    <input id="code-input" autocomplete="off" autocapitalize="characters" maxlength="12" spellcheck="false">
+    <button id="code-submit" type="submit"></button>
+    <p id="code-hint" class="hint"></p>
+  </form>
+</main>
+<div id="chat" class="chat" hidden>
+  <header class="bar"><span id="host-name"></span><span id="dot" class="dot"></span><span id="status"></span></header>
+  <ul id="list" class="list"></ul>
+  <ul id="jobs" class="jobs"></ul>
+  <form id="send-form" class="send">
+    <button type="button" id="pick" class="btn"></button>
+    <input type="file" id="file-input" multiple hidden>
+    <input id="text-input" autocomplete="off">
+    <button type="submit" id="send-btn" class="btn primary"></button>
+  </form>
+  <div id="drop" class="drop" hidden></div>
+</div>
+<script src="vendor/nacl-fast.min.js"></script>
+<script src="vendor/scrypt.js"></script>
+<script src="strings.js"></script>
+<script src="crypto.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -161,7 +161,8 @@ CREATE TABLE station_items(item_id BLOB PRIMARY KEY, station_id BLOB NOT NULL, a
   store_mode TEXT, local_path TEXT, local_size INTEGER, local_mtime INTEGER);
 CREATE INDEX station_items_by_station ON station_items(station_id, updated_at);
 CREATE TABLE station_blobs(item_id BLOB NOT NULL, hash BLOB NOT NULL, name TEXT NOT NULL,
-  size INTEGER NOT NULL, mime TEXT NOT NULL, rel_path TEXT, meta BLOB NOT NULL, PRIMARY KEY(item_id, hash));
+  size INTEGER NOT NULL, mime TEXT NOT NULL, rel_path TEXT NOT NULL DEFAULT '', meta BLOB NOT NULL,
+  PRIMARY KEY(item_id, rel_path, hash));
 CREATE INDEX station_blobs_by_hash ON station_blobs(hash);
 CREATE TABLE localsend_peers(fingerprint TEXT PRIMARY KEY, pseudo_device BLOB NOT NULL, alias TEXT NOT NULL,
   device_model TEXT, device_type TEXT, last_addr TEXT, protocol TEXT NOT NULL, port INTEGER NOT NULL,

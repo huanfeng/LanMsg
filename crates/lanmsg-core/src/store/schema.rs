@@ -89,4 +89,108 @@ CREATE TRIGGER message_text_ai AFTER INSERT ON message_text_index BEGIN
 CREATE TRIGGER message_text_ad AFTER DELETE ON message_text_index BEGIN
   INSERT INTO message_text_fts(message_text_fts, rowid, text) VALUES('delete', old.id, old.text); END;
 ",
+    // 迁移 4（P5）：地址簿、手动设备、中转站、LocalSend 对端、Web 访客。
+    "
+CREATE TABLE known_addresses(device_id BLOB NOT NULL, addr TEXT NOT NULL, path TEXT NOT NULL,
+  last_ok INTEGER NOT NULL, source TEXT NOT NULL, PRIMARY KEY(device_id, addr));
+CREATE TABLE manual_peers(addr TEXT PRIMARY KEY, added_at INTEGER NOT NULL, device_id BLOB);
+CREATE TABLE stations(station_id BLOB PRIMARY KEY, name TEXT NOT NULL, host_device BLOB NOT NULL,
+  owner_user BLOB NOT NULL, acl BLOB NOT NULL, created_at INTEGER NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT 0, synced_until INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE station_items(item_id BLOB PRIMARY KEY, station_id BLOB NOT NULL, added_by BLOB NOT NULL,
+  added_at INTEGER NOT NULL, expires_at INTEGER, content BLOB NOT NULL, pinned INTEGER NOT NULL DEFAULT 0,
+  removed INTEGER NOT NULL DEFAULT 0, available INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL,
+  store_mode TEXT, local_path TEXT, local_size INTEGER, local_mtime INTEGER);
+CREATE INDEX station_items_by_station ON station_items(station_id, updated_at);
+CREATE INDEX station_items_by_expiry ON station_items(expires_at);
+CREATE TABLE station_blobs(item_id BLOB NOT NULL, hash BLOB NOT NULL, name TEXT NOT NULL,
+  size INTEGER NOT NULL, mime TEXT NOT NULL, rel_path TEXT NOT NULL DEFAULT '', meta BLOB NOT NULL,
+  PRIMARY KEY(item_id, rel_path, hash));
+CREATE INDEX station_blobs_by_hash ON station_blobs(hash);
+CREATE TABLE localsend_peers(fingerprint TEXT PRIMARY KEY, pseudo_device BLOB NOT NULL, alias TEXT NOT NULL,
+  device_model TEXT, device_type TEXT, last_addr TEXT, protocol TEXT NOT NULL, port INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL, trusted INTEGER NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX localsend_peers_by_device ON localsend_peers(pseudo_device);
+CREATE TABLE web_guests(conv_id BLOB PRIMARY KEY, pseudo_device BLOB NOT NULL, user_agent TEXT NOT NULL,
+  ip TEXT NOT NULL, started_at INTEGER NOT NULL, ended_at INTEGER);
+CREATE INDEX web_guests_by_device ON web_guests(pseudo_device);
+",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::MIGRATIONS;
+    use crate::store::Store;
+    use rusqlite::Connection;
+
+    const P5_TABLES: [&str; 7] = [
+        "known_addresses",
+        "manual_peers",
+        "stations",
+        "station_items",
+        "station_blobs",
+        "localsend_peers",
+        "web_guests",
+    ];
+    const P5_INDEXES: [&str; 5] = [
+        "station_items_by_station",
+        "station_items_by_expiry",
+        "station_blobs_by_hash",
+        "localsend_peers_by_device",
+        "web_guests_by_device",
+    ];
+
+    fn check_p5(conn: &Connection) {
+        for table in P5_TABLES {
+            let n: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table}");
+        }
+        for index in P5_INDEXES {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    [index],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{index}");
+        }
+    }
+
+    #[test]
+    fn p5_migration_creates_tables() {
+        let s = Store::open_in_memory().unwrap();
+        check_p5(&s.conn().unwrap());
+    }
+
+    #[test]
+    fn p5_migration_upgrades_from_v3() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lanmsg.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for (i, sql) in MIGRATIONS[..3].iter().enumerate() {
+                conn.execute_batch(sql).unwrap();
+                conn.pragma_update(None, "user_version", i as u32 + 1)
+                    .unwrap();
+            }
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), MIGRATIONS.len() as u32);
+        check_p5(&s.conn().unwrap());
+    }
+
+    #[test]
+    fn station_blobs_allows_same_hash_under_different_rel_paths() {
+        let s = Store::open_in_memory().unwrap();
+        let conn = s.conn().unwrap();
+        let sql = "INSERT INTO station_blobs(item_id, hash, name, size, mime, rel_path, meta)
+                   VALUES(x'01', x'02', 'a.txt', 1, 'text/plain', ?1, x'00')";
+        conn.execute(sql, ["d/a.txt"]).unwrap();
+        conn.execute(sql, ["e/a.txt"]).unwrap();
+        // 相同 (item, rel_path, hash) 仍然冲突。
+        assert!(conn.execute(sql, ["e/a.txt"]).is_err());
+    }
+}

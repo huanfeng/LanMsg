@@ -21,6 +21,8 @@ pub const TYPE_CONTACT_REQUEST: u16 = 40;
 pub const TYPE_CONTACT_RESPONSE: u16 = 41;
 pub const TYPE_REVOCATION: u16 = 42;
 pub const TYPE_CERT_UPDATE: u16 = 43;
+pub const TYPE_ADDRESS_BOOK: u16 = 50;
+pub const TYPE_STATION: u16 = 60;
 pub const TYPE_ERROR: u16 = 99;
 
 /// 帧枚举。P1 阶段定义以下变体，P2/P5 变体由对应阶段追加。
@@ -40,6 +42,8 @@ pub enum Frame {
     ContactResponse(crate::types::ContactResponse), // 41
     Revocation(crate::types::Revocation),           // 42
     CertUpdate(Vec<DeviceCert>),                    // 43
+    AddressBook(crate::addrbook::AddressBook),      // 50
+    Station(crate::station::StationMsg),            // 60
     Error { code: u16, message: String },           // 99
     Unknown(u16),                                   // 解码遇到未知类型号时产生
 }
@@ -120,6 +124,8 @@ impl Frame {
             Frame::ContactResponse(_) => TYPE_CONTACT_RESPONSE,
             Frame::Revocation(_) => TYPE_REVOCATION,
             Frame::CertUpdate(_) => TYPE_CERT_UPDATE,
+            Frame::AddressBook(_) => TYPE_ADDRESS_BOOK,
+            Frame::Station(_) => TYPE_STATION,
             Frame::Error { .. } => TYPE_ERROR,
             Frame::Unknown(id) => *id,
         }
@@ -142,6 +148,8 @@ impl Frame {
             Frame::ContactResponse(r) => to_cbor(r),
             Frame::Revocation(r) => to_cbor(r),
             Frame::CertUpdate(certs) => to_cbor(certs),
+            Frame::AddressBook(b) => to_cbor(b),
+            Frame::Station(m) => to_cbor(m),
             Frame::Error { code, message } => to_cbor(&ErrorPayload {
                 code: *code,
                 message: message.clone(),
@@ -230,6 +238,16 @@ impl Frame {
                 let certs: Vec<DeviceCert> =
                     ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
                 Ok(Frame::CertUpdate(certs))
+            }
+            TYPE_ADDRESS_BOOK => {
+                let b: crate::addrbook::AddressBook =
+                    ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
+                Ok(Frame::AddressBook(b))
+            }
+            TYPE_STATION => {
+                let m: crate::station::StationMsg =
+                    ciborium::from_reader(payload).map_err(|e| CodecError::Cbor(e.to_string()))?;
+                Ok(Frame::Station(m))
             }
             _ => Ok(Frame::Unknown(type_id)),
         }
@@ -391,5 +409,76 @@ mod tests {
             99
         );
         assert_eq!(Frame::Unknown(777).type_id(), 777);
+        assert_eq!(TYPE_ADDRESS_BOOK, 50);
+        assert_eq!(TYPE_STATION, 60);
+        assert_eq!(
+            Frame::AddressBook(crate::addrbook::AddressBook { entries: vec![] }).type_id(),
+            50
+        );
+        assert_eq!(
+            Frame::Station(crate::station::StationMsg::Announce { stations: vec![] }).type_id(),
+            60
+        );
+    }
+
+    #[test]
+    fn station_and_addressbook_frames_roundtrip() {
+        use crate::addrbook::{AddressBook, AddressEntry, KnownAddr};
+        use crate::ids::{BlobHash, ConvId, DeviceId};
+        use crate::station::{ItemId, StationContent, StationItem, StationMsg};
+        use crate::types::{BlobMeta, PathClass};
+
+        let item = StationItem {
+            item: ItemId([7u8; 16]),
+            added_by: DeviceId([1u8; 32]),
+            added_at: 100,
+            expires_at: Some(200),
+            content: StationContent::File {
+                blob: BlobMeta {
+                    hash: BlobHash([2u8; 32]),
+                    size: 5,
+                    name: "a.txt".into(),
+                    mime: "text/plain".into(),
+                    media: None,
+                    thumb: None,
+                },
+            },
+            pinned: false,
+            removed: false,
+            available: true,
+            updated_at: 100,
+        };
+        let station = Frame::Station(StationMsg::Put {
+            station: ConvId([3u8; 32]),
+            req: 9,
+            item,
+            mode_copy: true,
+        });
+        let book = Frame::AddressBook(AddressBook {
+            entries: vec![AddressEntry {
+                device: DeviceId([4u8; 32]),
+                addrs: vec![KnownAddr {
+                    addr: "[fe80::1]:7000".into(),
+                    path: PathClass::Vpn,
+                    last_ok: 55,
+                }],
+            }],
+        });
+        assert_eq!(station.type_id(), 60);
+        assert_eq!(book.type_id(), 50);
+        for f in [station, book] {
+            let back = Frame::decode(f.type_id(), &f.encode_payload()).unwrap();
+            assert_eq!(back, f);
+        }
+    }
+
+    #[test]
+    fn item_id_hex_roundtrip_and_serde_bytes() {
+        let id = crate::station::ItemId([0xab; 16]);
+        assert_eq!(id.to_hex().len(), 32);
+        assert_eq!(crate::station::ItemId::from_hex(&id.to_hex()).unwrap(), id);
+        assert!(crate::station::ItemId::from_hex("abcd").is_err());
+        let back: crate::station::ItemId = crate::from_cbor(&crate::to_cbor(&id)).unwrap();
+        assert_eq!(back, id);
     }
 }

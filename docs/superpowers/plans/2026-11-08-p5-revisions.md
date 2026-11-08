@@ -20,8 +20,10 @@
 
 ## 任务条目
 
-- **T1**：迁移为 `MIGRATIONS[3]`（核实 schema.rs 当前 3 个元素）。`Frame` 追加 `AddressBook(50)`、`Station(60)` 及 `TYPE_*` 常量，同步 `type_id_values_match_spec` 测试。表 `known_addresses`、`manual_peers` 按 T3 修订后的列定义（见下）。
+- **T1**：迁移为 `MIGRATIONS[3]`（核实 schema.rs 当前 3 个元素）。`Frame` 追加 `AddressBook(50)`、`Station(60)` 及 `TYPE_*` 常量，同步 `type_id_values_match_spec` 测试。`station_blobs` 主键改为 `(item_id, rel_path, hash)`，`rel_path` 为 `TEXT NOT NULL DEFAULT ''`（文件夹内同内容文件不冲突；File 条目 `rel_path` 为空串）；另加索引 `station_items(expires_at)`、`localsend_peers(pseudo_device)`、`web_guests(pseudo_device)`。表 `known_addresses`、`manual_peers` 按 T3 修订后的列定义（见下）。
 - **T2**：`LocalIface` 加 `tunnel` 字段，全仓 4 处构造同步。`ListInterfaces` 实现并移出兜底。
+  - 实施补充：`PeerInfo.path` 原先在 `net/conn.rs` 硬编码为 `Lan`，现改为连接建立时用 `classify(peer_ip, cached_ifaces(), false)`（网卡列表 30 秒缓存，`NetworkChanged` 时作废）。`classify` 按最长前缀选网卡；枚举不到网卡时私网/回环/链路本地地址回退为 `Lan`（防 Android 11+ 限制 netlink 导致陌生人配对被拒）。
+  - 已知限制：Android 上的隧道识别未经真机验证；公网陌生人入站将被拒（规则 7，预期行为）；`via_multicast` 目前在握手处恒为 false。
 - **T3（重写）**：不新建 `Reconnector`，在 `service/redial.rs` 上增量修改：
   - `store/addresses.rs`：`known_addresses(device, addr, path, last_ok, source)`，每台设备最多 8 条；`manual_peers(addr, device NULL, added_at)`。函数名照原计划（`record_address`、`addresses_of`、`add_manual_peer`、`list_manual_peers`、`bind_manual_peer`、`is_manual_device`）。
   - `ConnEvent::Up` 已用 `dial_addr` 写 `devices.last_addr`（mod.rs:639），保留，并额外调用 `on_peer_up_record` 写 `known_addresses`（source = Direct）。
@@ -43,11 +45,31 @@
 - **T7**：文案全部进 `strings.rs`；`--station-put` 加到 `parse_cli`（main.rs:50）；`Effect` 以现有定义为准。
 - **T8**：错误状态存 `ErrorCode`。Android outbox 的 7 天清理不得删除中转站引用、主机尚未拉取的副本，要补测试。
 - **T9 / T10**：照原计划，日志和错误改英文。LocalSend 协议字段以官方 v2 协议文档为准，需要联网核对。
-- **T11**：`RequestView.preview` 用 `RequestPreviewView::Files{..}`；新增 PIN 系统事件变体（全局修订 4）；把 `ServiceConfig.localsend_port`（mod.rs:52、141）接入。
+  - T9 实际签名：`discovery::spawn(me, mcast_port, announce_enabled, events)`，组播端口与 HTTP 端口（`me.port`）相互独立。T10 的 `LsConfig` 拆成 `http_port` 与 `mcast_port` 两个字段（默认都取 `LOCALSEND_PORT`）；测试里 HTTP 端口用 0 时不要把 0 传给组播端口，或者不启用发现。
+  - T10 的 `client.rs` 复用 T9 中构造宽松 TLS 客户端的函数，不要另建一个。`announce_enabled=false` 时不发通告、不 register，这条行为的测试在 T10 补上。
+  - 已知限制：组播只加入默认网卡（discovery.rs `join_multicast_v4(.., UNSPECIFIED)`），联调时再决定是否按网卡逐个加入。
+- **T11**：对端指纹先统一转成小写，再入库、计算 `ConvId::localsend` 和设备 ID。新增设置项 `localsend_port`（默认 53317，用户询问后追加；端口被占用时的提示里指引用户改端口）。 `RequestView.preview` 用 `RequestPreviewView::Files{..}`；新增 PIN 系统事件变体（全局修订 4）；把 `ServiceConfig.localsend_port`（mod.rs:52、141）接入。
   - 同一指纹可能在多个 IP 下有多条记录（`LocalSend::peers()` 键为 (ip, 指纹)）；桥不得按指纹取第一条。
   - `trusted` 自动接受须同时核对：来源 IP 与该指纹上次记录的 IP 一致（`LsEvent` 的 `peer.ip`），并按 `classify` 过滤非 Lan 来源。
   - 审批通过后若发送方收到 409（会话被占用）：界面按“对方忙”处理，不重复弹窗；`prepare-upload` 待审批名额有限（全局 8、每源 IP 1，超出 429）。
   - `LocalSend::shutdown` 目前只停服务与发现，不清理进行中会话的 `.part`，也不发 `SessionFinished`；T11 接入开关时处理。
+- **T12（安全审阅后修订，已实现）**：
+  - HKDF 输出 128 字节：`k_page | k_host | k_enc_p2h | k_enc_h2p`（各 32）。加密按方向分离：页面发往宿主用 `k_enc_p2h`，宿主发往页面用 `k_enc_h2p`，防反射。`SessionKeys` 提供 `seal_to_page` / `open_from_page`（宿主端）与 `seal_to_host` / `open_from_host`（页面侧、测试用），原 `k_enc`、`seal`、`open` 删除。`vectors.json` 的每种模式含 `k_enc_p2h`、`k_enc_h2p`、`sealed_p2h`、`sealed_h2p`。
+  - `derive` 与 `host_respond` 返回 `Result<_, CoreError>`：X25519 共享密钥非贡献性（零点等低阶公钥）时返回 `InvalidArgument`。
+  - `WebSecrets::rotate_code(&mut self)` 同时重生成 `code`、`scrypt_salt` 并重算 `code_auth`；`CodeGuard::record_success()` 清零失败计数（确认成功时调用）。
+  - `SessionKeys`、`WebSecrets` 实现 `ZeroizeOnDrop`，不再 `Clone`。
+  - 配对码规范化 `normalize_code`：仅 ASCII 大写并去除空白。JS 侧必须做同样处理。
+- **T13（对 T12 的补充）**：`crypto.js` 的 `derive` 返回 `{kPage, kHost, kEncP2h, kEncH2p, th}`，页面发送用 `kEncP2h`、接收用 `kEncH2p`；JS 配对码输入只做 ASCII 大写与去空白，输入 `0`、`1`、`I`、`O` 时提示“配对码不含 0、1、I、O”（字母表 `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` 含 `L`，`L` 不得改写）。
+- **T14（对 T12 的补充）**：加密帧的明文头必须带 `seq`（u64，每个方向独立；接收方按下方 T13 落地约定的滑动窗口拒绝已见值与过旧值，防重放）；文件分块帧另带 `file_id` 与 `chunk_idx`，并在认证范围内（放在明文头中随 secretbox 一起认证），防止分块被换位或跨文件替换。配对码确认失败走 `CodeGuard::record_failure`，成功走 `record_success`（只在 `verify_page_mac` 通过后调用；denied、超时不清零），达到上限时 `rotate_code`。
+- **T13（落地约定，供 T14 对齐，第 2 轮修订）**：
+  - **seq**：页面到宿主的所有加密 JSON（WS 消息、`upload/init`、请求头）与分块都带页面侧唯一递增的 `seq`，重试也换新 `seq`。宿主到页面的所有加密 JSON 与分块也带 `seq`，是**会话级单调计数器**（WS 帧与 HTTP 加密响应共用，不随 WS 重连重置）。两个方向的接收方都用“拒绝已见值与过旧值”的滑动窗口（窗口 4096，`crypto.js` 的 `newSeqWindow`），而不是严格连续，因为并发请求与 WS 会交错到达。
+  - **分块明文**：`seq(u64 BE) || fid_len(u8) || fid(ASCII) || chunk_idx(u32 BE) || data`，下载响应同格式（页面校验 fid、idx 与 seq）。
+  - **请求认证头**：`finish` 与 `download` 带 `X-LanMsg-Req: b64u(seal(k_enc_p2h, JSON{op, seq, fid[, idx]}))`，`op` 为 `"finish"` 或 `"download"`；宿主校验 `op` 与请求路径一致、fid（及 idx）与路径一致且 `seq` 未重放。`PUT` 分块明文中的 fid 与 chunk_idx 同样必须与 URL 路径一致，不一致拒绝。
+  - **seq 计数器**：从 1 开始，保持在 2^53 以内（JS 安全整数）；超限则结束会话。宿主重试下载同一分块时必须重新封包、分配新 seq，不得缓存密文。
+  - **T14 测试要求**：断言 HTTP 响应头含 CSP（含 `frame-ancestors 'none'`）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
+  - **响应回显**：`upload/init` 响应（密封 JSON）回显 `client_key`；`finish` 响应（成功与 409）回显 `fid`；页面校验不符即失败。
+  - **页面安全头（T14 在 HTTP 响应头发出）**：`Content-Security-Policy: default-src 'self'; connect-src 'self'; img-src 'self' blob:; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`（`frame-ancestors` 不能放 meta，只能放响应头）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
+  - 页面读出 `#k=` 后立刻 `history.replaceState` 清除地址栏片段；会话结束时清零并丢弃密钥。
 - **T13**：网页文案放 `web/strings.js`（`zh`、`en` 两套，按 `navigator.language` 选择）；`check-no-cjk.py` 扩展到扫描 `web/`，`web/strings.js` 列入白名单。页面总大小 < 300KB 的限制不变。
 - **T14**：访客会话标题由 core 返回空字符串，界面按会话类型显示本地化标题；上传目录名用英文。
 - **T15**：手动添加的错误走 `error_text`；扫描结果和"公网"等文案进 `strings.rs`；托盘文案进 lanmsgd `strings.rs`。

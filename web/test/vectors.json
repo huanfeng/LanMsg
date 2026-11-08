@@ -1,0 +1,42 @@
+{
+  "inputs": {
+    "code": "ABCD2345",
+    "host_nonce": "RERERERERERERERERERERA",
+    "host_pk": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+    "host_sk": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI",
+    "page_nonce": "MzMzMzMzMzMzMzMzMzMzMw",
+    "page_pk": "e06Qm75__kTEZaIgA31gjuNYl9Me-XLwf3SJLLD3PxM",
+    "page_sk": "ERERERERERERERERERERERERERERERERERERERERERE",
+    "plaintext": "你好 LanMsg",
+    "scrypt_salt": "ZmZmZmZmZmZmZmZmZmZmZg",
+    "seal_nonce": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+    "session": "000102030405060708090a0b0c0d0e0f",
+    "url_key": "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU"
+  },
+  "modes": {
+    "code": {
+      "auth": "G2qViIcJbYKiKa6XwyprdukMCeZB0zKKik79czmSZ3U",
+      "host_mac": "9Z-vhnCzTifHbY2ZJLLA2w34jDOzaNfss4PPiU4kVMQ",
+      "k_enc_h2p": "Q8sP4oYcQOEmUjsR1eacXuLOYhkUQyuOsablD2Rfyu0",
+      "k_enc_p2h": "aV9qWsIox8FCfn4H570ALxyALJkM5n1CJNCFXvT8NL0",
+      "k_host": "fIbmrhZtJZO_vvd5ZH90fWf0uT92RZwfyfZSyKid5yY",
+      "k_page": "iSaX_lU57NXYtvl2Wp7-Cvuzu7-iRDjvU34cR1tnZaI",
+      "page_mac": "JH1cgqvcqZob2f1gfXz1E-yTIc3I4wBgAeJJ9LxRm7M",
+      "sealed_h2p": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3QfNDV0of777-mSLQSakMihrcBNQN-htzF4sCbSs",
+      "sealed_p2h": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3cni_dacQhdpUvTfbbY7F49kv2To1DF3m3lwK0wc",
+      "th": "HJtygu3z207ne7lF0TJOA0dK9xDbLgyqIfEm_573sGazKDmt_WbfGtY3yU6fvglJi8mmV8Pe6Przjx6uW2DACw"
+    },
+    "key": {
+      "auth": "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU",
+      "host_mac": "d0xHKAoKQEcf8I6X_qTY5pCgAOk7-aUbhfBCVvsi0LQ",
+      "k_enc_h2p": "Ot2Sndyl7zQz2gPK_ZdlYSSdc7D6KyHVvs_vCRT4yng",
+      "k_enc_p2h": "2lzl_whQk4sT18FbmUV0KytNWtPeAw3FfOWbnI9RoX0",
+      "k_host": "DxZQGGKVhr8J77_SSJr8A2kKe8MTOcv-66xzINfKaWc",
+      "k_page": "86aYCM5awd2Vizldko28grzWmgySMk2Tzx7iopENFDc",
+      "page_mac": "Q953McIJ2K5Qi2i8RsyWnaG2-wWQxtAfaTDvGM-e8c0",
+      "sealed_h2p": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3EqYSObEfhVLnFpwCz1T58odlDyWauzAhpeAT2VE",
+      "sealed_p2h": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3TyTWNhILI1UpQrDy1VDxlvvWSp9zUtMReTvUtdw",
+      "th": "Q4hg37gxmk7Mj5SRiNkhHCLHQn_16227-ltO10fapg2sVah_bunKERDyXejVZXsr97gxwV-KqjObHK8aKaFxCg"
+    }
+  }
+}
