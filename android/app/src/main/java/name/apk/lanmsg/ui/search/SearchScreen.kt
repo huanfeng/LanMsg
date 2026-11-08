@@ -44,6 +44,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.convTitle
 import name.apk.lanmsg.ui.common.systemEventText
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.ui.common.EmptyState
@@ -131,7 +132,7 @@ private fun ResultRow(row: SearchViewModel.Row, onClick: () -> Unit) {
         is MessageBodyView.System -> systemEventText(b.event)
         else -> ""
     }
-    val title = if (row.selfDevices) stringResource(R.string.conv_self_title) else row.convTitle
+    val title = convTitle(row.kind, row.convTitle)
     Column(Modifier.fillMaxWidth().background(c.surface).clickable(onClick = onClick)) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

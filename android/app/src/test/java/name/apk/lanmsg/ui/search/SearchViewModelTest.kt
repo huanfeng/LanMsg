@@ -18,6 +18,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import uniffi.lanmsg_api.ConvKind
 import uniffi.lanmsg_api.ErrorCode
 import uniffi.lanmsg_api.Event
 import uniffi.lanmsg_api.Request
@@ -103,7 +104,7 @@ class SearchViewModelTest {
         val vm = SearchViewModel(fake())
         vm.setQuery("a")
         advanceUntilIdle()
-        assertTrue(vm.state.value.rows.single().selfDevices)
+        assertEquals(ConvKind.SELF_DEVICES, vm.state.value.rows.single().kind)
     }
 
     @Test fun not_implemented_sets_core_outdated() = runTest {

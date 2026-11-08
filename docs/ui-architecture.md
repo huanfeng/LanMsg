@@ -18,7 +18,7 @@
        ├─ 消息（会话列表）→ 聊天页 / 中转站页（中转站会话）→ 图片查看页；会话列表右上角搜索 → 搜索页（→ 聊天页）
        ├─ 文件（文件视图）
        ├─ 联系人 → 新的请求页 / 联系人详情页（→ 聊天页）
-       └─ 我 → 我的设备页（→ 配对主持页 / 配对加入页）/ 设置页
+       └─ 我 → 我的设备页（→ 配对主持页 / 配对加入页）/ 网页传输页（→ 访客聊天页）/ 设置页（→ 网络设置页）
 外部分享进入 → 选择会话页 → 聊天页
 文件卡片 / 文件视图「转发」→ 转发选择会话页 → 聊天页
 点击消息通知 → 聊天页；点击请求通知 → 新的请求页
@@ -43,6 +43,8 @@
 | `pair/host` | — | 配对主持（本机出示二维码 / 比对数字） |
 | `pair/join` | — | 配对加入（扫码 / 选设备 / 比对数字） |
 | `settings` | — | 设置 |
+| `settings/network` | — | 网络设置（设置页「网络」入口） |
+| `web/host` | — | 网页传输（「我」页入口） |
 | `share` | — | 选择会话（分享入口） |
 | `search` | — | 搜索聊天记录 |
 | `forward/{hashes}` | hashes：逗号分隔的 blob hash | 转发：选择会话 |
@@ -77,6 +79,8 @@
 | 配对主持 | `method`(Qr/Sas)、`session`、`qrUri`、`state: PairStateDto` | `PairStart{Qr}` | `PairStatus`(session 相同) → 更新 state | 显示二维码；「改用数字比对」→ `PairCancel` + `PairStart{Sas}`；`ShowSas` 时显示 6 位数字和「一致」「不一致」→ `PairConfirm{matches}`；离开页面 → `PairCancel`；`Done` → 提示 `toast_pair_done` 并返回 |
 | 配对加入 | `mode`(扫码/选设备)、`candidates: [PeerView]`、`session`、`state`、`cameraGranted` | `ListPeers`（选设备模式） | `PairStatus`；`PeerOnline/Offline` → 重拉候选 | 扫到 `lanmsg://pair?…` → `PairJoin{QrUri{uri}}`；选设备 → `PairJoin{Device{device}}`；`ShowSas` → 「一致/不一致」→ `PairConfirm`；无相机权限 → 显示 `pair_need_camera` 与按钮「改用数字比对」（切到选设备模式） |
 | 设置 | `settings: SettingsDto`、本机项（通知开关、保存到相册、信任的 Wi-Fi） | `GetSettings` | — | 设备名、图片/文件自动下载上限（下拉：关闭/5MB/10MB/50MB/100MB/不限）、仅 Wi-Fi 下自动下载文件、LocalSend 兼容、后台模式（实时/省电/关闭）→ `SetSettings`（整体回写）；本机项直接存本地；「允许后台运行」→ 打开系统电池优化设置；「清理已分享文件的副本」→ 确认对话框 → 先请求 `DeliveredLocalPaths{under = 发件箱根}`（core 判定：会话里每个其他成员的每台未吊销设备都已下载；有设备从未下载则一直不算，等 7 天），删除这些已送达的文件与 7 天前的发件箱日期目录（core 过旧或出错时只按日期清理），完成后提示 `settings_clear_outbox_done`（释放的空间）；「添加当前 Wi-Fi」运行时申请位置权限，无权限或读取失败显示 `settings_trusted_wifi_need_location`，已授权但未连接 Wi-Fi 显示 `settings_trusted_wifi_not_connected` |
+| 网页传输 | `info: WebSessionInfo?`、`urlIndex`、`guests: [ConversationSummary]`（`kind == GUEST`）、`pending: PendingRequest?`、`error: ErrorCode?`、`ended` | 进入页面 `WebStart`（幂等）、`ListConversations` | `WebRequest` → 排队，弹窗显示 IP 与浏览器摘要，60 秒无人处理自动 `WebRespond{allow=false}`；`WebSessionChanged`（info 为空）→ 清状态并返回上一页；`ConversationUpdated`(GUEST) → 刷新访客；`lagged` → 重拉访客 | 二维码 `QrImage(urls[urlIndex])`、「复制地址」、多地址单选切换、配对码按 4+4 分组；点访客 → `chat/{conv}`（访客会话标题为空，界面按类型显示 `conv_guest_title`）；「结束网页传输」→ `WebStop`；返回键与返回按钮：本次托管期间没有访客会话更新过则直接结束，否则弹确认 `web_exit_title`（core 没有“访客在线”字段，访客会话 `peerOnline` 恒为 false，只能用“收到过访客会话更新”近似）；页面销毁（含启动请求在途）兜底发 `WebStop`（对无会话幂等）。二维码下方只显示 `主机:端口`，完整地址（含密钥）只在二维码与「复制地址」里。托管期间 `DeviceConditions.setWebHosting(true)`，`BackgroundPolicy.shouldRunService` 恒为 true（优先于档位，含「关闭」），常驻通知文字为 `notif_service_web_text` |
+| 网络设置 | `settings`、`interfaces: [InterfaceView]`、`manualPeers`、`manualBusy/manualOk/manualError: ErrorCode?`、`scanning: String?`、`scanResult(probed, found)`、`unicastInvalid`、`error` | `GetSettings`、`ListInterfaces`、`ListManualPeers` | `ScanFinished` → 清 scanning 并显示结果；`lagged` → 重拉 | 手动添加 `AddManualPeer`（连接最坏 13 秒，期间只显示进度）、移除 `RemoveManualPeer`；单播通告目标每行一个，按 core 同一规则本地校验（IP、IP:端口、IPv4 网段前缀不小于 24，拒绝主机名与 IPv6 网段），合法才 `SetSettings`（先重读再整体回写）；输入框内容在用户编辑前随 core 设置同步，编辑后保留用户输入（保存成功后恢复同步）；网卡列表：IPv4 在前并按（名称，地址）去重；隐藏 fe80::/10 与 fec0::/10，其余 IPv6 折叠为一行 `net_other_ipv6`（不可扫描）；扫描 `ScanSubnet`（IPv4 网卡前缀不小于 22 用自身网段，否则本机所在 /24；同时只允许一个扫描）；LocalSend 开关从设置页移到本页，`localsend_listening == false` 时显示 `localsend_port_busy`（带端口号，目前传 53317 常量，端口设置项合入后传实际端口） |
 | 选择会话 | `items: [ConversationSummary]`、`pending: [本地文件路径]` | `ListConversations` | — | 点会话 → `SendFiles{conv, pending}` → `chat/{conv}` |
 | 搜索 | `query`、`results: [MessageView]`、`loading`、`error` | —（输入后 300ms 防抖发 `SearchMessages{query, conv=null, limit=50}`；空白查询清空结果、不发请求） | — | 点结果 → `chat/{conv}`；结果行显示会话标题（来自 `ListConversations` 缓存）、作者设备名、时间、文字片段；无结果 → `search_empty`；core 未实现 → `err_core_outdated` |
 | 转发选择会话 | `items: [ConversationSummary]`、`hashes` | `ListConversations` | — | 点会话 → `ForwardFiles{conv, hashes}` → 提示 `toast_forwarded` → `chat/{conv}`；core 未实现 → `err_core_outdated` |
@@ -372,6 +376,50 @@
 | station_add_file | 选择文件 |
 | station_add_text | 输入文字 |
 | station_items_empty | 中转站里还没有东西 |
+| me_web_transfer | 网页传输 |
+| settings_network | 网络 |
+| web_title | 网页传输 |
+| web_code_hint | 无法扫码时，在浏览器打开地址后输入此配对码 |
+| web_stop | 结束网页传输 |
+| web_url_copy | 复制地址 |
+| web_request_title | 有浏览器请求连接 |
+| web_request_body | IP：%1$s\n浏览器：%2$s |
+| web_allow | 允许 |
+| web_deny | 拒绝 |
+| web_guests | 已连接的访客 |
+| web_guests_empty | 还没有访客 |
+| web_no_address | 没有可用的局域网地址，请先连接 Wi-Fi |
+| web_exit_title | 结束网页传输？ |
+| web_exit_body | 有访客正在使用，结束后他们会断开连接。 |
+| web_exit_confirm | 结束 |
+| net_other_ipv6 | 其他 IPv6 地址（%1$d），不可扫描 |
+| web_starting | 正在开启网页传输 |
+| conv_guest_title | 网页访客 |
+| notif_service_web_text | 网页传输中 |
+| net_title | 网络 |
+| net_manual_add | 手动添加设备 |
+| net_manual_hint | 192.168.2.10 或 mypc.local:53320 |
+| net_manual_help | 可填 IP 或主机名，端口可省略 |
+| net_connect | 连接 |
+| net_connecting | 正在连接 |
+| net_connected | 已连接 |
+| net_manual_peers | 已手动添加 |
+| net_manual_remove | 移除 %1$s |
+| net_unicast_targets | 单播通告目标 |
+| net_unicast_hint | 每行一个：IP、IP:端口，或前缀不小于 24 的网段（如 192.168.1.0/24），不支持主机名 |
+| net_unicast_invalid | 有目标格式不正确，请检查后再保存 |
+| net_unicast_save | 保存 |
+| net_scan | 网段扫描 |
+| net_scan_this | 扫描此网段 |
+| net_scan_hint | 192.168.1.0/24 |
+| net_scan_action | 扫描 |
+| net_scanning | 正在扫描 %1$s |
+| net_scan_result | 已探测 %1$d 个地址，发现 %2$d 台设备 |
+| net_tunnel_tailscale | Tailscale |
+| net_tunnel_zerotier | ZeroTier |
+| net_tunnel_wireguard | WireGuard |
+| net_tunnel_generic | 隧道 |
+| localsend_port_busy | %1$d 端口被占用（可能正在运行 LocalSend），只能向 LocalSend 设备发送 |
 | toast_copied | 已复制 |
 
 ## §7 通知规范

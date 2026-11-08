@@ -132,8 +132,13 @@ class Notifier(
         val body = truncate(bodyText(msg.body) ?: return, MAX_BODY_CODE_POINTS)
         val conv = conversationOf(msg.conv)
         // “我的设备”会话与桌面一致：标题用发送设备名
+        // 网页访客会话 core 不给标题，按类型本地化
         val title = truncate(
-            if (conv == null || conv.kind == ConvKind.SELF_DEVICES) msg.authorDeviceName else conv.title,
+            when {
+                conv == null || conv.kind == ConvKind.SELF_DEVICES -> msg.authorDeviceName
+                conv.kind == ConvKind.GUEST -> ctx.getString(R.string.conv_guest_title)
+                else -> conv.title
+            },
             MAX_TITLE_CODE_POINTS,
         )
         val id = msg.conv.hashCode()
