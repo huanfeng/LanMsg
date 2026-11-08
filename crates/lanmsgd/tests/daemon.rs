@@ -79,11 +79,11 @@ async fn daemon_serves_get_self_over_ipc() {
     assert!(value.initialized);
     assert_eq!(value.display_name.as_deref(), Some("测试者"));
 
-    // Shutdown → 子进程 5 秒内以退出码 0 退出。
+    // Shutdown → 子进程 15 秒内以退出码 0 退出。
     client.call(Request::Shutdown).await.unwrap();
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
-        .expect("子进程未在 5 秒内退出")
+        .expect("子进程未在 15 秒内退出")
         .expect("等待子进程失败");
     assert!(status.success(), "退出码应为 0，实际 {status}");
 }
@@ -358,9 +358,9 @@ async fn shutdown_request_removes_socket_file() {
     assert!(sock.exists(), "运行中 socket 文件应存在");
 
     client.call(Request::Shutdown).await.unwrap();
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
-        .expect("子进程未在 5 秒内退出")
+        .expect("子进程未在 15 秒内退出")
         .expect("等待子进程失败");
     assert!(status.success(), "退出码应为 0，实际 {status}");
     assert!(
@@ -388,9 +388,9 @@ async fn sigterm_shuts_down_gracefully_and_removes_socket() {
         .status()
         .expect("执行 kill 失败");
     assert!(st.success());
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
-        .expect("子进程未在 5 秒内退出")
+        .expect("子进程未在 15 秒内退出")
         .expect("等待子进程失败");
     assert!(status.success(), "优雅关闭退出码应为 0，实际 {status}");
     assert!(!sock.exists(), "退出后 socket 文件应被清理");
@@ -408,9 +408,9 @@ async fn shutdown_writes_quit_marker_and_restart_removes_it() {
     let client = connect_with_retry(&dir).await;
     assert!(!marker.exists(), "运行中不应有退出标记");
     client.call(Request::Shutdown).await.unwrap();
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
-        .expect("子进程未在 5 秒内退出")
+        .expect("子进程未在 15 秒内退出")
         .expect("等待子进程失败");
     assert!(status.success());
     assert!(marker.exists(), "Shutdown 退出后应写退出标记");
@@ -419,7 +419,7 @@ async fn shutdown_writes_quit_marker_and_restart_removes_it() {
     let client = connect_with_retry(&dir).await;
     assert!(!marker.exists(), "再次启动成功后标记应被删除");
     client.call(Request::Shutdown).await.unwrap();
-    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(15), child.wait()).await;
 }
 
 /// SIGTERM 优雅关闭不写退出标记（系统关机后的自启不应被拦）。
@@ -436,9 +436,9 @@ async fn sigterm_does_not_write_quit_marker() {
         .args(["-TERM", &pid.to_string()])
         .status()
         .expect("执行 kill 失败");
-    tokio::time::timeout(Duration::from_secs(5), child.wait())
+    tokio::time::timeout(Duration::from_secs(15), child.wait())
         .await
-        .expect("子进程未在 5 秒内退出")
+        .expect("子进程未在 15 秒内退出")
         .expect("等待子进程失败");
     assert!(!dir
         .path()

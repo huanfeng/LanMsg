@@ -65,6 +65,16 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
 
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let (service, accept_task) = rt.block_on(async {
+        // 信号处理器最先安装（早于 IPC 绑定），并由常驻任务统一转成退出通知，
+        // 无头与托盘两种模式共用：收到信号后走正常收尾（清理 IPC socket）。
+        let signals = SignalSet::register();
+        let sig_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            signals.wait().await;
+            tracing::info!("termination signal received, shutting down");
+            sig_tx.send_replace(true);
+        });
+
         // 先占 IPC 端点：已有实例在运行时尽早退出，不去动数据库与端口。
         let endpoint = endpoint_name(&data_dir);
         let listener = match IpcListener::bind(&endpoint) {
@@ -159,7 +169,8 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
 }
 
 impl DaemonRuntime {
-    /// 阻塞当前线程直到收到 Ctrl-C / SIGTERM（Unix）/ `Request::Shutdown`，然后关闭服务。
+    /// 阻塞当前线程直到收到 Ctrl-C / SIGTERM（Unix）/ `Request::Shutdown`（信号已由
+    /// `start_runtime` 注册的任务转成退出通知），然后关闭服务。
     /// 返回后 IPC 监听器已 Drop（socket 文件被清理）。
     pub fn block_until_shutdown(self) {
         let service = self.service.clone();
@@ -167,7 +178,6 @@ impl DaemonRuntime {
         let mut rx = self.shutdown_tx.subscribe();
         self.rt.block_on(async move {
             tokio::select! {
-                _ = wait_signal() => {}
                 _ = async { let _ = rx.wait_for(|v| *v).await; } => {}
             }
             tx.send_replace(true);
@@ -219,30 +229,65 @@ impl DaemonRuntime {
     }
 }
 
-/// 等待进程终止信号：Ctrl-C，Unix 另含 SIGTERM。监听失败时永不返回（继续常驻）。
-async fn wait_signal() {
+/// 终止信号的监听器：Unix 为 SIGTERM + SIGINT，其他平台在等待时才监听 Ctrl-C。
+/// 必须在绑定 IPC 之前创建：IPC 一开始接受连接，外部就可能立刻发信号，
+/// 处理器晚于此安装的话，信号会落在默认动作上（进程被杀、socket 文件不清理）。
+struct SignalSet {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                tokio::select! {
-                    r = tokio::signal::ctrl_c() => {
-                        if let Err(e) = r {
-                            tracing::warn!("failed to listen for Ctrl-C: {e}");
-                            term.recv().await;
-                        }
-                    }
-                    _ = term.recv() => {}
+    term: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    int: Option<tokio::signal::unix::Signal>,
+}
+
+impl SignalSet {
+    /// 注册信号处理器（需在 tokio 运行时上下文中调用）。
+    fn register() -> SignalSet {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let reg = |kind: SignalKind, name: &str| match signal(kind) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!("failed to listen for {name}: {e}");
+                    None
                 }
-                return;
+            };
+            SignalSet {
+                term: reg(SignalKind::terminate(), "SIGTERM"),
+                int: reg(SignalKind::interrupt(), "SIGINT"),
             }
-            Err(e) => tracing::warn!("failed to listen for SIGTERM: {e}"),
+        }
+        #[cfg(not(unix))]
+        {
+            SignalSet {}
         }
     }
-    if let Err(e) = tokio::signal::ctrl_c().await {
-        tracing::warn!("failed to listen for Ctrl-C: {e}");
-        std::future::pending::<()>().await;
+
+    /// 等待任一终止信号。监听失败的信号永不触发（进程继续常驻）。
+    async fn wait(self) {
+        #[cfg(unix)]
+        {
+            let SignalSet { term, int } = self;
+            let wait_one = |s: Option<tokio::signal::unix::Signal>| async move {
+                match s {
+                    Some(mut s) => {
+                        s.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                _ = wait_one(term) => {}
+                _ = wait_one(int) => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                tracing::warn!("failed to listen for Ctrl-C: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
     }
 }
 
