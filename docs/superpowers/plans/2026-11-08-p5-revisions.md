@@ -55,8 +55,8 @@
   - `WebSecrets::rotate_code(&mut self)` 同时重生成 `code`、`scrypt_salt` 并重算 `code_auth`；`CodeGuard::record_success()` 清零失败计数（确认成功时调用）。
   - `SessionKeys`、`WebSecrets` 实现 `ZeroizeOnDrop`，不再 `Clone`。
   - 配对码规范化 `normalize_code`：仅 ASCII 大写并去除空白。JS 侧必须做同样处理。
-- **T13（对 T12 的补充）**：`crypto.js` 的 `derive` 返回 `{kPage, kHost, kEncP2h, kEncH2p, th}`，页面发送用 `kEncP2h`、接收用 `kEncH2p`；JS 配对码输入只做 ASCII 大写与去空白，并对易混字符给出映射或提示（`0`/`O`、`1`/`I`/`L` 不在字母表内，字母表只有 `2-9` 与去掉 `I`、`O` 的字母）。
-- **T14（对 T12 的补充）**：加密帧的明文头必须带 `seq`（u64，每个方向独立、严格递增，收到不大于已见值的帧一律拒绝，防重放）；文件分块帧另带 `file_id` 与 `chunk_idx`，并在认证范围内（放在明文头中随 secretbox 一起认证），防止分块被换位或跨文件替换。配对码确认失败走 `CodeGuard::record_failure`，成功走 `record_success`，达到上限时 `rotate_code`。
+- **T13（对 T12 的补充）**：`crypto.js` 的 `derive` 返回 `{kPage, kHost, kEncP2h, kEncH2p, th}`，页面发送用 `kEncP2h`、接收用 `kEncH2p`；JS 配对码输入只做 ASCII 大写与去空白，输入 `0`、`1`、`I`、`O` 时提示“配对码不含 0、1、I、O”（字母表 `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` 含 `L`，`L` 不得改写）。
+- **T14（对 T12 的补充）**：加密帧的明文头必须带 `seq`（u64，每个方向独立、严格递增，收到不大于已见值的帧一律拒绝，防重放）；文件分块帧另带 `file_id` 与 `chunk_idx`，并在认证范围内（放在明文头中随 secretbox 一起认证），防止分块被换位或跨文件替换。配对码确认失败走 `CodeGuard::record_failure`，成功走 `record_success`（只在 `verify_page_mac` 通过后调用；denied、超时不清零），达到上限时 `rotate_code`。
 - **T13**：网页文案放 `web/strings.js`（`zh`、`en` 两套，按 `navigator.language` 选择）；`check-no-cjk.py` 扩展到扫描 `web/`，`web/strings.js` 列入白名单。页面总大小 < 300KB 的限制不变。
 - **T14**：访客会话标题由 core 返回空字符串，界面按会话类型显示本地化标题；上传目录名用英文。
 - **T15**：手动添加的错误走 `error_text`；扫描结果和"公网"等文案进 `strings.rs`；托盘文案进 lanmsgd `strings.rs`。

@@ -55,7 +55,7 @@ pub struct WebSecrets {
 }
 
 /// 配对码规范化：仅 ASCII 大写并去除空白。
-pub fn normalize_code(code: &str) -> String {
+pub(crate) fn normalize_code(code: &str) -> String {
     code.chars()
         .filter(|c| !c.is_whitespace())
         .map(|c| c.to_ascii_uppercase())
@@ -213,7 +213,7 @@ pub fn derive(
     }
     let hk = Hkdf::<Sha512>::new(Some(auth), shared.as_bytes());
     let mut okm = [0u8; 128];
-    // 96 字节远小于 HKDF-SHA512 上限，不会失败。
+    // 128 字节远小于 HKDF-SHA512 上限，不会失败。
     hk.expand(&th, &mut okm)
         .expect("128-byte okm is within HKDF limit");
     let mut keys = SessionKeys {
