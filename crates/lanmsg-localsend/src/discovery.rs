@@ -91,6 +91,7 @@ async fn send_announce(sock: &UdpSocket, mcast_port: u16, me: &LsInfo, announce:
 /// 启动发现。`mcast_port` 是组播 UDP 端口（默认 `LOCALSEND_PORT`），与 `me.port`（HTTP 端口，
 /// 对端据此回连）相互独立；官方协议未规定两者必须相同。
 /// `announce_enabled == false` 时只收不发，也不调用 register。
+/// `events` 用 `try_send` 投递：消费方必须及时取走，通道满时事件会被丢弃（发现是周期性的，丢失可自愈）。
 pub fn spawn(
     me: LsInfo,
     mcast_port: u16,
@@ -128,21 +129,29 @@ pub fn spawn(
                     let Some((peer, wants_reply)) = parse_datagram(&buf[..n], src.ip(), &me.fingerprint) else {
                         continue;
                     };
-                    if events.send(LsPeerEvent::Seen(peer.clone())).await.is_err() {
-                        return;
+                    match events.try_send(LsPeerEvent::Seen(peer.clone())) {
+                        Err(mpsc::error::TrySendError::Closed(_)) => return,
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            tracing::debug!("localsend peer event dropped: channel full");
+                        }
+                        Ok(()) => {}
                     }
-                    let now = Instant::now();
-                    recent.retain(|_, t| now.duration_since(*t) < REGISTER_DEDUP);
-                    let fresh = recent
-                        .insert((peer.ip, peer.info.fingerprint.clone()), now)
-                        .is_none();
-                    if wants_reply && announce_enabled && fresh {
+                    let fresh = if wants_reply && announce_enabled {
+                        let now = Instant::now();
+                        recent.retain(|_, t| now.duration_since(*t) < REGISTER_DEDUP);
+                        recent
+                            .insert((peer.ip, peer.info.fingerprint.clone()), now)
+                            .is_none()
+                    } else {
+                        false
+                    };
+                    if fresh {
                         let (client, me, sock, events) = (client.clone(), me.clone(), sock.clone(), events.clone());
                         tokio::spawn(async move {
                             match register_reply(&client, &me, &peer).await {
                                 Ok(info) => {
-                                    // 接收端已关闭说明发现被停用，忽略发送失败
-                                    let _ = events.send(LsPeerEvent::Seen(LsPeer { info, ip: peer.ip })).await;
+                                    // 接收端已关闭说明发现被停用，忽略发送失败；满则丢弃（见 spawn 文档）
+                                    let _ = events.try_send(LsPeerEvent::Seen(LsPeer { info, ip: peer.ip }));
                                 }
                                 Err(e) => {
                                     tracing::debug!("localsend register failed, replying via multicast: {e}");
@@ -165,7 +174,7 @@ pub fn spawn(
 pub fn lenient_client() -> Result<reqwest::Client, LsError> {
     reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(5))
         .build()
         .map_err(|e| LsError::Http(e.to_string()))
 }
@@ -188,6 +197,7 @@ pub async fn register_reply(
 ) -> Result<LsInfo, LsError> {
     let resp = client
         .post(register_url(peer))
+        .timeout(Duration::from_secs(5))
         .json(me)
         .send()
         .await
@@ -345,5 +355,63 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, LsError::Status(403)));
+    }
+
+    async fn free_udp_port() -> u16 {
+        let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        s.local_addr().unwrap().port()
+    }
+
+    /// 向发现 socket 单播一条 announce:true 的通告，通告里的 HTTP 端口指向假服务。
+    async fn announce_to(mcast_port: u16, http_port: u16) {
+        let msg = format!(
+            r#"{{"alias":"p","version":"2.0","fingerprint":"peerfp","port":{http_port},"protocol":"http","announce":true}}"#
+        );
+        let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        s.send_to(msg.as_bytes(), ("127.0.0.1", mcast_port))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn announce_disabled_receives_but_never_registers() {
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_port = http.local_addr().unwrap().port();
+        let mcast_port = free_udp_port().await;
+        let (tx, mut rx) = mpsc::channel(8);
+        let _d = spawn(info(crate::LsProtocol::Http, 1), mcast_port, false, tx).unwrap();
+        announce_to(mcast_port, http_port).await;
+        let LsPeerEvent::Seen(p) = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.info.fingerprint, "peerfp");
+        // 只收不发：不应有任何 register 连接
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), http.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn announce_enabled_registers_once_within_dedup_window() {
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_port = http.local_addr().unwrap().port();
+        let mcast_port = free_udp_port().await;
+        let (tx, _rx) = mpsc::channel(8);
+        let _d = spawn(info(crate::LsProtocol::Http, 1), mcast_port, true, tx).unwrap();
+        announce_to(mcast_port, http_port).await;
+        announce_to(mcast_port, http_port).await;
+        let (_conn, _) = tokio::time::timeout(Duration::from_secs(2), http.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        // 第二条通告在去重窗口内，不应再发起连接
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), http.accept())
+                .await
+                .is_err()
+        );
     }
 }

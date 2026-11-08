@@ -57,9 +57,16 @@ pub fn load_or_create(dir: &Path) -> Result<LsCert, LsError> {
     Ok(out)
 }
 
-/// 私钥必须能解析；证书只做 DER 外层 SEQUENCE 长度校验（不引入 X.509 解析依赖）。
+/// 私钥必须能解析；证书做 DER 外层 SEQUENCE 长度校验，并要求其中包含该私钥对应的公钥
+/// （不引入 X.509 解析依赖，用字节子串比对 SubjectPublicKeyInfo）。
 fn is_valid(cert_der: &[u8], key_der: &[u8]) -> bool {
-    KeyPair::try_from(key_der).is_ok() && der_sequence_is_complete(cert_der)
+    let Ok(key) = KeyPair::try_from(key_der) else {
+        return false;
+    };
+    let spki = key.public_key_der();
+    der_sequence_is_complete(cert_der)
+        && !spki.is_empty()
+        && cert_der.windows(spki.len()).any(|w| w == spki.as_slice())
 }
 
 fn der_sequence_is_complete(der: &[u8]) -> bool {
@@ -156,5 +163,17 @@ mod tests {
         load_or_create(dir.path()).unwrap();
         let m = fs::metadata(dir.path().join("localsend.key.der")).unwrap();
         assert_eq!(m.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn mismatched_cert_and_key_trigger_regeneration() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = load_or_create(a_dir.path()).unwrap();
+        let b = load_or_create(b_dir.path()).unwrap();
+        fs::write(a_dir.path().join("localsend.key.der"), &b.key_der).unwrap();
+        let c = load_or_create(a_dir.path()).unwrap();
+        assert_ne!(c.cert_der, a.cert_der);
+        assert_ne!(c.key_der, b.key_der);
     }
 }

@@ -1,11 +1,14 @@
 //! LocalSend v2 协议实现（类型、证书、局域网发现）。不依赖 lanmsg-core。
 
 pub mod cert;
+mod client;
 pub mod discovery;
+mod server;
 pub mod types;
 
 pub use cert::{fingerprint, load_or_create, LsCert};
 pub use discovery::{lenient_client, register_reply, LsDiscovery, LsPeerEvent};
+pub use server::{LocalSend, LsConfig, LsDecision, LsEvent};
 pub use types::{
     LsAnnounce, LsFileMeta, LsFileTimes, LsInfo, LsPeer, LsProtocol, PrepareUploadRequest,
     PrepareUploadResponse,
