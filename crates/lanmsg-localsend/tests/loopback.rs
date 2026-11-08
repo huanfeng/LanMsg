@@ -548,3 +548,74 @@ async fn multi_file_failure_aborts_cancels_and_cleans_part_files() {
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
+
+/// 同一来源已有待审批请求时，再来的 prepare-upload 返回 429；审批结束后名额归还。
+#[tokio::test]
+async fn second_pending_prepare_from_same_ip_is_429() {
+    let a = node(LsDecision::Accept).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = mpsc::channel(8);
+    let b = LocalSend::start(config(&dir, 0), tx).await.unwrap();
+    let b_peer = LsPeer {
+        info: b.info(),
+        ip: "127.0.0.1".parse().unwrap(),
+    };
+    let url = format!(
+        "https://127.0.0.1:{}/api/localsend/v2/prepare-upload",
+        b.info().port
+    );
+    let client = lenient_client().unwrap();
+    let req = raw_request(&b_peer, &a.peer(), "x.txt", None);
+
+    let first = {
+        let (client, url, req) = (client.clone(), url.clone(), req.clone());
+        tokio::spawn(async move {
+            client
+                .post(url)
+                .json(&req)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        })
+    };
+    // 第一个请求到达并停在审批上
+    let reply = next_incoming(&mut rx).await;
+    let r = client.post(&url).json(&req).send().await.unwrap();
+    assert_eq!(r.status(), 429);
+
+    reply.send(LsDecision::Reject).unwrap();
+    assert_eq!(first.await.unwrap(), 403);
+    // 名额已归还：再次请求会重新到达审批
+    let again = tokio::spawn({
+        let (client, url, req) = (client.clone(), url.clone(), req.clone());
+        async move {
+            client
+                .post(url)
+                .json(&req)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    });
+    let reply = next_incoming(&mut rx).await;
+    reply.send(LsDecision::Reject).unwrap();
+    assert_eq!(again.await.unwrap(), 403);
+}
+
+async fn next_incoming(
+    rx: &mut mpsc::Receiver<LsEvent>,
+) -> tokio::sync::oneshot::Sender<LsDecision> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(LsEvent::IncomingFiles { reply, .. }) = rx.recv().await {
+                return reply;
+            }
+        }
+    })
+    .await
+    .unwrap()
+}

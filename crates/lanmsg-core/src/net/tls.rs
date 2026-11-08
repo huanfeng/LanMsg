@@ -21,12 +21,12 @@ use crate::error::CoreError;
 use lanmsg_proto::ids::DeviceId;
 use lanmsg_proto::sign::DeviceKey;
 
-/// SNI 固定值。
 /// 显式使用 aws-lc-rs，不依赖进程级默认 provider（同一进程里可能还有别的 rustls 使用者）。
 fn provider() -> CryptoProvider {
     rustls::crypto::aws_lc_rs::default_provider()
 }
 
+/// SNI 固定值。
 pub const TLS_SNI: &str = "lanmsg";
 
 /// 生成设备自签证书：CN = 设备 hex 前 16 位，有效期 100 年。

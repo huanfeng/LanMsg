@@ -44,6 +44,10 @@
 - **T8**：错误状态存 `ErrorCode`。Android outbox 的 7 天清理不得删除中转站引用、主机尚未拉取的副本，要补测试。
 - **T9 / T10**：照原计划，日志和错误改英文。LocalSend 协议字段以官方 v2 协议文档为准，需要联网核对。
 - **T11**：`RequestView.preview` 用 `RequestPreviewView::Files{..}`；新增 PIN 系统事件变体（全局修订 4）；把 `ServiceConfig.localsend_port`（mod.rs:52、141）接入。
+  - 同一指纹可能在多个 IP 下有多条记录（`LocalSend::peers()` 键为 (ip, 指纹)）；桥不得按指纹取第一条。
+  - `trusted` 自动接受须同时核对：来源 IP 与该指纹上次记录的 IP 一致（`LsEvent` 的 `peer.ip`），并按 `classify` 过滤非 Lan 来源。
+  - 审批通过后若发送方收到 409（会话被占用）：界面按“对方忙”处理，不重复弹窗；`prepare-upload` 待审批名额有限（全局 8、每源 IP 1，超出 429）。
+  - `LocalSend::shutdown` 目前只停服务与发现，不清理进行中会话的 `.part`，也不发 `SessionFinished`；T11 接入开关时处理。
 - **T13**：网页文案放 `web/strings.js`（`zh`、`en` 两套，按 `navigator.language` 选择）；`check-no-cjk.py` 扩展到扫描 `web/`，`web/strings.js` 列入白名单。页面总大小 < 300KB 的限制不变。
 - **T14**：访客会话标题由 core 返回空字符串，界面按会话类型显示本地化标题；上传目录名用英文。
 - **T15**：手动添加的错误走 `error_text`；扫描结果和"公网"等文案进 `strings.rs`；托盘文案进 lanmsgd `strings.rs`。

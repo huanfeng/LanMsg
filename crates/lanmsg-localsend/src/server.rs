@@ -5,7 +5,9 @@ use std::io::Write;
 use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Query, State};
@@ -28,13 +30,32 @@ use crate::LsError;
 
 /// prepare-upload 请求体上限。
 const PREPARE_BODY_LIMIT: usize = 1024 * 1024;
-/// 等待用户决定的最长时间。
-const DECISION_TIMEOUT: Duration = Duration::from_secs(60);
-/// 会话无活动超过该时长后，允许被新的 prepare-upload 取代。
-const SESSION_IDLE: Duration = Duration::from_secs(300);
-/// 已发现对端的保留数量上限与存活时间。
-const PEERS_MAX: usize = 256;
-const PEER_TTL: Duration = Duration::from_secs(30 * 60);
+/// 可调上限（测试里用暂停的时钟验证）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    /// 等待用户决定的最长时间。
+    pub decision_timeout: Duration,
+    /// 会话无活动超过该时长后，允许被新的 prepare-upload 取代。
+    pub session_idle: Duration,
+    /// 已发现对端的保留数量上限与存活时间。
+    pub peers_max: usize,
+    pub peer_ttl: Duration,
+    /// 同时等待用户审批的 prepare-upload 全局上限（每个来源 IP 另限 1 个）。
+    pub pending_max: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            decision_timeout: Duration::from_secs(60),
+            session_idle: Duration::from_secs(300),
+            peers_max: 256,
+            peer_ttl: Duration::from_secs(30 * 60),
+            pending_max: 8,
+        }
+    }
+}
+
 /// 落盘文件名的 UTF-8 字节上限。
 const FILE_NAME_MAX_BYTES: usize = 200;
 
@@ -122,7 +143,10 @@ pub(crate) struct Inner {
     pub(crate) client: reqwest::Client,
     download_dir: PathBuf,
     events: mpsc::Sender<LsEvent>,
-    peers: Mutex<HashMap<(IpAddr, String), (LsPeer, Instant)>>,
+    peers: Mutex<PeerTable>,
+    /// 正在等待审批的来源 IP 及总数。
+    pending: Mutex<Vec<IpAddr>>,
+    limits: Limits,
     session: Mutex<Option<Session>>,
     handle: axum_server::Handle,
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -139,6 +163,14 @@ impl LocalSend {
     /// 启动接收服务与发现。TCP 端口被占用时不报错：`listening()` 为 false，
     /// 发现只收不发，仍可作为发送方使用。
     pub async fn start(cfg: LsConfig, events: mpsc::Sender<LsEvent>) -> Result<LocalSend, LsError> {
+        Self::start_with_limits(cfg, events, Limits::default()).await
+    }
+
+    pub(crate) async fn start_with_limits(
+        cfg: LsConfig,
+        events: mpsc::Sender<LsEvent>,
+        limits: Limits,
+    ) -> Result<LocalSend, LsError> {
         let ls_cert = cert::load_or_create(&cfg.cert_dir)?;
         let fingerprint = cert::fingerprint(&ls_cert.cert_der);
         std::fs::create_dir_all(&cfg.download_dir)?;
@@ -178,7 +210,9 @@ impl LocalSend {
             client: discovery::lenient_client()?,
             download_dir: cfg.download_dir,
             events,
-            peers: Mutex::new(HashMap::new()),
+            peers: Mutex::new(PeerTable::default()),
+            pending: Mutex::new(Vec::new()),
+            limits,
             session: Mutex::new(None),
             handle: handle.clone(),
             tasks: Mutex::new(Vec::new()),
@@ -230,12 +264,7 @@ impl LocalSend {
 
     /// 已发现的对端。
     pub fn peers(&self) -> Vec<LsPeer> {
-        let now = Instant::now();
-        lock(&self.inner.peers)
-            .values()
-            .filter(|(_, t)| now.duration_since(*t) < PEER_TTL)
-            .map(|(p, _)| p.clone())
-            .collect()
+        lock(&self.inner.peers).list(Instant::now(), &self.inner.limits)
     }
 
     /// 停止服务与发现。
@@ -270,28 +299,76 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// 已发现对端表：键为 (ip, 指纹)，有容量上限与过期。
+#[derive(Default)]
+struct PeerTable {
+    map: HashMap<(IpAddr, String), (LsPeer, Instant)>,
+}
+
+impl PeerTable {
+    fn insert(&mut self, peer: LsPeer, now: Instant, lim: &Limits) {
+        let key = (peer.ip, peer.info.fingerprint.clone());
+        if !self.map.contains_key(&key) {
+            self.map
+                .retain(|_, (_, t)| now.duration_since(*t) < lim.peer_ttl);
+            if self.map.len() >= lim.peers_max {
+                // 容量满：淘汰最久未见的
+                if let Some(oldest) = self
+                    .map
+                    .iter()
+                    .min_by_key(|(_, (_, t))| *t)
+                    .map(|(k, _)| k.clone())
+                {
+                    self.map.remove(&oldest);
+                }
+            }
+        }
+        self.map.insert(key, (peer, now));
+    }
+
+    fn list(&self, now: Instant, lim: &Limits) -> Vec<LsPeer> {
+        self.map
+            .values()
+            .filter(|(_, t)| now.duration_since(*t) < lim.peer_ttl)
+            .map(|(p, _)| p.clone())
+            .collect()
+    }
+}
+
+/// 待审批名额的占用凭证，drop 时归还。
+struct PendingSlot {
+    inner: Arc<Inner>,
+    ip: IpAddr,
+}
+
+impl PendingSlot {
+    /// 全局已满或该 IP 已有待审批请求时返回 `None`。
+    fn acquire(inner: &Arc<Inner>, ip: IpAddr) -> Option<PendingSlot> {
+        let mut g = lock(&inner.pending);
+        if g.len() >= inner.limits.pending_max || g.contains(&ip) {
+            return None;
+        }
+        g.push(ip);
+        Some(PendingSlot {
+            inner: inner.clone(),
+            ip,
+        })
+    }
+}
+
+impl Drop for PendingSlot {
+    fn drop(&mut self) {
+        let mut g = lock(&self.inner.pending);
+        if let Some(i) = g.iter().position(|x| *x == self.ip) {
+            g.swap_remove(i);
+        }
+    }
+}
+
 impl Inner {
     /// 记录对端并上报 `PeerSeen`（通道满则丢弃）。
     fn note_peer(&self, peer: LsPeer) {
-        {
-            let now = Instant::now();
-            let mut peers = lock(&self.peers);
-            let key = (peer.ip, peer.info.fingerprint.clone());
-            if !peers.contains_key(&key) {
-                peers.retain(|_, (_, t)| now.duration_since(*t) < PEER_TTL);
-                if peers.len() >= PEERS_MAX {
-                    // 容量满：淘汰最久未见的
-                    if let Some(oldest) = peers
-                        .iter()
-                        .min_by_key(|(_, (_, t))| *t)
-                        .map(|(k, _)| k.clone())
-                    {
-                        peers.remove(&oldest);
-                    }
-                }
-            }
-            peers.insert(key, (peer.clone(), now));
-        }
+        lock(&self.peers).insert(peer.clone(), Instant::now(), &self.limits);
         let _ = self.events.try_send(LsEvent::PeerSeen(peer));
     }
 }
@@ -326,9 +403,9 @@ fn new_token() -> String {
 }
 
 /// 当前会话是否禁止被新的 prepare-upload 取代：有文件正在接收，或仍在无活动窗口内。
-fn session_blocks_takeover(sess: &Session) -> bool {
+fn session_blocks_takeover(sess: &Session, lim: &Limits) -> bool {
     sess.files.values().any(|f| f.state == FileState::Receiving)
-        || sess.last_activity.elapsed() < SESSION_IDLE
+        || sess.last_activity.elapsed() < lim.session_idle
 }
 
 async fn prepare_upload(
@@ -351,10 +428,15 @@ async fn prepare_upload(
     // 提前拒绝，避免对用户弹出注定失败的请求
     if lock(&s.session)
         .as_ref()
-        .is_some_and(session_blocks_takeover)
+        .is_some_and(|x| session_blocks_takeover(x, &s.limits))
     {
         return StatusCode::CONFLICT.into_response();
     }
+
+    // 审批期间占用名额，防止被刷屏
+    let Some(_slot) = PendingSlot::acquire(&s, addr.ip()) else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
 
     let (reply, rx) = oneshot::channel();
     let text_only = req.files.len() == 1
@@ -382,7 +464,7 @@ async fn prepare_upload(
     if s.events.send(event).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    let decision = tokio::time::timeout(DECISION_TIMEOUT, rx).await;
+    let decision = tokio::time::timeout(s.limits.decision_timeout, rx).await;
     if !matches!(decision, Ok(Ok(LsDecision::Accept))) {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -411,7 +493,9 @@ async fn prepare_upload(
     // 审批通过后才替换；审批期间可能已有别的会话建立，再判一次
     let superseded = {
         let mut g = lock(&s.session);
-        if g.as_ref().is_some_and(session_blocks_takeover) {
+        if g.as_ref()
+            .is_some_and(|x| session_blocks_takeover(x, &s.limits))
+        {
             return StatusCode::CONFLICT.into_response();
         }
         g.replace(Session {
@@ -830,5 +914,128 @@ mod tests {
         assert_eq!(f2.file_name().unwrap(), "a (2).txt");
         let (f3, _p3, _h3) = reserve_path(d.path(), "noext").unwrap();
         assert_eq!(f3.file_name().unwrap(), "noext");
+    }
+
+    fn peer(ip: &str, fp: &str) -> LsPeer {
+        LsPeer {
+            info: LsInfo {
+                alias: "p".into(),
+                version: "2.0".into(),
+                device_model: None,
+                device_type: None,
+                fingerprint: fp.into(),
+                port: 1,
+                protocol: LsProtocol::Https,
+                download: false,
+            },
+            ip: ip.parse().unwrap(),
+        }
+    }
+
+    fn session(files: &[FileState]) -> Session {
+        Session {
+            id: "s".into(),
+            peer: peer("10.0.0.1", "fp"),
+            files: files
+                .iter()
+                .enumerate()
+                .map(|(i, st)| {
+                    let meta = LsFileMeta {
+                        id: i.to_string(),
+                        file_name: "f".into(),
+                        size: 1,
+                        file_type: "x".into(),
+                        sha256: None,
+                        preview: None,
+                        metadata: None,
+                    };
+                    (
+                        i.to_string(),
+                        SessionFile {
+                            meta,
+                            token: "t".into(),
+                            state: *st,
+                            part: None,
+                        },
+                    )
+                })
+                .collect(),
+            last_activity: Instant::now(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_session_can_be_taken_over_but_receiving_never() {
+        let lim = Limits::default();
+        let idle = session(&[FileState::Waiting]);
+        assert!(session_blocks_takeover(&idle, &lim));
+        tokio::time::advance(lim.session_idle + Duration::from_secs(1)).await;
+        assert!(!session_blocks_takeover(&idle, &lim));
+        let receiving = session(&[FileState::Done, FileState::Receiving]);
+        tokio::time::advance(lim.session_idle * 10).await;
+        assert!(session_blocks_takeover(&receiving, &lim));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_table_evicts_oldest_at_capacity() {
+        let lim = Limits {
+            peers_max: 3,
+            ..Limits::default()
+        };
+        let mut t = PeerTable::default();
+        for i in 0..3 {
+            t.insert(peer("10.0.0.1", &format!("fp{i}")), Instant::now(), &lim);
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        t.insert(peer("10.0.0.1", "fp3"), Instant::now(), &lim);
+        let mut fps: Vec<_> = t
+            .list(Instant::now(), &lim)
+            .into_iter()
+            .map(|p| p.info.fingerprint)
+            .collect();
+        fps.sort();
+        assert_eq!(fps, ["fp1", "fp2", "fp3"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_table_expires_entries_and_keys_by_ip_and_fingerprint() {
+        let lim = Limits::default();
+        let mut t = PeerTable::default();
+        t.insert(peer("10.0.0.1", "same"), Instant::now(), &lim);
+        t.insert(peer("10.0.0.2", "same"), Instant::now(), &lim);
+        assert_eq!(t.list(Instant::now(), &lim).len(), 2);
+        tokio::time::advance(lim.peer_ttl + Duration::from_secs(1)).await;
+        assert!(t.list(Instant::now(), &lim).is_empty());
+        // 过期条目在下一次插入新键时被清掉
+        t.insert(peer("10.0.0.3", "x"), Instant::now(), &lim);
+        assert_eq!(t.map.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_slots_are_limited_globally_and_per_ip() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let cfg = LsConfig {
+            alias: "t".into(),
+            device_model: "m".into(),
+            device_type: "desktop".into(),
+            download_dir: dir.path().join("dl"),
+            cert_dir: dir.path().join("cert"),
+            http_port: 0,
+            mcast_port: 53317,
+            enable_discovery: false,
+        };
+        let limits = Limits {
+            pending_max: 2,
+            ..Limits::default()
+        };
+        let ls = LocalSend::start_with_limits(cfg, tx, limits).await.unwrap();
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let a = PendingSlot::acquire(&ls.inner, ip("10.0.0.1")).unwrap();
+        assert!(PendingSlot::acquire(&ls.inner, ip("10.0.0.1")).is_none());
+        let _b = PendingSlot::acquire(&ls.inner, ip("10.0.0.2")).unwrap();
+        assert!(PendingSlot::acquire(&ls.inner, ip("10.0.0.3")).is_none());
+        drop(a);
+        assert!(PendingSlot::acquire(&ls.inner, ip("10.0.0.3")).is_some());
     }
 }
