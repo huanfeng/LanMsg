@@ -474,6 +474,13 @@ impl Service {
         self.inner.web.set_idle_timeout(d);
     }
 
+    /// 测试辅助：让网页传输把所有来源当作非局域网。
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn set_web_force_non_lan_for_test(&self, on: bool) {
+        self.inner.web.set_force_non_lan(on);
+    }
+
     /// 测试辅助：重连任务循环迭代总数（检测空转）。
     #[doc(hidden)]
     pub fn redial_loop_iterations_for_test(&self) -> u64 {

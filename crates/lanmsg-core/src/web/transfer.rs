@@ -42,6 +42,10 @@ pub struct UploadState {
     pub have: Vec<bool>,
     /// finish 成功后记录消息 ID，重复 finish 直接返回同一结果。
     pub finished: Option<String>,
+    /// finish 正在处理中（防并发重复完成）。
+    pub finishing: bool,
+    /// finish 在 rename 之后失败且无法回滚：此上传不可再完成。
+    pub failed: bool,
 }
 
 impl UploadState {
@@ -65,6 +69,8 @@ impl UploadState {
             path_part,
             dir,
             finished: None,
+            finishing: false,
+            failed: false,
         }
     }
 
@@ -83,6 +89,32 @@ fn indices(v: &[bool], want: bool) -> Vec<u32> {
         .filter(|(_, b)| **b == want)
         .map(|(i, _)| i as u32)
         .collect()
+}
+
+/// 文件名的最大字节数（UTF-8）。
+pub const NAME_MAX_BYTES: usize = 200;
+
+/// 按 UTF-8 字节数截断文件名，尽量保留扩展名。
+pub fn truncate_name_keep_ext(name: &str, max: usize) -> String {
+    if name.len() <= max {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 && name.len() - i <= 16 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    let mut keep = max.saturating_sub(ext.len());
+    while !stem.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    format!("{}{}", &stem[..keep], ext)
+}
+
+/// 是否为本模块创建的遗留临时文件名：`.{32 位小写十六进制}.part`。
+pub fn is_part_name(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|n| n.strip_suffix(".part"))
+        .is_some_and(|h| h.len() == 32 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 
 /// 组装分块明文。
@@ -156,6 +188,22 @@ mod tests {
         assert_eq!(chunk_len(CHUNK_SIZE as u64 + 5, 1), 5);
         assert_eq!(chunk_len(CHUNK_SIZE as u64 + 5, 0), CHUNK_SIZE as usize);
         assert_eq!(chunk_len(10, 1), 0);
+    }
+
+    #[test]
+    fn name_truncation_keeps_extension_and_char_boundary() {
+        let long = format!("{}.txt", "好".repeat(100));
+        let t = truncate_name_keep_ext(&long, NAME_MAX_BYTES);
+        assert!(t.len() <= NAME_MAX_BYTES && t.ends_with(".txt"));
+        assert_eq!(truncate_name_keep_ext("a.b", 200), "a.b");
+    }
+
+    #[test]
+    fn part_name_pattern() {
+        assert!(is_part_name(&format!(".{}.part", "ab01".repeat(8))));
+        assert!(!is_part_name(".abc.part"));
+        assert!(!is_part_name(&format!("{}.part", "ab01".repeat(8))));
+        assert!(!is_part_name(&format!(".{}.part", "AB01".repeat(8))));
     }
 
     #[test]

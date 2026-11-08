@@ -121,7 +121,7 @@
       if (hostMac === "denied") return fail("denied");
       if (hostMac === null) return fail("net_error");
       if (!C.checkHostMac(keys, hostMac)) return fail("verify_failed");
-      openChat(h.host_name);
+      openChat();
     } catch (err) {
       fail("net_error");
     }

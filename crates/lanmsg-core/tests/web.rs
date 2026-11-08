@@ -964,3 +964,157 @@ async fn web_stop_ends_sessions_and_emits_none() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn non_lan_source_is_rejected_everywhere() {
+    let mut n = node_offline().await;
+    n.init_first("host").await;
+    let (_, port, key) = start_web(&n).await;
+    let mut page = connect_allowed(&mut n, port, key).await;
+    // 注入“非局域网”判定：静态页、握手、WebSocket 全部 403，且仍带安全头。
+    n.svc.set_web_force_non_lan_for_test(true);
+    let base = format!("http://127.0.0.1:{port}");
+    let r = client().get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(
+        r.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    let sk = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let r = client()
+        .post(format!("{base}/api/web/hello"))
+        .json(
+            &json!({"mode":"key","page_pk":b64u(&PublicKey::from(&sk).to_bytes()),
+            "page_nonce":b64u(&[7u8; 16])}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let req = page.ws_req();
+    assert_eq!(page.ws_refused_with(Some(&req)).await, 403);
+    // 恢复后同一会话仍可用。
+    n.svc.set_web_force_non_lan_for_test(false);
+    let _ws = page.ws().await;
+}
+
+#[tokio::test]
+async fn hello_does_not_leak_host_name_but_welcome_has_it() {
+    let mut n = node_offline().await;
+    n.init_first("host").await;
+    let (_, port, key) = start_web(&n).await;
+    let sk = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let r = client()
+        .post(format!("http://127.0.0.1:{port}/api/web/hello"))
+        .json(
+            &json!({"mode":"key","page_pk":b64u(&PublicKey::from(&sk).to_bytes()),
+            "page_nonce":b64u(&[7u8; 16])}),
+        )
+        .send()
+        .await
+        .unwrap();
+    let j: Value = r.json().await.unwrap();
+    assert!(j.get("host_name").is_none(), "{j}");
+    let mut page = connect_allowed(&mut n, port, key).await;
+    let mut ws = page.ws().await;
+    let w = page.ws_next(&mut ws).await;
+    assert_eq!(w["t"], "welcome");
+    assert!(w["host_name"].is_string());
+}
+
+#[tokio::test]
+async fn long_upload_name_is_truncated_keeping_extension() {
+    let mut n = node_offline().await;
+    n.init_first("host").await;
+    let (_, port, key) = start_web(&n).await;
+    let mut page = connect_allowed(&mut n, port, key).await;
+    let name = format!("{}.txt", "好".repeat(150));
+    let init = page.upload_init("k", &name, 4).await;
+    let fid = init["fid"].as_str().unwrap().to_string();
+    page.put_chunk(&fid, 0, b"data").await;
+    assert_eq!(page.finish(&fid).await.status(), 200);
+    let names: Vec<String> = std::fs::read_dir(dl_dir(&n))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(
+        names[0].len() <= 200 && names[0].ends_with(".txt"),
+        "{names:?}"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_finish_publishes_once() {
+    let mut n = node_offline().await;
+    n.init_first("host").await;
+    let (_, port, key) = start_web(&n).await;
+    let mut page = connect_allowed(&mut n, port, key).await;
+    let init = page.upload_init("k", "once.bin", 4).await;
+    let fid = init["fid"].as_str().unwrap().to_string();
+    page.put_chunk(&fid, 0, b"data").await;
+    let hs: Vec<String> = (0..4)
+        .map(|_| page.req_header("finish", &fid, None))
+        .collect();
+    let futs = hs.into_iter().map(|h| {
+        let (http, base, sid, fid) = (
+            page.http.clone(),
+            page.base.clone(),
+            page.sid.clone(),
+            fid.clone(),
+        );
+        async move {
+            http.post(format!("{base}/api/web/upload/{fid}/finish"))
+                .header("X-LanMsg-Session", sid)
+                .header("X-LanMsg-Req", h)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    });
+    let codes = futures_util::future::join_all(futs).await;
+    assert!(codes.iter().all(|c| *c == 200 || *c == 503), "{codes:?}");
+    assert!(codes.contains(&200), "{codes:?}");
+    // 只发布了一个文件、一条消息。
+    assert_eq!(std::fs::read_dir(dl_dir(&n)).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn stale_part_files_are_cleaned_on_start() {
+    let n = node_offline().await;
+    n.init_first("host").await;
+    let dir = dl_dir(&n);
+    std::fs::create_dir_all(&dir).unwrap();
+    let stale = dir.join(format!(".{}.part", "ab01".repeat(8)));
+    let keep1 = dir.join(".keep.part");
+    let keep2 = dir.join("report.part");
+    for p in [&stale, &keep1, &keep2] {
+        std::fs::write(p, b"x").unwrap();
+    }
+    start_web(&n).await;
+    wait_until(|| async { !stale.exists() }, 5).await;
+    assert!(keep1.exists() && keep2.exists());
+}
+
+#[tokio::test]
+async fn oversized_ws_message_closes_connection() {
+    let mut n = node_offline().await;
+    n.init_first("host").await;
+    let (_, port, key) = start_web(&n).await;
+    let mut page = connect_allowed(&mut n, port, key).await;
+    let mut ws = page.ws().await;
+    page.ws_until(&mut ws, |v| v["t"] == "welcome").await;
+    let _ = ws.send(Message::Binary(vec![0u8; 3 << 20])).await;
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return true,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert_eq!(closed, Ok(true));
+}

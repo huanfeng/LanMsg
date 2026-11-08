@@ -18,7 +18,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use crate::web::session::{peer_is_lan, Shared, WaitStatus, WebErr, WsOut};
+use crate::web::session::{Shared, WaitStatus, WebErr, WsOut};
 use crate::web::transfer::CHUNK_SIZE;
 
 const SESSION_HEADER: &str = "x-lanmsg-session";
@@ -42,7 +42,7 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
         .route("/api/web/download/:fid/:index", get(download))
         .fallback(get(static_file))
         .layer(DefaultBodyLimit::max(CHUNK_SIZE as usize + 4096))
-        .layer(middleware::from_fn(guard))
+        .layer(middleware::from_fn_with_state(shared.clone(), guard))
         .with_state(shared)
 }
 
@@ -63,8 +63,13 @@ pub(crate) async fn serve(
 }
 
 /// 所有请求先判来源：非局域网一律 403；所有响应都带安全头。
-async fn guard(ConnectInfo(addr): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
-    let mut resp = if peer_is_lan(addr) {
+async fn guard(
+    State(sh): State<Arc<Shared>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let mut resp = if sh.allows(addr) {
         next.run(req).await
     } else {
         StatusCode::FORBIDDEN.into_response()
@@ -108,6 +113,12 @@ impl IntoResponse for WebErr {
                 Json(json!({"error":"too_many"})),
             )
                 .into_response(),
+            WebErr::Busy => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"busy"})),
+            )
+                .into_response(),
+            WebErr::Gone => (StatusCode::GONE, Json(json!({"error":"gone"}))).into_response(),
             WebErr::TooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Json(json!({"error":"too_large"})),
@@ -191,7 +202,6 @@ async fn hello(
         "session": out.session,
         "host_pk": b64u(&out.host_pk),
         "host_nonce": b64u(&out.host_nonce),
-        "host_name": out.host_name,
         "scrypt_salt": b64u(&out.scrypt_salt),
     })))
 }
@@ -244,7 +254,11 @@ async fn ws_route(
     let req = query_param(&q, "req").ok_or(WebErr::Forbidden)?;
     sh.check_req(&sid, &req, "ws", None, None)?;
     let (conn, rx, shutdown) = sh.ws_attach(&sid)?;
-    Ok(ws.on_upgrade(move |socket| ws_loop(sh, sid, conn, rx, shutdown, socket)))
+    // 页面单条消息不超过 64KB 文本（封包后略大），限制 2MiB 防内存放大。
+    Ok(ws
+        .max_message_size(2 << 20)
+        .max_frame_size(2 << 20)
+        .on_upgrade(move |socket| ws_loop(sh, sid, conn, rx, shutdown, socket)))
 }
 
 async fn ws_loop(

@@ -35,8 +35,8 @@ use crate::service::views::{conv_summary, message_view};
 use crate::store::{BlobLocalKind, ConvKindRow, ConvRow, MsgStateRow, Store, StoredMessage};
 use crate::web::crypto::{host_respond, CodeGuard, SessionKeys, WebMode, WebSecrets};
 use crate::web::transfer::{
-    chunk_count, frame_chunk, parse_chunk, read_chunk, write_chunk, UploadState, CHUNK_SIZE,
-    MAX_FILE_SIZE,
+    chunk_count, frame_chunk, is_part_name, parse_chunk, read_chunk, truncate_name_keep_ext,
+    write_chunk, UploadState, CHUNK_SIZE, MAX_FILE_SIZE, NAME_MAX_BYTES,
 };
 
 /// 防重放滑动窗口大小。
@@ -74,6 +74,10 @@ pub enum WebErr {
     BadRequest,
     /// 429。
     TooMany,
+    /// 503：该上传正在被另一个 finish 处理。
+    Busy,
+    /// 410：上传在最终化中失败且无法恢复。
+    Gone,
     /// 413：会话声明的上传总量超限。
     TooLarge,
     /// 507：磁盘可用空间不足。
@@ -209,6 +213,8 @@ pub struct WebDeps {
 pub(crate) struct Shared {
     deps: WebDeps,
     idle_timeout_ms: AtomicU64,
+    /// 测试钩子：把所有来源按非局域网处理。
+    force_non_lan: std::sync::atomic::AtomicBool,
     state: Mutex<Option<Run>>,
 }
 
@@ -222,7 +228,6 @@ pub(crate) struct HelloOut {
     pub session: String,
     pub host_pk: [u8; 32],
     pub host_nonce: [u8; 16],
-    pub host_name: String,
     pub scrypt_salt: [u8; 16],
 }
 
@@ -341,9 +346,16 @@ impl WebHost {
             shared: Arc::new(Shared {
                 deps,
                 idle_timeout_ms: AtomicU64::new(WEB_IDLE_TIMEOUT.as_millis() as u64),
+                force_non_lan: std::sync::atomic::AtomicBool::new(false),
                 state: Mutex::new(None),
             }),
         }
+    }
+
+    /// 测试钩子：把所有来源当作非局域网（验证 403）。
+    #[doc(hidden)]
+    pub fn set_force_non_lan(&self, on: bool) {
+        self.shared.force_non_lan.store(on, Ordering::SeqCst);
     }
 
     /// 测试钩子：缩短会话空闲超时。
@@ -388,6 +400,7 @@ impl WebHost {
         }
         // 上次异常退出遗留的未结束访客记录。
         self.shared.close_stale_guests();
+        self.shared.clean_stale_parts().await;
         let app = crate::web::server::router(self.shared.clone());
         tokio::spawn(crate::web::server::serve(listener, app, shutdown_rx));
         tokio::spawn(self.shared.clone().sweeper());
@@ -527,6 +540,11 @@ impl Shared {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// 来源是否允许访问（非局域网一律拒绝）。
+    pub(crate) fn allows(&self, addr: SocketAddr) -> bool {
+        !self.force_non_lan.load(Ordering::SeqCst) && peer_is_lan(addr)
+    }
+
     fn idle_timeout(&self) -> Duration {
         Duration::from_millis(self.idle_timeout_ms.load(Ordering::SeqCst))
     }
@@ -542,6 +560,25 @@ impl Shared {
                 [],
             );
         }
+    }
+
+    /// 清理上次异常退出遗留的 `.{hex}.part`（仅匹配本模块生成的文件名）。
+    async fn clean_stale_parts(&self) {
+        let Ok(settings) = crate::settings::load_settings(&self.deps.store) else {
+            return;
+        };
+        let dir = PathBuf::from(settings.download_dir).join(UPLOAD_DIR_NAME);
+        let _ = tokio::task::spawn_blocking(move || {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                return;
+            };
+            for e in rd.flatten() {
+                if e.file_name().to_str().is_some_and(is_part_name) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        })
+        .await;
     }
 
     fn host_name(&self) -> String {
@@ -571,7 +608,6 @@ impl Shared {
         };
         let pk: [u8; 32] = b64u_array(page_pk).ok_or(WebErr::BadRequest)?;
         let nonce: [u8; 16] = b64u_array(page_nonce).ok_or(WebErr::BadRequest)?;
-        let host_name = self.host_name();
         let mut g = self.lock();
         let run = g.as_mut().ok_or(WebErr::NotFound)?;
 
@@ -614,7 +650,6 @@ impl Shared {
             session: hs.session.clone(),
             host_pk: hs.host_pk,
             host_nonce: hs.host_nonce,
-            host_name,
             scrypt_salt: run.secrets.scrypt_salt,
         };
         let (status_tx, _) = watch::channel(WaitStatus::Pending);
@@ -875,10 +910,11 @@ impl Shared {
         let settings = crate::settings::load_settings(&self.deps.store)?;
         let dir = PathBuf::from(settings.download_dir).join(UPLOAD_DIR_NAME);
         let fid = random_hex(16);
+        let name = truncate_name_keep_ext(name, NAME_MAX_BYTES);
         let st = UploadState::new(
             fid.clone(),
             client_key.to_string(),
-            name.to_string(),
+            name,
             mime.to_string(),
             size,
             dir.clone(),
@@ -961,14 +997,24 @@ impl Shared {
     }
 
     pub(crate) async fn finish(&self, sid: &str, fid: &str) -> Result<Vec<u8>, WebErr> {
-        // 取快照：缺块则 409；已完成则幂等返回。
+        // 取快照并在锁内置 finishing：缺块 409、已完成幂等、并发 finish 返回 Busy。
         let (name, mime, size, part, dir, conv, pseudo) = {
             let mut g = self.lock();
             let sess = allowed_mut(&mut g, sid)?;
-            let u = sess.uploads.get(fid).ok_or(WebErr::NotFound)?;
+            let (conv, pseudo) = (
+                sess.conv.ok_or(WebErr::Internal)?,
+                sess.pseudo.ok_or(WebErr::Internal)?,
+            );
+            let u = sess.uploads.get_mut(fid).ok_or(WebErr::NotFound)?;
             if let Some(msg) = u.finished.clone() {
                 let resp = json!({"msg":msg,"fid":fid});
                 return seal_value(sess, resp);
+            }
+            if u.failed {
+                return Err(WebErr::Gone);
+            }
+            if u.finishing {
+                return Err(WebErr::Busy);
             }
             let missing = u.missing_list();
             if !missing.is_empty() {
@@ -976,30 +1022,72 @@ impl Shared {
                 let body = seal_value(sess, resp)?;
                 return Err(WebErr::Conflict(body));
             }
+            u.finishing = true;
             (
                 u.name.clone(),
                 u.mime.clone(),
                 u.size,
                 u.path_part.clone(),
                 u.dir.clone(),
-                sess.conv.ok_or(WebErr::Internal)?,
-                sess.pseudo.ok_or(WebErr::Internal)?,
+                conv,
+                pseudo,
             )
         };
         let dest = unique_path(&dir.join(sanitize_component(&name)));
         let (p2, d2) = (part.clone(), dest.clone());
-        tokio::task::spawn_blocking(move || {
+        let renamed = tokio::task::spawn_blocking(move || {
             if std::fs::metadata(&p2)?.len() != size {
                 return Err(std::io::Error::other("part size mismatch"));
             }
             std::fs::rename(&p2, &d2)
         })
-        .await
-        .map_err(|_| WebErr::Internal)?
-        .map_err(|e| {
-            tracing::warn!(error = %e, "finalizing upload failed");
-            WebErr::Internal
-        })?;
+        .await;
+        if !matches!(renamed, Ok(Ok(()))) {
+            tracing::warn!("finalizing upload failed before rename");
+            self.set_upload_flags(sid, fid, false, false);
+            return Err(WebErr::Internal);
+        }
+        match self
+            .publish_upload(sid, fid, &dest, &name, &mime, size, conv, pseudo)
+            .await
+        {
+            Ok(body) => Ok(body),
+            Err(e) => {
+                // 回滚：把文件移回 .part，允许页面重试 finish；回滚失败则标记为不可恢复。
+                let (d3, p3) = (dest.clone(), part.clone());
+                let back = tokio::task::spawn_blocking(move || std::fs::rename(&d3, &p3)).await;
+                let restored = matches!(back, Ok(Ok(())));
+                self.set_upload_flags(sid, fid, false, !restored);
+                Err(e)
+            }
+        }
+    }
+
+    fn set_upload_flags(&self, sid: &str, fid: &str, finishing: bool, failed: bool) {
+        let mut g = self.lock();
+        if let Some(u) = g
+            .as_mut()
+            .and_then(|r| r.sessions.get_mut(sid))
+            .and_then(|s| s.uploads.get_mut(fid))
+        {
+            u.finishing = finishing;
+            u.failed = failed;
+        }
+    }
+
+    /// rename 之后的登记、入库与推送。
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_upload(
+        &self,
+        sid: &str,
+        fid: &str,
+        dest: &std::path::Path,
+        name: &str,
+        mime: &str,
+        size: u64,
+        conv: ConvId,
+        pseudo: DeviceId,
+    ) -> Result<Vec<u8>, WebErr> {
         let d = &self.deps;
         let self_device = d
             .identity
@@ -1010,23 +1098,24 @@ impl Shared {
             d.store.clone(),
             self_device,
             d.thumbnailer.clone(),
-            dest.clone(),
+            dest.to_path_buf(),
             BlobLocalKind::Downloaded,
             now_millis(),
         )
         .await?;
         let id = self.insert_guest_message(&conv, &pseudo, MsgBody::Files { items: vec![meta] })?;
         let entry = FileEntry {
-            path: dest,
-            name,
+            path: dest.to_path_buf(),
+            name: name.to_string(),
             size,
-            mime,
+            mime: mime.to_string(),
         };
         let msg_id = id.to_string();
         let mut g = self.lock();
         let sess = allowed_mut(&mut g, sid)?;
         if let Some(u) = sess.uploads.get_mut(fid) {
             u.finished = Some(msg_id.clone());
+            u.finishing = false;
         }
         sess.files.insert(fid.to_string(), entry.clone());
         push_entry(
