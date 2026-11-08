@@ -126,6 +126,10 @@ mod tests {
         })
         .await
         .unwrap();
+        // Windows 只接受命名管道路径，由临时目录算出唯一端点
+        #[cfg(windows)]
+        let endpoint = lanmsg_api::ipc::endpoint_name(dir.path());
+        #[cfg(not(windows))]
         let endpoint = dir.path().join("t.sock").to_str().unwrap().to_string();
         let listener = IpcListener::bind(&endpoint).unwrap();
         let focus_owner = Arc::new(AtomicU64::new(0));

@@ -84,18 +84,16 @@ jobs:
           targets: ${{ matrix.arch == 'x64' && 'x86_64-pc-windows-msvc' || 'aarch64-pc-windows-msvc' }}
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            wind-installer
 
       # The packaging tools are built from the pinned source tag instead of downloading a release.
       - name: Build wind-installer tools
         shell: pwsh
         run: |
-          git clone --depth 1 --branch $env:WIND_INSTALLER_TAG https://github.com/huanfeng/wind-installer wind-installer
+          # Cloned outside the checkout: inside it cargo would treat the tools as a member of the LanMsg workspace.
+          $dir = Join-Path $env:RUNNER_TEMP "wind-installer"
+          git clone --depth 1 --branch $env:WIND_INSTALLER_TAG https://github.com/huanfeng/wind-installer $dir
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          Push-Location wind-installer
+          Push-Location $dir
           cargo build --locked --release --bin wind-installer --bin wind-uninstaller
           if ($LASTEXITCODE -ne 0) { exit 1 }
           cargo build --locked --release --bin wind-packer --features packer
@@ -108,7 +106,7 @@ jobs:
           ./packaging/windows/build-dist.ps1
           -Arch ${{ matrix.arch }}
           -Version "${{ needs.meta.outputs.version }}"
-          -WindInstallerDir "$env:GITHUB_WORKSPACE/wind-installer"
+          -WindInstallerDir "$env:RUNNER_TEMP/wind-installer"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -160,7 +158,6 @@ jobs:
   linux-headless:
     name: Linux headless ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    container: rust:alpine
     strategy:
       fail-fast: false
       matrix:
@@ -170,17 +167,16 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     steps:
-      - name: Install build dependencies
-        run: apk add --no-cache build-base cmake git bash
-
       - uses: actions/checkout@v4
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.arch }}
-
-      - name: Build tarball
-        run: sh packaging/linux/build-tarball.sh --headless ${{ matrix.arch }}-unknown-linux-musl lanmsgd-linux-${{ matrix.arch }}-musl.tar.gz
+      # JavaScript actions do not run inside Alpine containers on arm64 runners, so build with docker run.
+      - name: Build tarball in rust:alpine
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work rust:alpine sh -ec '
+            apk add --no-cache build-base cmake git bash
+            git config --global --add safe.directory /work
+            sh packaging/linux/build-tarball.sh --headless ${{ matrix.arch }}-unknown-linux-musl lanmsgd-linux-${{ matrix.arch }}-musl.tar.gz
+          '
 
       - uses: actions/upload-artifact@v4
         with:
