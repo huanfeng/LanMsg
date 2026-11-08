@@ -32,6 +32,11 @@ hmac = "0.12"
 sha2 = "0.10"
 data-encoding = "2"
 blake3 = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+crypto_secretbox = "0.1"
+hkdf = "0.12"
+serde_json = "1"
+scrypt = { version = "0.11", default-features = false }
 
 # 平台密钥库：桌面端专用，Android / iOS 构建不拉入。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
