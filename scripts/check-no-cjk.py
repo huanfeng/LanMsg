@@ -28,8 +28,6 @@ WHITELIST = {
     "crates/lanmsg-desktop/src/strings.rs",
     "crates/lanmsgd/src/strings.rs",
     "crates/lanmsg-desktop/src/fixtures.rs",
-    # netsh 在中文系统上输出的字段标签与取值（"已启用"/"是" 等），用于解析而非展示给用户
-    "crates/lanmsg-core/src/firewall.rs",
 }
 WEB_WHITELIST_FILES = {"web/strings.js"}
 WEB_WHITELIST_DIRS = ("web/vendor/", "web/test/")

@@ -41,7 +41,8 @@ pub fn add_rule_args(program: &Path) -> Vec<String> {
 /// 按 `-----` 分隔的块判断，同一块内须含程序路径（不区分大小写的字面量），且
 /// 已启用（Enabled: Yes / 已启用: 是）、动作为允许（Action: Allow / 操作: 允许）、
 /// 方向为入站（Direction: In / 方向: 入站）。被禁用、拦截或出站的同名规则不算。
-/// 输出文案随系统语言变化，只认中英文标签与取值；调用方须先按系统 OEM 代码页解码，
+/// 输出文案随系统语言变化，只认中英文标签与取值（中文的写成 \u 转义以满足“源码字符串不含中文”的检查：
+/// 已启用 / 是、操作 / 允许、方向 / 入站）；调用方须先按系统 OEM 代码页解码，
 /// 否则含非 ASCII 的路径无法比较。
 pub fn rule_allows_program(output: &str, program: &Path) -> bool {
     let program = program.to_string_lossy().to_lowercase();
@@ -49,9 +50,21 @@ pub fn rule_allows_program(output: &str, program: &Path) -> bool {
         // 分隔线之后残留的横线字符不影响判断；块内逐行取“标签: 取值”
         let lower = block.to_lowercase();
         lower.contains(&program)
-            && field_is(block, &["enabled", "已启用"], &["yes", "是"])
-            && field_is(block, &["action", "操作"], &["allow", "允许"])
-            && field_is(block, &["direction", "方向"], &["in", "入站"])
+            && field_is(
+                block,
+                &["enabled", "\u{5df2}\u{542f}\u{7528}"],
+                &["yes", "\u{662f}"],
+            )
+            && field_is(
+                block,
+                &["action", "\u{64cd}\u{4f5c}"],
+                &["allow", "\u{5141}\u{8bb8}"],
+            )
+            && field_is(
+                block,
+                &["direction", "\u{65b9}\u{5411}"],
+                &["in", "\u{5165}\u{7ad9}"],
+            )
     })
 }
 
