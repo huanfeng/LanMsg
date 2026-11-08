@@ -1,0 +1,27 @@
+{
+  "version": "@VERSION@",
+  "description": "局域网聊天式文件互传",
+  "homepage": "https://github.com/@REPO@",
+  "license": "GPL-3.0-or-later",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/@REPO@/releases/download/v@VERSION@/lanmsg-windows-x64.zip",
+      "hash": "@SHA256_X64@"
+    },
+    "arm64": {
+      "url": "https://github.com/@REPO@/releases/download/v@VERSION@/lanmsg-windows-arm64.zip",
+      "hash": "@SHA256_ARM64@"
+    }
+  },
+  "bin": ["lanmsg-cli.exe"],
+  "shortcuts": [["lanmsg.exe", "LanMsg"]],
+  "notes": "首次运行若提示防火墙，请在托盘菜单中点击「允许 LanMsg 通过防火墙」。",
+  "checkver": { "github": "https://github.com/@REPO@" },
+  "autoupdate": {
+    "architecture": {
+      "64bit": { "url": "https://github.com/@REPO@/releases/download/v$version/lanmsg-windows-x64.zip" },
+      "arm64": { "url": "https://github.com/@REPO@/releases/download/v$version/lanmsg-windows-arm64.zip" }
+    },
+    "hash": { "url": "$baseurl/SHA256SUMS" }
+  }
+}
