@@ -47,6 +47,7 @@
   - 测试：`data_channel_falls_back_to_dial_back`（A 的 dial_addr 指向一个已关闭的端口，B 只能被 A 连入；A 向 B 拉取文件成功）；`dial_back_token_single_use`；`dial_back_rejects_wrong_device`。
 - **T4**：复用 `send_unicast`（multicast.rs:169）与 `SCAN_MIN_PREFIX`（consts.rs:99）。core 与桌面 `parse_targets`（settings.rs:134）规则保持一致，并把 `SettingsDto.unicast_targets` 真正接入发现。
   - 实施补充：单播目标不接受主机名（需要同步 DNS），只接受 IP、IP:端口、前缀不小于 /24 的 IPv4 网段，展开后最多 1024 个；桌面 `parse_targets` 已按同一规则收紧（IPv6 网段、/24 以下网段、端口 0 都拒绝）。发现主循环里，组播模式下来自本机网段之外的包记为 `via_multicast = false`（它们只可能是单播）。扫描只统计握手成功的不同设备数；探测端口固定为 `SERVICE_PORT`。
+  - 第 2 轮补充：发现表记录 `via_multicast`，`discovered_peer_view` 据此 `classify`（单播来源的跨网段条目不再显示为局域网）；`ConnManager::connect` 的 `via_multicast` 参数未使用（连接后的路径由 conn.rs 按真实网卡判定）。扫描只尝试建立连接，`found` 统计握手被双方接受的设备：受信/同用户设备，以及局域网内的陌生设备；经 VPN 的陌生人入站会被对方拒绝（规则 7），公网陌生人出站也被拒，因此通常计 0。扫描建立的出站连接对陌生人会保持，连接本身不会产生请求或配对提示（请求只由消息、联系人请求触发）。扫描不限制私网范围（用户主动触发，网段大小已限制在 /22 内）。`ScanFinished.cidr` 用网络地址规范化；“扫描中”标志用 Drop 守卫复位，扫描任务可被关停打断；单播目标先去重再比上限，并过滤本机地址。
 - **T5**：移动端拒绝建站：`InvalidArgument`，消息为英文。
 - **T6**：`TransferEngine::download` 是 `self: Arc<Self>`，`spawn_download` 绑定 `MessageBlobRow`（transfer.rs:142、287）。先把下载来源抽象出来，再加 `download_to`。权限错误用稳定的英文键。
 - **T7**：文案全部进 `strings.rs`；`--station-put` 加到 `parse_cli`（main.rs:50）；`Effect` 以现有定义为准。

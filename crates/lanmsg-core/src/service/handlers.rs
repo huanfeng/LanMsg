@@ -299,8 +299,8 @@ async fn list_peers(inner: &Inner) -> Result<Response, ApiError> {
         .iter()
         .map(|p| peer_view(&inner.store, p, self_user.as_ref()))
         .collect();
-    // 并入近期发现但未连接的设备（离线补投目标可见；路径按组播来源判 LAN）。
-    for (ann, addr) in inner.discovered.recent(lanmsg_proto::consts::OFFLINE_AFTER) {
+    // 并入近期发现但未连接的设备（离线补投目标可见；路径按发现来源判定）。
+    for (ann, addr, via_multicast) in inner.discovered.recent(lanmsg_proto::consts::OFFLINE_AFTER) {
         let device_id = ann.cert.device.to_hex();
         if peers.iter().any(|p| p.device.to_hex() == device_id)
             || value.iter().any(|v| v.device_id == device_id)
@@ -311,6 +311,7 @@ async fn list_peers(inner: &Inner) -> Result<Response, ApiError> {
             &inner.store,
             &ann,
             addr,
+            via_multicast,
             self_user.as_ref(),
         ));
     }
@@ -655,6 +656,17 @@ async fn pair_cancel(inner: &Inner, session: String) -> Result<Response, ApiErro
 
 // ---- P2 Task 4：设置与资料 ----
 
+/// 扫描结束（含被打断）时复位“扫描中”标志。
+struct ScanGuard(Arc<Inner>);
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        self.0
+            .scanning
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// ScanSubnet：同步校验网段，通过即返回 Ok，扫描在后台进行，完成时发 `ScanFinished`。
 /// 同一时刻只允许一个扫描。
 fn scan_subnet(inner: &Arc<Inner>, cidr: String) -> Result<Response, ApiError> {
@@ -664,11 +676,18 @@ fn scan_subnet(inner: &Arc<Inner>, cidr: String) -> Result<Response, ApiError> {
         return Err(invalid_arg("a scan is already in progress".into()));
     }
     let inner = inner.clone();
+    let net = net.trunc();
     tokio::spawn(async move {
-        let report =
-            crate::net::scan::scan(inner.conns.clone(), net, lanmsg_proto::consts::SERVICE_PORT)
-                .await;
-        inner.scanning.store(false, Ordering::SeqCst);
+        // 无论正常结束、被关停打断还是任务被取消，都复位“扫描中”标志。
+        let _guard = ScanGuard(inner.clone());
+        let report = tokio::select! {
+            r = crate::net::scan::scan(
+                inner.conns.clone(),
+                net,
+                lanmsg_proto::consts::SERVICE_PORT,
+            ) => r,
+            _ = inner.conns.wait_shutdown() => return,
+        };
         let _ = inner.events.send(Event::ScanFinished {
             cidr: net.to_string(),
             probed: report.probed,

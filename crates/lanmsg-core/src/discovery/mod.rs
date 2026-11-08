@@ -50,9 +50,9 @@ pub struct DiscoveryEvent {
 /// 发现表条目的保留时长（配对 Device 目标与后续任务使用）。
 const DISCOVERED_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// 近期发现的设备表（P2 Task 7）：值为 (通告, 连接地址, 记录时间)。
+/// 近期发现的设备表（P2 Task 7）：值为 (通告, 连接地址, 记录时间, 是否经组播发现)。
 /// 连接地址 = 发现源 IP + 通告监听端口。
-pub struct DiscoveredTable(Mutex<HashMap<DeviceId, (Announce, SocketAddr, Instant)>>);
+pub struct DiscoveredTable(Mutex<HashMap<DeviceId, (Announce, SocketAddr, Instant, bool)>>);
 
 impl Default for DiscoveredTable {
     fn default() -> Self {
@@ -76,29 +76,32 @@ impl DiscoveredTable {
         };
         let mut g = self.0.lock().unwrap();
         let now = Instant::now();
-        g.retain(|_, (_, _, t)| now.duration_since(*t) < DISCOVERED_TTL);
-        g.insert(ev.announce.cert.device, (ev.announce.clone(), addr, now));
+        g.retain(|_, (_, _, t, _)| now.duration_since(*t) < DISCOVERED_TTL);
+        g.insert(
+            ev.announce.cert.device,
+            (ev.announce.clone(), addr, now, ev.via_multicast),
+        );
     }
 
     /// 取某设备的最近通告与连接地址。
     pub fn get(&self, d: &DeviceId) -> Option<(Announce, SocketAddr)> {
         let g = self.0.lock().unwrap();
-        g.get(d).map(|(a, s, _)| (a.clone(), *s))
+        g.get(d).map(|(a, s, _, _)| (a.clone(), *s))
     }
 
     /// 取某设备的连接地址与该条目的年龄（距最近一次收到其通告）。
     pub fn addr_with_age(&self, d: &DeviceId) -> Option<(SocketAddr, Duration)> {
         let g = self.0.lock().unwrap();
-        g.get(d).map(|(_, s, t)| (*s, t.elapsed()))
+        g.get(d).map(|(_, s, t, _)| (*s, t.elapsed()))
     }
 
-    /// 列出 `within` 内记录的设备。
-    pub fn recent(&self, within: Duration) -> Vec<(Announce, SocketAddr)> {
+    /// 列出 `within` 内记录的设备：(通告, 连接地址, 是否经组播发现)。
+    pub fn recent(&self, within: Duration) -> Vec<(Announce, SocketAddr, bool)> {
         let g = self.0.lock().unwrap();
         let now = Instant::now();
         g.values()
-            .filter(|(_, _, t)| now.duration_since(*t) <= within)
-            .map(|(a, s, _)| (a.clone(), *s))
+            .filter(|(_, _, t, _)| now.duration_since(*t) <= within)
+            .map(|(a, s, _, via)| (a.clone(), *s, *via))
             .collect()
     }
 }
@@ -479,5 +482,29 @@ mod tests {
         let unicast = Mutex::new(vec!["10.1.1.1:53320".parse().unwrap()]);
         assert!(current_targets(&unicast, false).is_empty());
         assert_eq!(current_targets(&unicast, true).len(), 1);
+    }
+
+    /// 发现表记录来源方式；单播来源的跨网段条目在发现视图里不是 Lan，组播来源才是。
+    #[test]
+    fn unicast_discovery_entry_is_not_lan_in_view() {
+        use lanmsg_api::types::PathClassDto;
+        let table = DiscoveredTable::new();
+        let ann = test_announce("远端", 53320);
+        // 公网地址不会落在任何本机网段里，结果与测试机网卡无关。
+        let from: SocketAddr = "203.0.113.7:40000".parse().unwrap();
+        table.record(&DiscoveryEvent {
+            announce: ann.clone(),
+            from,
+            via_multicast: false,
+        });
+        let got = table.recent(Duration::from_secs(60));
+        assert_eq!(got.len(), 1);
+        let (a, addr, via) = &got[0];
+        assert!(!via);
+        let store = crate::store::Store::open_in_memory().unwrap();
+        let unicast = crate::service::views::discovered_peer_view(&store, a, *addr, *via, None);
+        assert_ne!(unicast.path, PathClassDto::Lan);
+        let multicast = crate::service::views::discovered_peer_view(&store, a, *addr, true, None);
+        assert_eq!(multicast.path, PathClassDto::Lan);
     }
 }

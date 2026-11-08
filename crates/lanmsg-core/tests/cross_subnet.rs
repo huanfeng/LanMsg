@@ -202,6 +202,8 @@ async fn hostname_manual_peer_is_bound_after_peer_comes_online() {
 }
 
 /// ScanSubnet：非法网段同步拒绝；合法网段立即返回，扫描期间重复请求被拒，完成后发 ScanFinished。
+/// 扫描对象是回环网段 127.0.0.0/30 的默认服务端口：测试里让该端口上有一个只 accept
+/// 不应答的监听者，握手被卡住，扫描因此可控地保持“进行中”。
 #[tokio::test]
 async fn scan_subnet_request_validates_and_reports_finish() {
     let mut a = node(&MemoryBus::new()).await;
@@ -213,20 +215,31 @@ async fn scan_subnet_request_validates_and_reports_finish() {
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad}");
     }
-    // TEST-NET-1：探测会超时，扫描需要几秒，足够触发“重复请求”。
+    // 服务端口 53320 若被占用（例如本机跑着守护进程），无法构造受控场景，跳过后半段。
+    let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:53320").await else {
+        eprintln!("port 53320 busy, skipping the concurrency part");
+        return;
+    };
+    // 只接受连接、不做 TLS 应答：握手在 dial 超时（数秒）前一直卡住。
+    let blocker = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((s, _)) = listener.accept().await {
+            held.push(s);
+        }
+    });
     a.call(Request::ScanSubnet {
-        cidr: "192.0.2.0/24".into(),
+        cidr: "127.0.0.0/30".into(),
     })
     .await;
     let err = a
         .try_call(Request::ScanSubnet {
-            cidr: "192.0.2.0/24".into(),
+            cidr: "127.0.0.0/30".into(),
         })
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
     let ev = a
-        .wait_event(|e| matches!(e, Event::ScanFinished { .. }), 30)
+        .wait_event(|e| matches!(e, Event::ScanFinished { .. }), 60)
         .await;
     let Event::ScanFinished {
         cidr,
@@ -236,9 +249,15 @@ async fn scan_subnet_request_validates_and_reports_finish() {
     else {
         unreachable!()
     };
-    assert_eq!(cidr, "192.0.2.0/24");
-    assert_eq!(probed, 254);
+    assert_eq!(cidr, "127.0.0.0/30");
+    assert_eq!(probed, 2);
     assert_eq!(found, 0);
+    // 标志已复位：可以再次扫描。
+    a.call(Request::ScanSubnet {
+        cidr: "127.0.0.0/30".into(),
+    })
+    .await;
+    blocker.abort();
 }
 
 /// SetSettings 先校验单播目标：非法（过大网段、主机名）拒绝保存，合法保存。

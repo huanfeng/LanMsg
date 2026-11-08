@@ -524,15 +524,17 @@ use crate::net::PeerInfo;
 use crate::store::{ContactRow, DeviceRow, RequestRow};
 
 /// 将发现表条目（近期发现但未连接的设备）转换为对端设备视图：
-/// `addr` 用发现来源地址，`path` 按 `classify(.., via_multicast = true)` 判定。
+/// `addr` 用发现来源地址，`path` 按 `classify(.., via_multicast)` 判定：
+/// 组播来源判局域网，单播来源（例如用户配置的跨网段目标）按真实网卡判定。
 pub fn discovered_peer_view(
     store: &Store,
     ann: &lanmsg_proto::types::Announce,
     addr: std::net::SocketAddr,
+    via_multicast: bool,
     self_user: Option<&UserId>,
 ) -> PeerView {
     let cert = &ann.cert;
-    let path = crate::net::classify(addr.ip(), &crate::net::local_ifaces(), true);
+    let path = crate::net::classify(addr.ip(), &crate::net::path::cached_ifaces(), via_multicast);
     PeerView {
         device_id: cert.device.to_hex(),
         device_short: cert.device.short(),

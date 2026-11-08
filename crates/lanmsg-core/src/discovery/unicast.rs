@@ -46,14 +46,21 @@ pub fn parse_unicast_targets(items: &[String]) -> Result<Vec<SocketAddr>, CoreEr
         } else {
             return Err(invalid(item));
         }
+        // 先去重再比上限：重复项不占名额。
+        out.sort();
+        out.dedup();
         if out.len() > MAX_UNICAST_TARGETS {
             return Err(CoreError::InvalidArgument(
                 "too many unicast targets".into(),
             ));
         }
     }
-    out.sort();
-    out.dedup();
+    // 过滤本机网卡地址：向自己单播没有意义。
+    let local: std::collections::HashSet<IpAddr> = crate::net::path::cached_ifaces()
+        .into_iter()
+        .map(|i| i.addr)
+        .collect();
+    out.retain(|a| !local.contains(&a.ip()));
     Ok(out)
 }
 
@@ -114,6 +121,13 @@ mod tests {
         }
         // 空项被忽略。
         assert!(parse_unicast_targets(&s(&["", "  "])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn duplicates_do_not_count_toward_the_cap() {
+        let items: Vec<String> = (0..10).map(|_| "10.7.0.0/24".to_string()).collect();
+        let v = parse_unicast_targets(&items).unwrap();
+        assert_eq!(v.len(), 254);
     }
 
     #[test]

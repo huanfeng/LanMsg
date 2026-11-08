@@ -160,7 +160,8 @@ impl ConnManager {
         self.local_addr
     }
 
-    /// 出站拨号：已连接则直接返回该设备。
+    /// 出站拨号：已连接则直接返回该设备。`_via_multicast` 目前未使用：连接建立后的
+    /// 路径等级由 conn.rs 按真实网卡判定，不依赖发现来源。
     pub async fn connect(
         &self,
         addr: SocketAddr,
