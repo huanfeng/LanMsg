@@ -53,6 +53,7 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
         Request::SetSettings { settings } => set_settings(inner, settings).await,
         Request::SetProfile { display_name } => set_profile(inner, display_name).await,
         Request::AddManualPeer { addr } => add_manual_peer(inner, addr).await,
+        Request::ListInterfaces => Ok(list_interfaces()),
         Request::NetworkChanged => {
             super::redial::network_changed(inner);
             Ok(Response::Ok)
@@ -607,6 +608,20 @@ async fn pair_cancel(inner: &Inner, session: String) -> Result<Response, ApiErro
 }
 
 // ---- P2 Task 4：设置与资料 ----
+
+/// ListInterfaces：列出本机非回环网卡及隧道类型。
+fn list_interfaces() -> Response {
+    let value = crate::net::path::local_ifaces()
+        .into_iter()
+        .map(|i| lanmsg_api::types::InterfaceView {
+            name: i.name,
+            addr: i.addr.to_string(),
+            prefix: i.prefix,
+            tunnel_kind: i.tunnel.map(|t| t.as_str().to_string()),
+        })
+        .collect();
+    Response::Interfaces { value }
+}
 
 /// GetSettings：从存储加载（无记录返回默认值）。
 async fn get_settings(inner: &Inner) -> Result<Response, ApiError> {

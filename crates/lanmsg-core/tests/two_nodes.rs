@@ -247,6 +247,18 @@ async fn unimplemented_request_returns_unimplemented_code() {
 }
 
 #[tokio::test]
+async fn list_interfaces_returns_ok() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = make_service(None, &dir).await;
+    let Response::Interfaces { value } = s.handle(Request::ListInterfaces).await.unwrap() else {
+        panic!("expected Interfaces");
+    };
+    assert!(value
+        .iter()
+        .all(|i| i.addr != "127.0.0.1" && i.addr != "::1"));
+}
+
+#[tokio::test]
 async fn invisible_hides_from_other_users() {
     let bus = MemoryBus::new();
     let dir_a = tempfile::tempdir().unwrap();

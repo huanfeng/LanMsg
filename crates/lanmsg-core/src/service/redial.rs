@@ -11,11 +11,11 @@ use std::time::{Duration, Instant};
 
 use lanmsg_proto::consts::{ANNOUNCE_INTERVAL, RETRY_MIN};
 use lanmsg_proto::ids::DeviceId;
-use lanmsg_proto::types::{PathClass, Status};
+use lanmsg_proto::types::Status;
 use tokio::sync::{watch, Notify};
 
 use super::{DialingGuard, Inner};
-use crate::net::path::{classify, local_ifaces};
+use crate::net::path::{local_ifaces, on_local_subnet as ip_on_local_subnet};
 use crate::store::ContactState;
 
 /// 受信重连退避上限：设备不在当前网络时不必高频拨号（耗电）。
@@ -262,7 +262,7 @@ fn on_local_subnet(addr: &SocketAddr) -> bool {
     if FORCE_OFF_SUBNET.load(Ordering::SeqCst) {
         return false;
     }
-    classify(addr.ip(), &local_ifaces(), false) == PathClass::Lan
+    ip_on_local_subnet(addr.ip(), &local_ifaces())
 }
 
 /// 测试钩子：让所有地址都被视为不在本机网段。
