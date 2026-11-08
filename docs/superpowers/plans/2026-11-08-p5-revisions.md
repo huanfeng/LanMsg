@@ -50,6 +50,16 @@
   - 第 2 轮补充：发现表记录 `via_multicast`，`discovered_peer_view` 据此 `classify`（单播来源的跨网段条目不再显示为局域网）；`ConnManager::connect` 的 `via_multicast` 参数未使用（连接后的路径由 conn.rs 按真实网卡判定）。扫描只尝试建立连接，`found` 统计握手被双方接受的设备：受信/同用户设备，以及局域网内的陌生设备；经 VPN 的陌生人入站会被对方拒绝（规则 7），公网陌生人出站也被拒，因此通常计 0。扫描建立的出站连接对陌生人会保持，连接本身不会产生请求或配对提示（请求只由消息、联系人请求触发）。扫描不限制私网范围（用户主动触发，网段大小已限制在 /22 内）。`ScanFinished.cidr` 用网络地址规范化；“扫描中”标志用 Drop 守卫复位，扫描任务可被关停打断；单播目标先去重再比上限，并过滤本机地址。
   - 第 3 轮补充：扫描连上的陌生设备会被写入本地 devices/users/已知地址，并出现在在线列表里（没有任何提示）。单播目标的本机地址过滤基于当前网卡缓存（30 秒 TTL，网络变化时作废）：换 IP 后到下一次刷新前可能漏过滤旧地址，同一台机器上跑多个实例时彼此的地址不属于“本机网卡地址”，不会被过滤。扫描探测端口可由测试钩子覆盖（`override_scan_port_for_test`）。
 - **T5**：移动端拒绝建站：`InvalidArgument`，消息为英文。
+  - 实施结果（43f4985、764d5a8）：
+    - 符号链接：顶层路径先 `canonicalize`，按链接目标登记，条目名取目标文件名；文件夹内部的符号链接一律跳过。文件夹最多 10000 个文件，深度和总字节数不设上限。名字为 `.`、`..`、空、含分隔符，或者路径是根目录，一律返回 `InvalidArgument`。复制前必须满足 `dest != src`，且 `dest` 在 `item_dir` 之内。
+    - 复制模式的目录只能用 `station::host::item_dir(data_dir, station, item)` 构造，布局是 `<data_dir>/Station/<station hex>/<item hex>/`，不得手拼。文件放在 `<dir>/<name>`；文件夹放在 `<dir>/<folder name>/<rel>`。`restore_local` 和 `remove_row` 都依赖这个布局。
+    - `accept_remote`：`added_by` 取连接身份，`added_at`、`updated_at` 取本机时钟。这里只写库，不校验 `FolderEntry.rel_path`、文件夹名和 `BlobMeta.name`。
+    - 签名：`StationHost::remove(&station, &item, now).await`（async）；`set_pinned(&station, &item, pinned, now)`。两者都会校验 `hosted()` 和条目所属站点。`sweep` 是阻塞函数，调用方要放进 `spawn_blocking`。`restore_local` 补登记时 mtime 记 0，迫使首次服务前重新计算哈希。
+  - 交给 T6 的待办：
+    - 远程内容写盘前，必须清洗 `FolderEntry.rel_path`（拒绝 `..`、绝对路径、盘符、反斜杠）、文件夹名和 `BlobMeta.name`，目标必须落在 `item_dir` 之内。
+    - 复制模式登记会覆盖同哈希原有的本地行（例如消息附件的 Source 路径）；删除复制条目后，只会把本地行交还给其他中转站条目。改为：已有本地行且文件仍可读时，不覆盖。
+    - `accept_remote` 重复投递已删除的条目会让它复活。需要定墓碑语义：已删除的条目不因旧投递复活。
+    - `put_paths` 中途失败时可能留下孤儿副本目录，可由 `sweep` 清理。
 - **T6**：`TransferEngine::download` 是 `self: Arc<Self>`，`spawn_download` 绑定 `MessageBlobRow`（transfer.rs:142、287）。先把下载来源抽象出来，再加 `download_to`。权限错误用稳定的英文键。
 - **T7**：文案全部进 `strings.rs`；`--station-put` 加到 `parse_cli`（main.rs:50）；`Effect` 以现有定义为准。
 - **T8**：错误状态存 `ErrorCode`。Android outbox 的 7 天清理不得删除中转站引用、主机尚未拉取的副本，要补测试。
