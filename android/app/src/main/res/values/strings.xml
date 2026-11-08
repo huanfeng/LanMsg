@@ -264,14 +264,15 @@
     <string name="notif_service_web_text">网页传输中</string>
     <string name="net_title">网络</string>
     <string name="net_manual_add">手动添加设备</string>
-    <string name="net_manual_hint">192.168.2.10 或 host:53320</string>
+    <string name="net_manual_hint">192.168.2.10 或 mypc.local:53320</string>
+    <string name="net_manual_help">可填 IP 或主机名，端口可省略</string>
     <string name="net_connect">连接</string>
     <string name="net_connecting">正在连接</string>
     <string name="net_connected">已连接</string>
     <string name="net_manual_peers">已手动添加</string>
     <string name="net_manual_remove">移除 %1$s</string>
     <string name="net_unicast_targets">单播通告目标</string>
-    <string name="net_unicast_hint">每行一个：IP、IP:端口，或前缀不小于 24 的网段（如 192.168.1.0/24）</string>
+    <string name="net_unicast_hint">每行一个：IP、IP:端口，或前缀不小于 24 的网段（如 192.168.1.0/24），不支持主机名</string>
     <string name="net_unicast_invalid">有目标格式不正确，请检查后再保存</string>
     <string name="net_unicast_save">保存</string>
     <string name="net_scan">网段扫描</string>

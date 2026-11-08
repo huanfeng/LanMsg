@@ -140,11 +140,49 @@ class NetworkSettingsViewModelTest {
         assertEquals("n", settings.deviceName)
     }
 
+    // 期望值来自 Rust 标准库对同一字符串的解析结果（core parse_unicast_targets 用它判定）
     @Test fun unicast_target_rules_match_core() {
-        val ok = listOf("192.168.1.2", "192.168.1.2:53317", "10.0.0.0/24", "10.0.0.1/32", "fe80::1", "[fe80::1]:53317", "::1")
-        val bad = listOf("host", "host:53317", "192.168.1.2:0", "192.168.1.2:70000", "10.0.0.0/23", "10.0.0.0/33", "fd00::/64", "256.1.1.1", "1.2.3", "[::1", "[::1]x")
+        val ok = listOf(
+            "192.168.1.2", "192.168.1.2:53317", "10.0.0.0/24", "10.0.0.1/32", "fe80::1", "[fe80::1]:53317", "::1",
+            "::1:80", "::ffff:1.2.3.4", "[fe80::1%1]:80", "1:2:3:4:5:6:7:8",
+        )
+        val bad = listOf(
+            "host", "host:53317", "192.168.1.2:0", "192.168.1.2:70000", "1.2.3.4:0", "1.2.3.4:65536", "10.0.0.0/23",
+            "1.2.3.4/23", "1.2.3.4/33", "10.0.0.0/33", "fd00::/64", "256.1.1.1", "1.2.3", "[::1", "[::1]x", "[::1]",
+            "[::1]:0", "fe80::1%1", "[fe80::1%eth0]:80", "1::2::3", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9",
+        )
         ok.forEach { assertTrue(it, NetworkSettingsViewModel.isValidUnicastTarget(it)) }
         bad.forEach { assertFalse(it, NetworkSettingsViewModel.isValidUnicastTarget(it)) }
+    }
+
+    @Test fun unicast_text_follows_core_until_user_edits() = runTest {
+        val f = fake()
+        val vm = NetworkSettingsViewModel(f)
+        advanceUntilIdle()
+        assertEquals("", vm.state.value.unicastText)
+        settings = settings.copy(unicastTargets = listOf("10.0.0.0/24"))
+        vm.load()
+        advanceUntilIdle()
+        assertEquals("10.0.0.0/24", vm.state.value.unicastText)
+        vm.editUnicast("10.0.0.0/24\n192.168.1.5")
+        settings = settings.copy(unicastTargets = listOf("172.16.0.1"))
+        vm.load()
+        advanceUntilIdle()
+        assertEquals("10.0.0.0/24\n192.168.1.5", vm.state.value.unicastText)
+    }
+
+    @Test fun unicast_save_writes_text_and_resumes_sync() = runTest {
+        val vm = NetworkSettingsViewModel(fake())
+        advanceUntilIdle()
+        vm.editUnicast(" 10.0.0.5 \n\n192.168.1.0/24")
+        vm.saveUnicast()
+        advanceUntilIdle()
+        assertEquals(listOf("10.0.0.5", "192.168.1.0/24"), settings.unicastTargets)
+        assertEquals("10.0.0.5\n192.168.1.0/24", vm.state.value.unicastText)
+        settings = settings.copy(unicastTargets = listOf("172.16.0.1"))
+        vm.load()
+        advanceUntilIdle()
+        assertEquals("172.16.0.1", vm.state.value.unicastText)
     }
 }
 

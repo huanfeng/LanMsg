@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -79,7 +81,6 @@ fun NetworkSettingsContent(state: NetworkSettingsViewModel.UiState, vm: NetworkS
     var manualAddr by remember { mutableStateOf("") }
     var scanCidr by remember { mutableStateOf("") }
     val settings = state.settings
-    var unicastText by remember(settings == null) { mutableStateOf(settings?.unicastTargets?.joinToString("\n").orEmpty()) }
 
     Scaffold(
         containerColor = c.canvas,
@@ -137,6 +138,7 @@ fun NetworkSettingsContent(state: NetworkSettingsViewModel.UiState, vm: NetworkS
                             enabled = manualAddr.isNotBlank() && !state.manualBusy,
                         ) { Text(stringResource(R.string.net_connect)) }
                     }
+                    Text(stringResource(R.string.net_manual_help), color = c.inkMuted, style = MaterialTheme.typography.bodySmall)
                     when {
                         state.manualBusy -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = LanMsgControls.progress)
@@ -163,8 +165,8 @@ fun NetworkSettingsContent(state: NetworkSettingsViewModel.UiState, vm: NetworkS
             Group {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
-                        value = unicastText,
-                        onValueChange = { unicastText = it },
+                        value = state.unicastText,
+                        onValueChange = vm::editUnicast,
                         minLines = 2,
                         maxLines = 6,
                         isError = state.unicastInvalid,
@@ -178,7 +180,7 @@ fun NetworkSettingsContent(state: NetworkSettingsViewModel.UiState, vm: NetworkS
                         modifier = Modifier.fillMaxWidth().testTag("unicast_targets"),
                     )
                     TextButton(
-                        onClick = { vm.setUnicastTargets(unicastText.lines()) },
+                        onClick = vm::saveUnicast,
                         colors = LanMsgButtons.text(),
                         enabled = settings != null,
                     ) { Text(stringResource(R.string.net_unicast_save)) }
@@ -233,7 +235,7 @@ fun NetworkSettingsContent(state: NetworkSettingsViewModel.UiState, vm: NetworkS
                     }
                 }
             }
-            Column(Modifier.padding(bottom = 24.dp)) {}
+            Spacer(Modifier.height(24.dp))
         }
     }
 }

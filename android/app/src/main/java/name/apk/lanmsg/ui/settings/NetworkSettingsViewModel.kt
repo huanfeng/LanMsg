@@ -20,7 +20,6 @@ import uniffi.lanmsg_api.ManualPeerView
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
 import uniffi.lanmsg_api.SettingsDto
-import java.net.InetAddress
 
 /** 网络设置页：手动添加设备、网段扫描、单播通告目标、LocalSend。 */
 class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
@@ -37,6 +36,8 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
         /** 最近一次手动添加成功。 */
         val manualOk: Boolean = false,
         val manualError: ErrorCode? = null,
+        /** 单播通告目标输入框内容（每行一个）。 */
+        val unicastText: String = "",
         /** 单播通告目标有格式不合法的行（未提交）。 */
         val unicastInvalid: Boolean = false,
         val settings: SettingsDto? = null,
@@ -45,6 +46,9 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    /** 用户改过输入框后，core 侧设置的变化不再覆盖输入框，保存成功后才恢复同步。 */
+    private var unicastEdited = false
 
     /** SetSettings 是整体回写，读-改-写必须串行。 */
     private val writeLock = Mutex()
@@ -61,7 +65,12 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
                 val settings = core.call<Response.Settings>(Request.GetSettings).value
                 val interfaces = core.call<Response.Interfaces>(Request.ListInterfaces).value
                 val peers = core.call<Response.ManualPeers>(Request.ListManualPeers).value
-                _state.update { it.copy(settings = settings, interfaces = interfaces, manualPeers = peers) }
+                _state.update {
+                    it.copy(
+                        settings = settings, interfaces = interfaces, manualPeers = peers,
+                        unicastText = if (unicastEdited) it.unicastText else settings.unicastTargets.joinToString("\n"),
+                    )
+                }
             } catch (e: ApiException) {
                 Log.w(TAG, "Failed to load network settings: ${e.code}", e)
                 _state.update { it.copy(error = e.code) }
@@ -110,6 +119,14 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
         }
     }
 
+    fun editUnicast(text: String) {
+        unicastEdited = true
+        _state.update { it.copy(unicastText = text, unicastInvalid = false) }
+    }
+
+    /** 提交输入框内容。 */
+    fun saveUnicast() = setUnicastTargets(_state.value.unicastText.lines())
+
     /** 每行一个目标；空行忽略，任一行不合法则整体不提交。 */
     fun setUnicastTargets(lines: List<String>) {
         val targets = lines.map { it.trim() }.filter { it.isNotEmpty() }
@@ -118,7 +135,10 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
             return
         }
         _state.update { it.copy(unicastInvalid = false) }
-        write { it.copy(unicastTargets = targets) }
+        write(onDone = {
+            unicastEdited = false
+            _state.update { st -> st.copy(unicastText = targets.joinToString("\n")) }
+        }) { it.copy(unicastTargets = targets) }
     }
 
     fun setLocalSendEnabled(v: Boolean) = write { it.copy(localsendEnabled = v) }
@@ -126,7 +146,7 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
     fun clearError() = _state.update { it.copy(error = null) }
 
     /** 以 core 当前设置为基准回写，避免覆盖设置页等其他入口的修改。 */
-    private fun write(transform: (SettingsDto) -> SettingsDto) {
+    private fun write(onDone: () -> Unit = {}, transform: (SettingsDto) -> SettingsDto) {
         viewModelScope.launch {
             writeLock.withLock {
                 try {
@@ -134,6 +154,7 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
                     val new = transform(base.copy())
                     core.call<Response.Ok>(Request.SetSettings(new))
                     _state.update { it.copy(settings = new) }
+                    onDone()
                 } catch (e: ApiException) {
                     _state.update { it.copy(error = e.code) }
                     reloadSettings()
@@ -169,41 +190,69 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
     companion object {
         private const val TAG = "NetworkSettingsVM"
 
-        /** 与 core 的 parse_unicast_targets 同一规则：IP、IP:端口（IPv6 为 [IP]:端口）、IPv4 网段（前缀 24 到 32）；不接受主机名。 */
+        /**
+         * 与 core 的 parse_unicast_targets 同一规则（Rust 标准库的解析）：IP、IP:端口（端口 1 到 65535）、
+         * [IPv6]:端口（可带数字 scope，如 [fe80::1%1]:80）、IPv4 网段（前缀 24 到 32）；不接受主机名、
+         * 不带端口的方括号 IPv6、IPv6 网段。
+         */
         fun isValidUnicastTarget(item: String): Boolean {
             val s = item.trim()
             if (s.isEmpty()) return false
             if (s.contains('/')) {
-                val (ip, prefix) = s.split('/').let { if (it.size == 2) it[0] to it[1] else return false }
-                val p = prefix.toIntOrNull() ?: return false
-                return isIpv4(ip) && p in 24..32
+                val parts = s.split('/')
+                if (parts.size != 2) return false
+                val p = parts[1].takeIf { it.isNotEmpty() && it.all(Char::isDigit) && it.length <= 2 }?.toInt() ?: return false
+                return isIpv4(parts[0]) && p in 24..32
             }
             if (s.startsWith("[")) {
                 val end = s.indexOf(']')
                 if (end < 0) return false
+                val host = s.substring(1, end)
+                val ip = host.substringBefore('%')
+                val scope = if (host.contains('%')) host.substringAfter('%') else null
                 val rest = s.substring(end + 1)
-                return isIpv6(s.substring(1, end)) && (rest.isEmpty() || (rest.startsWith(":") && isPort(rest.substring(1))))
+                val scopeOk = scope == null || (scope.isNotEmpty() && scope.all(Char::isDigit))
+                return isIpv6(ip) && scopeOk && rest.startsWith(":") && isPort(rest.substring(1))
             }
             if (isIpv4(s) || isIpv6(s)) return true
             val colon = s.lastIndexOf(':')
             return colon > 0 && isIpv4(s.substring(0, colon)) && isPort(s.substring(colon + 1))
         }
 
-        private fun isPort(s: String): Boolean = s.isNotEmpty() && s.all { it.isDigit() } && s.length <= 5 && s.toInt() in 1..65535
+        private fun isPort(s: String): Boolean = s.isNotEmpty() && s.all(Char::isDigit) && s.length <= 5 && s.toInt() in 1..65535
 
         private fun isIpv4(s: String): Boolean {
             val parts = s.split('.')
-            return parts.size == 4 && parts.all { p -> p.isNotEmpty() && p.length <= 3 && p.all { it.isDigit() } && p.toInt() <= 255 }
+            return parts.size == 4 && parts.all { p -> p.isNotEmpty() && p.length <= 3 && p.all(Char::isDigit) && p.toInt() <= 255 }
         }
 
-        /** 只接受十六进制、冒号与点；含冒号的字符串交给 InetAddress 解析字面量（不会触发 DNS）。 */
+        /** IPv6 字面量：8 组十六进制（每组 1 到 4 位），至多一个 "::"，末尾可为 IPv4（算 2 组）。不走系统解析，避免 DNS。 */
         private fun isIpv6(s: String): Boolean {
-            if (s.count { it == ':' } < 2 || !s.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' || it == ':' || it == '.' }) return false
-            return try {
-                InetAddress.getByName(s) is java.net.Inet6Address
-            } catch (e: java.net.UnknownHostException) {
-                false
+            if (s.isEmpty() || !s.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' || it == ':' || it == '.' }) return false
+            val dbl = s.indexOf("::")
+            if (dbl >= 0 && s.indexOf("::", dbl + 1) >= 0) return false
+            val head = if (dbl >= 0) s.substring(0, dbl) else s
+            val tail = if (dbl >= 0) s.substring(dbl + 2) else ""
+            val h = countGroups(head, lastMayBeIpv4 = dbl < 0) ?: return false
+            val t = if (dbl >= 0) countGroups(tail, lastMayBeIpv4 = true) ?: return false else 0
+            return if (dbl >= 0) h + t <= 7 else h == 8
+        }
+
+        private fun countGroups(part: String, lastMayBeIpv4: Boolean): Int? {
+            if (part.isEmpty()) return 0
+            val groups = part.split(':')
+            var n = 0
+            for ((i, g) in groups.withIndex()) {
+                if (g.isEmpty()) return null
+                if (g.contains('.')) {
+                    if (!(lastMayBeIpv4 && i == groups.lastIndex && isIpv4(g))) return null
+                    n += 2
+                } else {
+                    if (g.length > 4) return null
+                    n += 1
+                }
             }
+            return n
         }
     }
 }
