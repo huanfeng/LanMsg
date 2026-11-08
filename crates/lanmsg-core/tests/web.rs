@@ -76,7 +76,13 @@ struct Page {
 impl Page {
     /// hello + confirm；返回 (Page, confirm 的 HTTP 状态)。auth 决定认证是否正确。
     async fn handshake(port: u16, mode: WebMode, auth: [u8; 32]) -> (Page, reqwest::StatusCode) {
-        let http = client();
+        let page = Page::hello_only(port, mode, auth, client()).await;
+        let status = page.confirm_with(&page.http, &page.keys.page_mac()).await;
+        (page, status)
+    }
+
+    /// 只做 hello 并推导密钥（不 confirm）；http 决定握手的来源 IP。
+    async fn hello_only(port: u16, mode: WebMode, auth: [u8; 32], http: reqwest::Client) -> Page {
         let base = format!("http://127.0.0.1:{port}");
         let sk = StaticSecret::random_from_rng(rand::rngs::OsRng);
         let pk = PublicKey::from(&sk).to_bytes();
@@ -109,25 +115,25 @@ impl Page {
             &sid,
         )
         .unwrap();
-        let r = http
-            .post(format!("{base}/api/web/confirm"))
-            .json(&json!({"session":sid,"page_mac":b64u(&keys.page_mac())}))
+        Page {
+            base,
+            port,
+            sid,
+            keys,
+            seq: 0,
+            http,
+            host_mac: None,
+        }
+    }
+
+    /// 用指定客户端（来源 IP）发 confirm。
+    async fn confirm_with(&self, http: &reqwest::Client, mac: &[u8]) -> reqwest::StatusCode {
+        http.post(format!("{}/api/web/confirm", self.base))
+            .json(&json!({"session":self.sid,"page_mac":b64u(mac)}))
             .send()
             .await
-            .unwrap();
-        let status = r.status();
-        (
-            Page {
-                base,
-                port,
-                sid,
-                keys,
-                seq: 0,
-                http,
-                host_mac: None,
-            },
-            status,
-        )
+            .unwrap()
+            .status()
     }
 
     /// 轮询 wait 直到不再 pending，返回 status 与 host_mac。
@@ -230,24 +236,42 @@ impl Page {
             .unwrap()
     }
 
-    async fn ws(&self) -> Ws {
-        let url = format!(
+    fn ws_url(&self, req: Option<&str>) -> String {
+        let mut u = format!(
             "ws://127.0.0.1:{}/api/web/ws?session={}",
             self.port, self.sid
         );
-        tokio_tungstenite::connect_async(url).await.unwrap().0
+        if let Some(r) = req {
+            u.push_str("&req=");
+            u.push_str(r);
+        }
+        u
+    }
+
+    /// 升级请求的认证参数：b64u(seal({op:"ws", seq}))，每次换新 seq。
+    fn ws_req(&mut self) -> String {
+        b64u(&self.seal(json!({"op":"ws"})))
+    }
+
+    async fn ws(&mut self) -> Ws {
+        let req = self.ws_req();
+        tokio_tungstenite::connect_async(self.ws_url(Some(&req)))
+            .await
+            .unwrap()
+            .0
     }
 
     /// 尝试建立 WebSocket 并期望握手被拒绝，返回 HTTP 状态码。
-    async fn ws_refused(&self) -> u16 {
-        let url = format!(
-            "ws://127.0.0.1:{}/api/web/ws?session={}",
-            self.port, self.sid
-        );
-        match tokio_tungstenite::connect_async(url).await {
+    async fn ws_refused_with(&self, req: Option<&str>) -> u16 {
+        match tokio_tungstenite::connect_async(self.ws_url(req)).await {
             Err(tokio_tungstenite::tungstenite::Error::Http(r)) => r.status().as_u16(),
             other => panic!("expected refused handshake, got {:?}", other.map(|_| ())),
         }
+    }
+
+    /// 不带 req 的升级必被拒绝。
+    async fn ws_refused(&self) -> u16 {
+        self.ws_refused_with(None).await
     }
 
     async fn ws_send(&mut self, ws: &mut Ws, v: Value) {
@@ -365,24 +389,163 @@ async fn deny_returns_denied() {
 async fn hello_rate_limited_per_ip() {
     let n = node_offline().await;
     n.init_first("host").await;
-    let (_, port, _) = start_web(&n).await;
-    let http = client();
-    let mut codes = Vec::new();
-    for _ in 0..11 {
-        let sk = StaticSecret::random_from_rng(rand::rngs::OsRng);
-        let r = http
-            .post(format!("http://127.0.0.1:{port}/api/web/hello"))
-            .json(
-                &json!({"mode":"key","page_pk":b64u(&PublicKey::from(&sk).to_bytes()),
-                "page_nonce":b64u(&[7u8; 16])}),
-            )
-            .send()
-            .await
-            .unwrap();
-        codes.push(r.status().as_u16());
+    let (_, port, key) = start_web(&n).await;
+    // 每次都完成握手（不占用未完成名额），只验证每分钟 10 次的速率限制。
+    for i in 0..10 {
+        let (_, st) = Page::handshake(port, WebMode::Key, key).await;
+        assert_eq!(st, 200, "handshake {i}");
     }
-    assert!(codes[..10].iter().all(|c| *c == 200), "{codes:?}");
-    assert_eq!(codes[10], 429);
+    let sk = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let r = client()
+        .post(format!("http://127.0.0.1:{port}/api/web/hello"))
+        .json(
+            &json!({"mode":"key","page_pk":b64u(&PublicKey::from(&sk).to_bytes()),
+            "page_nonce":b64u(&[7u8; 16])}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 429);
+}
+
+#[tokio::test]
+async fn pending_handshakes_are_capped_per_ip_without_evicting() {
+    let n = node_offline().await;
+    n.init_first("host").await;
+    let (_, port, key) = start_web(&n).await;
+    let p1 = Page::hello_only(port, WebMode::Key, key, client()).await;
+    let _p2 = Page::hello_only(port, WebMode::Key, key, client()).await;
+    // 第三个未完成握手被拒绝（429），已有的不被淘汰。
+    let sk = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let r = client()
+        .post(format!("http://127.0.0.1:{port}/api/web/hello"))
+        .json(
+            &json!({"mode":"key","page_pk":b64u(&PublicKey::from(&sk).to_bytes()),
+            "page_nonce":b64u(&[7u8; 16])}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 429);
+    assert_eq!(p1.confirm_with(&p1.http, &p1.keys.page_mac()).await, 200);
+}
+
+#[tokio::test]
+async fn handshake_from_other_ip_cannot_interfere() {
+    let mut n = node_offline().await;
+    n.init_first("host").await;
+    let (info, port, _) = start_web(&n).await;
+    // 配对码模式，页面用正确的 auth。
+    let sk = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let r = client()
+        .post(format!("http://127.0.0.1:{port}/api/web/hello"))
+        .json(
+            &json!({"mode":"code","page_pk":b64u(&PublicKey::from(&sk).to_bytes()),
+            "page_nonce":b64u(&[1u8; 16])}),
+        )
+        .send()
+        .await
+        .unwrap();
+    let j: Value = r.json().await.unwrap();
+    let salt: [u8; 16] = unb64u(j["scrypt_salt"].as_str().unwrap())
+        .try_into()
+        .unwrap();
+    let auth = scrypt_code(&info.code, &salt);
+    let page = Page::hello_only(port, WebMode::Code, auth, client()).await;
+
+    // 另一个来源 IP（127.0.0.2）猜到会话号：confirm / wait 都被拒，且不计失败、不影响会话。
+    let other = reqwest::Client::builder()
+        .local_address(Some("127.0.0.2".parse().unwrap()))
+        .build()
+        .unwrap();
+    for _ in 0..6 {
+        assert_eq!(page.confirm_with(&other, &[0u8; 32]).await, 403);
+    }
+    let r = other
+        .get(format!("{}/api/web/wait?session={}", page.base, page.sid))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    n.no_event(|e| matches!(e, Event::WebSessionChanged { .. }), 300)
+        .await;
+    // 原页面仍可正常完成握手。
+    assert_eq!(
+        page.confirm_with(&page.http, &page.keys.page_mac()).await,
+        200
+    );
+}
+
+#[tokio::test]
+async fn ws_upgrade_requires_fresh_req() {
+    let mut n = node_offline().await;
+    n.init_first("host").await;
+    let (_, port, key) = start_web(&n).await;
+    let mut page = connect_allowed(&mut n, port, key).await;
+    // 只带 session 不带 req：拒绝。
+    assert_eq!(page.ws_refused().await, 403);
+    // 垃圾 req：拒绝。
+    assert_eq!(page.ws_refused_with(Some("AAAA")).await, 403);
+    // op 不是 ws 的合法封包：拒绝。
+    let bad = b64u(&page.seal(json!({"op":"finish","fid":"x"})));
+    assert_eq!(page.ws_refused_with(Some(&bad)).await, 403);
+    // 合法 req 接入成功；同一个 req 重放被拒。
+    let req = page.ws_req();
+    let (mut ws, _) = tokio_tungstenite::connect_async(page.ws_url(Some(&req)))
+        .await
+        .unwrap();
+    assert_eq!(page.ws_next(&mut ws).await["t"], "welcome");
+    assert_eq!(page.ws_refused_with(Some(&req)).await, 403);
+}
+
+#[tokio::test]
+async fn garbage_requests_do_not_extend_idle_timeout() {
+    let mut n = node_offline().await;
+    n.init_first("host").await;
+    n.svc.set_web_idle_timeout_for_test(Duration::from_secs(2));
+    let (_, port, key) = start_web(&n).await;
+    let mut page = connect_allowed(&mut n, port, key).await;
+    let mut ws = page.ws().await;
+    page.ws_until(&mut ws, |v| v["t"] == "welcome").await;
+    let start = std::time::Instant::now();
+    // 持续发送无法解密的垃圾 PUT；会话仍应按空闲超时结束。
+    let bye = loop {
+        assert!(
+            start.elapsed() < Duration::from_secs(8),
+            "session never expired"
+        );
+        let st = page.put_chunk_raw("x", 0, vec![9u8; 100]).await;
+        assert!(st == 400 || st == 403 || st == 404, "{st}");
+        if let Ok(Some(Ok(Message::Binary(b)))) =
+            tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+        {
+            let v = page.open(&b);
+            if v["t"] == "bye" {
+                break v;
+            }
+        }
+    };
+    assert_eq!(bye["t"], "bye");
+    assert!(start.elapsed() < Duration::from_secs(6));
+}
+
+#[tokio::test]
+async fn upload_declared_size_is_capped_per_session() {
+    let mut n = node_offline().await;
+    n.init_first("host").await;
+    let (_, port, key) = start_web(&n).await;
+    let mut page = connect_allowed(&mut n, port, key).await;
+    let body = page.seal(json!({"client_key":"big","name":"huge.bin",
+        "size": 65u64 << 30, "mime":"application/octet-stream"}));
+    let r = page
+        .http
+        .post(format!("{}/api/web/upload/init", page.base))
+        .header("X-LanMsg-Session", &page.sid)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 413);
 }
 
 #[tokio::test]

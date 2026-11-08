@@ -108,6 +108,16 @@ impl IntoResponse for WebErr {
                 Json(json!({"error":"too_many"})),
             )
                 .into_response(),
+            WebErr::TooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({"error":"too_large"})),
+            )
+                .into_response(),
+            WebErr::NoSpace => (
+                StatusCode::INSUFFICIENT_STORAGE,
+                Json(json!({"error":"no_space"})),
+            )
+                .into_response(),
             WebErr::Conflict(body) => sealed(StatusCode::CONFLICT, body),
             WebErr::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -188,16 +198,21 @@ async fn hello(
 
 async fn confirm(
     State(sh): State<Arc<Shared>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, WebErr> {
     let s = |k: &str| body.get(k).and_then(Value::as_str).unwrap_or("");
-    sh.confirm(s("session"), s("page_mac"))?;
+    sh.confirm(addr.ip(), s("session"), s("page_mac"))?;
     Ok(Json(json!({"status":"pending"})))
 }
 
-async fn wait(State(sh): State<Arc<Shared>>, RawQuery(q): RawQuery) -> Result<Json<Value>, WebErr> {
+async fn wait(
+    State(sh): State<Arc<Shared>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    RawQuery(q): RawQuery,
+) -> Result<Json<Value>, WebErr> {
     let sid = query_param(&q, "session").ok_or(WebErr::BadRequest)?;
-    let mut rx = sh.wait_rx(&sid)?;
+    let mut rx = sh.wait_rx(addr.ip(), &sid)?;
     let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
     loop {
         let cur = rx.borrow_and_update().clone();
@@ -225,6 +240,9 @@ async fn ws_route(
     ws: WebSocketUpgrade,
 ) -> Result<Response, WebErr> {
     let sid = query_param(&q, "session").ok_or(WebErr::Forbidden)?;
+    // 升级请求同样要带认证：req = b64u(seal({op:"ws", seq}))，seq 不可重放。
+    let req = query_param(&q, "req").ok_or(WebErr::Forbidden)?;
+    sh.check_req(&sid, &req, "ws", None, None)?;
     let (conn, rx, shutdown) = sh.ws_attach(&sid)?;
     Ok(ws.on_upgrade(move |socket| ws_loop(sh, sid, conn, rx, shutdown, socket)))
 }
@@ -296,7 +314,7 @@ async fn upload_finish(
 ) -> Result<Response, WebErr> {
     let sid = session_id(&headers)?;
     let req = header_str(&headers, REQ_HEADER).ok_or(WebErr::Forbidden)?;
-    sh.check_req(&sid, req, "finish", &fid, None)?;
+    sh.check_req(&sid, req, "finish", Some(&fid), None)?;
     let out = sh.finish(&sid, &fid).await?;
     Ok(sealed(StatusCode::OK, out))
 }
@@ -309,7 +327,7 @@ async fn download(
     let sid = session_id(&headers)?;
     let idx = parse_idx(&index)?;
     let req = header_str(&headers, REQ_HEADER).ok_or(WebErr::Forbidden)?;
-    sh.check_req(&sid, req, "download", &fid, Some(idx))?;
+    sh.check_req(&sid, req, "download", Some(&fid), Some(idx))?;
     let out = sh.download(&sid, &fid, idx).await?;
     Ok(sealed(StatusCode::OK, out))
 }

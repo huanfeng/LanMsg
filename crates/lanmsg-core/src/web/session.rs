@@ -45,6 +45,10 @@ const SEQ_WINDOW: u64 = 4096;
 const SEQ_MAX: u64 = 1 << 53;
 /// 未完成握手（尚未 confirm）的会话上限与有效期。
 const MAX_PENDING: usize = 5;
+/// 单个来源 IP 同时未完成的握手上限。
+const MAX_PENDING_PER_IP: usize = 2;
+/// 单个会话声明的上传总大小上限。
+const MAX_SESSION_BYTES: u64 = 64 << 30;
 const PENDING_TTL: Duration = Duration::from_secs(30);
 /// confirm 之后等待宿主允许的最长时间。
 const AWAITING_TTL: Duration = Duration::from_secs(120);
@@ -70,6 +74,10 @@ pub enum WebErr {
     BadRequest,
     /// 429。
     TooMany,
+    /// 413：会话声明的上传总量超限。
+    TooLarge,
+    /// 507：磁盘可用空间不足。
+    NoSpace,
     /// 409，body 为已封包的 `{"missing":[..]}`。
     Conflict(Vec<u8>),
     Internal,
@@ -579,19 +587,23 @@ impl Shared {
         if hits.len() >= HELLO_PER_MINUTE {
             return Err(WebErr::TooMany);
         }
-        hits.push_back(now);
 
-        // 未完成握手的会话最多 MAX_PENDING 个：超出时淘汰最旧的。
-        let mut pending: Vec<(Instant, String)> = run
+        // 未完成握手的会话有总数与单 IP 上限：满了拒绝新的，不淘汰已有的。
+        let pending_total = run
             .sessions
-            .iter()
-            .filter(|(_, s)| s.phase == Phase::Pending)
-            .map(|(k, s)| (s.created, k.clone()))
-            .collect();
-        pending.sort();
-        while pending.len() >= MAX_PENDING {
-            let (_, k) = pending.remove(0);
-            run.sessions.remove(&k);
+            .values()
+            .filter(|s| s.phase == Phase::Pending)
+            .count();
+        let pending_ip = run
+            .sessions
+            .values()
+            .filter(|s| s.phase == Phase::Pending && s.ip == ip)
+            .count();
+        if pending_total >= MAX_PENDING || pending_ip >= MAX_PENDING_PER_IP {
+            return Err(WebErr::TooMany);
+        }
+        if let Some(h) = run.hello_log.get_mut(&ip) {
+            h.push_back(now);
         }
 
         let mut auth = run.secrets.auth_key(mode);
@@ -632,13 +644,17 @@ impl Shared {
         Ok(out)
     }
 
-    pub(crate) fn confirm(&self, sid: &str, mac_b64: &str) -> Result<(), WebErr> {
+    pub(crate) fn confirm(&self, ip: IpAddr, sid: &str, mac_b64: &str) -> Result<(), WebErr> {
         let mac = BASE64URL_NOPAD
             .decode(mac_b64.as_bytes())
             .map_err(|_| WebErr::BadRequest)?;
         let mut g = self.lock();
         let run = g.as_mut().ok_or(WebErr::NotFound)?;
         let sess = run.sessions.get_mut(sid).ok_or(WebErr::NotFound)?;
+        // 握手只接受 hello 的来源 IP：他人猜到会话号也不能干扰（不移除会话、不计失败）。
+        if sess.ip != ip {
+            return Err(WebErr::Forbidden);
+        }
         if sess.phase != Phase::Pending || sess.created.elapsed() > PENDING_TTL {
             run.sessions.remove(sid);
             return Err(WebErr::NotFound);
@@ -670,10 +686,17 @@ impl Shared {
     }
 
     /// 取得长轮询用的状态订阅。
-    pub(crate) fn wait_rx(&self, sid: &str) -> Result<watch::Receiver<WaitStatus>, WebErr> {
+    pub(crate) fn wait_rx(
+        &self,
+        ip: IpAddr,
+        sid: &str,
+    ) -> Result<watch::Receiver<WaitStatus>, WebErr> {
         let g = self.lock();
         let run = g.as_ref().ok_or(WebErr::NotFound)?;
         let sess = run.sessions.get(sid).ok_or(WebErr::NotFound)?;
+        if sess.ip != ip {
+            return Err(WebErr::Forbidden);
+        }
         if sess.phase == Phase::Pending {
             return Err(WebErr::Forbidden);
         }
@@ -754,11 +777,10 @@ impl Shared {
 
     // ---------- 已允许会话的通用入口 ----------
 
-    /// 取已允许会话的密钥并刷新活动时间。
+    /// 取已允许会话的密钥。不改会话状态：活动时间只在解密成功且 seq 通过后刷新。
     pub(crate) fn authed(&self, sid: &str) -> Result<Arc<SessionKeys>, WebErr> {
         let mut g = self.lock();
         let sess = allowed_mut(&mut g, sid)?;
-        sess.last_activity = Instant::now();
         Ok(sess.keys.clone())
     }
 
@@ -776,16 +798,18 @@ impl Shared {
         if !sess.page_window.accept(seq) {
             return Err(WebErr::Forbidden);
         }
+        sess.last_activity = Instant::now();
         Ok(v)
     }
 
-    /// 校验 `X-LanMsg-Req` 认证头：op、fid、idx 与路径一致且 seq 未重放。
+    /// 校验请求认证头（`X-LanMsg-Req` 或 WebSocket 的 `req` 参数）：
+    /// op、fid、idx 与请求一致且 seq 未重放。
     pub(crate) fn check_req(
         &self,
         sid: &str,
         header: &str,
         op: &str,
-        fid: &str,
+        fid: Option<&str>,
         idx: Option<u32>,
     ) -> Result<(), WebErr> {
         let ct = BASE64URL_NOPAD
@@ -796,7 +820,7 @@ impl Shared {
             other => other,
         })?;
         let ok = v.get("op").and_then(Value::as_str) == Some(op)
-            && v.get("fid").and_then(Value::as_str) == Some(fid)
+            && fid.is_none_or(|f| v.get("fid").and_then(Value::as_str) == Some(f))
             && match idx {
                 Some(i) => v.get("idx").and_then(Value::as_u64) == Some(i as u64),
                 None => true,
@@ -843,6 +867,10 @@ impl Shared {
             if sess.uploads.len() >= MAX_UPLOADS {
                 return Err(WebErr::TooMany);
             }
+            let declared: u64 = sess.uploads.values().map(|u| u.size).sum();
+            if declared.saturating_add(size) > MAX_SESSION_BYTES {
+                return Err(WebErr::TooLarge);
+            }
         }
         let settings = crate::settings::load_settings(&self.deps.store)?;
         let dir = PathBuf::from(settings.download_dir).join(UPLOAD_DIR_NAME);
@@ -856,9 +884,14 @@ impl Shared {
             dir.clone(),
         );
         let part = st.path_part.clone();
-        tokio::task::spawn_blocking(move || {
+        // 先建目录再查可用空间，不足则不创建 .part。
+        let enough = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
             std::fs::create_dir_all(&dir)?;
-            std::fs::File::create(&part).map(|_| ())
+            if fs4::available_space(&dir)? < size {
+                return Ok(false);
+            }
+            std::fs::File::create(&part)?;
+            Ok(true)
         })
         .await
         .map_err(|_| WebErr::Internal)?
@@ -866,6 +899,9 @@ impl Shared {
             tracing::warn!(error = %e, "creating upload part file failed");
             WebErr::Internal
         })?;
+        if !enough {
+            return Err(WebErr::NoSpace);
+        }
         let mut g = self.lock();
         let sess = allowed_mut(&mut g, sid)?;
         let resp = json!({"fid":fid,"chunk_size":st.chunk_size,"have":st.have_list(),
@@ -895,6 +931,7 @@ impl Shared {
             if !sess.page_window.accept(p.seq) {
                 return Err(WebErr::Forbidden);
             }
+            sess.last_activity = Instant::now();
             let u = sess.uploads.get(fid).ok_or(WebErr::NotFound)?;
             if u.finished.is_some() || idx as usize >= u.have.len() {
                 return Err(WebErr::BadRequest);
@@ -1299,6 +1336,15 @@ impl Shared {
                 let mut g = self.lock();
                 let Some(run) = g.as_mut() else { return };
                 let now = Instant::now();
+                run.hello_log.retain(|_, h| {
+                    while h
+                        .front()
+                        .is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60))
+                    {
+                        h.pop_front();
+                    }
+                    !h.is_empty()
+                });
                 run.sessions.retain(|id, s| {
                     let drop_it = match s.phase {
                         Phase::Pending => s.created.elapsed() > PENDING_TTL,

@@ -200,7 +200,10 @@
   function connectWs() {
     if (ended) return;
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(proto + "//" + location.host + "/api/web/ws?session=" + encodeURIComponent(session));
+    if (!keys) return;
+    // 升级请求带认证参数 req（每次重连换新 seq），宿主校验后才接入。
+    var req = C.b64uEncode(sealJson({ op: "ws" }));
+    ws = new WebSocket(proto + "//" + location.host + "/api/web/ws?session=" + encodeURIComponent(session) + "&req=" + req);
     ws.binaryType = "arraybuffer";
     ws.onopen = function () {
       wsDelay = 1000;
@@ -383,6 +386,8 @@
         client_key: job.key, name: file.name, size: file.size,
         mime: file.type || "application/octet-stream"
       }));
+      if (r.status === 507) throw new Error(T("no_space"));
+      if (r.status === 413) throw new Error(T("upload_too_large"));
       if (!r.ok) throw new Error("init " + r.status);
       var init = openJson(new Uint8Array(await r.arrayBuffer()));
       if (!init || init.client_key !== job.key) throw new Error("bad init");
