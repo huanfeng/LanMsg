@@ -11,6 +11,7 @@ use crate::style;
 use crate::tz;
 use crate::ui_state::UiState;
 use crate::views::chats::{format_time, now_millis};
+use crate::views::network::{path_badge_text, path_rank};
 use crate::views::{composer, forward, message_row};
 
 /// 超过此间隔插入时间分隔行（规范第 8 节）。
@@ -119,15 +120,6 @@ pub struct HeaderInfo {
     pub badge: Option<&'static str>,
 }
 
-fn path_rank(p: &PathClassDto) -> u8 {
-    match p {
-        PathClassDto::Lan => 0,
-        PathClassDto::Vpn => 1,
-        PathClassDto::Internet => 2,
-        PathClassDto::Relay => 3,
-    }
-}
-
 /// 当前会话的顶栏数据；没有选中会话时为 None。
 /// 私聊按显示名匹配对端设备，“我的设备”取自己的其它设备。
 pub fn header_info(m: &Model) -> Option<HeaderInfo> {
@@ -149,12 +141,7 @@ pub fn header_info(m: &Model) -> Option<HeaderInfo> {
             .iter()
             .map(|p| &p.path)
             .min_by_key(|p| path_rank(p))
-            .and_then(|p| match p {
-                PathClassDto::Lan => None,
-                PathClassDto::Vpn => Some(strings::PATH_VPN),
-                PathClassDto::Internet => Some(strings::PATH_INTERNET),
-                PathClassDto::Relay => Some(strings::PATH_RELAY),
-            })
+            .and_then(path_badge_text)
     } else {
         None
     };

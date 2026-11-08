@@ -14,6 +14,8 @@ object Routes {
     const val PAIR_HOST = "pair/host"
     const val PAIR_JOIN = "pair/join"
     const val SETTINGS = "settings"
+    const val NETWORK = "settings/network"
+    const val WEB_HOST = "web/host"
     const val SHARE = "share"
     const val SEARCH = "search"
     const val FORWARD = "forward/{hashes}"

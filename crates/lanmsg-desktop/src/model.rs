@@ -53,6 +53,50 @@ impl ExpiryChoice {
     }
 }
 
+/// 浏览器连接请求超过这个时间没人处理，按拒绝处理（毫秒）。
+pub const WEB_REQUEST_TTL_MS: i64 = 60_000;
+/// 扫描超过这个时间仍无 `ScanFinished`，界面不再显示“扫描中”（毫秒）。
+pub const SCAN_TIMEOUT_MS: i64 = 120_000;
+
+/// 网页传输会话的界面状态。
+#[derive(Debug, Clone, PartialEq)]
+pub struct WebUi {
+    pub info: WebSessionInfo,
+    /// 等待用户允许的浏览器请求（先到先处理）。
+    pub pending: Vec<WebRequestUi>,
+}
+
+impl WebUi {
+    /// 会话信息尚未取回（请求先于信息到达时的占位）。
+    pub fn is_placeholder(&self) -> bool {
+        self.info.url.is_empty()
+    }
+
+    /// 可选的访问地址：优先 `urls`，没有时只有主地址。
+    pub fn urls(&self) -> Vec<String> {
+        match &self.info.urls {
+            Some(u) if !u.is_empty() => u.clone(),
+            _ => vec![self.info.url.clone()],
+        }
+    }
+}
+
+/// 一条等待允许的浏览器连接请求。
+#[derive(Debug, Clone, PartialEq)]
+pub struct WebRequestUi {
+    pub request: String,
+    pub user_agent: String,
+    pub ip: String,
+    pub received_at_millis: i64,
+}
+
+/// 扫描网段是否可提交：IPv4 且前缀不小于 core 的下限（与 core 的 `validate_scan_cidr` 一致）。
+pub fn scan_cidr_ok(cidr: &str) -> bool {
+    cidr.trim()
+        .parse::<ipnet::Ipv4Net>()
+        .is_ok_and(|n| n.prefix_len() >= lanmsg_proto::consts::SCAN_MIN_PREFIX)
+}
+
 /// 与后台服务的连接状态。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnState {
@@ -268,6 +312,27 @@ pub struct Model {
     pub wizard_joining: bool,
     /// Init 已发出、尚未得到回复（期间禁用向导按钮，防重复提交）。
     pub init_in_flight: bool,
+    /// 网页传输会话；None 表示未开启。
+    pub web: Option<WebUi>,
+    /// 网页传输窗口是否显示（隐藏不等于停止）。
+    pub web_open: bool,
+    /// 本机网卡（设置页“网络”分组）。
+    pub interfaces: Vec<InterfaceView>,
+    /// 手动添加的对端。
+    pub manual_peers: Vec<ManualPeerView>,
+    /// 正在扫描的网段。
+    pub scanning: Option<String>,
+    /// 当前扫描开始的时刻（毫秒），用于兜底超时。
+    pub scanning_since_millis: i64,
+    /// 用户刚结束网页传输：迟到的 `WebRequest` 不得自动重开会话，
+    /// 直到下一次 `WebSessionChanged(Some)` 或用户主动开启。
+    pub web_suppressed: bool,
+    pub scan_result: Option<String>,
+    /// 手动添加已发出、尚未得到结果：经反向通道最坏要十几秒，期间显示“正在连接”而不是失败。
+    pub manual_connecting: bool,
+    pub manual_result: Option<String>,
+    /// 防火墙缺少放行规则（仅 Windows 的事件会置位）。
+    pub firewall_missing: bool,
 }
 
 impl Default for Model {
@@ -336,6 +401,17 @@ impl Model {
             init_mode: None,
             wizard_joining: false,
             init_in_flight: false,
+            web: None,
+            web_open: false,
+            interfaces: Vec::new(),
+            manual_peers: Vec::new(),
+            scanning: None,
+            scanning_since_millis: 0,
+            web_suppressed: false,
+            scan_result: None,
+            manual_connecting: false,
+            manual_result: None,
+            firewall_missing: false,
         }
     }
 
@@ -346,21 +422,17 @@ impl Model {
             UiMsg::Disconnected(reason) => {
                 // 断开期间保留已有数据，只更新连接状态
                 self.conn = ConnState::Disconnected(reason);
-                // 断线后在途请求的回复可能不会再来，别让保存按钮一直停在“正在保存”
-                self.settings_saving = 0;
-                self.station_putting = 0;
+                self.reset_in_flight();
                 Vec::new()
             }
             UiMsg::DaemonQuit => {
                 self.conn = ConnState::DaemonQuit;
-                self.settings_saving = 0;
-                self.station_putting = 0;
+                self.reset_in_flight();
                 Vec::new()
             }
             UiMsg::LaunchFailed(reason) => {
                 self.conn = ConnState::LaunchFailed(reason);
-                self.settings_saving = 0;
-                self.station_putting = 0;
+                self.reset_in_flight();
                 Vec::new()
             }
             UiMsg::Reply { tag, result } => match result {
@@ -399,12 +471,37 @@ impl Model {
                     if tag == ReplyTag::StationPut {
                         self.station_putting = self.station_putting.saturating_sub(1);
                     }
+                    let mut web_fx = Vec::new();
+                    match &tag {
+                        ReplyTag::ManualPeer => {
+                            self.manual_connecting = false;
+                            self.manual_result = Some(error_text(&e.code).to_string());
+                        }
+                        ReplyTag::Scan => self.scanning = None,
+                        // 开启失败：排队的浏览器请求逐个拒绝，关闭窗口（错误提示已由上面的 toast 给出）；
+                        // 占位（请求先到）也一并丢弃
+                        ReplyTag::Web if self.web.as_ref().is_none_or(|w| w.is_placeholder()) => {
+                            if let Some(w) = self.web.take() {
+                                web_fx.extend(w.pending.into_iter().map(|p| {
+                                    call(
+                                        Request::WebRespond {
+                                            request: p.request,
+                                            allow: false,
+                                        },
+                                        ReplyTag::Generic,
+                                    )
+                                }));
+                            }
+                            self.web_open = false;
+                        }
+                        _ => {}
+                    }
                     if tag == ReplyTag::Init {
                         // Init 失败：回到可重新提交的状态
                         self.init_mode = None;
                         self.init_in_flight = false;
                     }
-                    let mut fx = Vec::new();
+                    let mut fx = web_fx;
                     match &tag {
                         ReplyTag::SettingsSaved => {
                             self.settings_saving = self.settings_saving.saturating_sub(1)
@@ -432,6 +529,23 @@ impl Model {
             },
             UiMsg::Event(ev) => self.apply_event(ev),
         }
+    }
+
+    /// 写入会话信息；先到的待处理请求保留。
+    fn set_web_info(&mut self, info: WebSessionInfo) {
+        let pending = self.web.take().map(|w| w.pending).unwrap_or_default();
+        self.web = Some(WebUi { info, pending });
+    }
+
+    /// 断线后在途请求的回复可能不会再来：复位各“进行中”标记；
+    /// 网页传输会话状态未知，清掉界面侧的副本（重新点开启会取回已有会话）。
+    fn reset_in_flight(&mut self) {
+        self.settings_saving = 0;
+        self.station_putting = 0;
+        self.scanning = None;
+        self.manual_connecting = false;
+        self.web = None;
+        self.web_open = false;
     }
 
     /// 连接（重连）后的全量刷新。
@@ -748,8 +862,28 @@ impl Model {
                 vec![call(Request::ListMyDevices, ReplyTag::Devices)]
             }
             (ReplyTag::ManualPeer, Response::Ok) => {
+                self.manual_connecting = false;
+                self.manual_result = Some(strings::MANUAL_PEER_SENT.to_string());
                 self.toast = Some(strings::MANUAL_PEER_SENT.to_string());
-                vec![call(Request::ListPeers, ReplyTag::Peers)]
+                vec![
+                    call(Request::ListPeers, ReplyTag::Peers),
+                    call(Request::ListManualPeers, ReplyTag::ManualPeers),
+                ]
+            }
+            (ReplyTag::ManualPeers, Response::ManualPeers { value }) => {
+                self.manual_peers = value;
+                Vec::new()
+            }
+            (ReplyTag::ManualPeerRemoved, Response::Ok) => {
+                vec![call(Request::ListManualPeers, ReplyTag::ManualPeers)]
+            }
+            (ReplyTag::Interfaces, Response::Interfaces { value }) => {
+                self.interfaces = value;
+                Vec::new()
+            }
+            (ReplyTag::Web, Response::WebSession { value }) => {
+                self.set_web_info(value);
+                Vec::new()
             }
             (ReplyTag::Forwarded, _) => {
                 self.toast = Some(strings::FORWARDED.to_string());
@@ -814,6 +948,65 @@ impl Model {
                 if let Some(slot) = self.messages.iter_mut().find(|m| m.id == msg.id) {
                     *slot = msg;
                 }
+                Vec::new()
+            }
+            Event::WebRequest {
+                request,
+                user_agent,
+                ip,
+            } => {
+                // 刚结束网页传输：迟到的请求直接丢弃，不重开会话
+                if self.web_suppressed {
+                    return Vec::new();
+                }
+                self.web_open = true;
+                let mut fx = Vec::new();
+                let w = self.web.get_or_insert_with(|| {
+                    fx.push(call(Request::WebStart, ReplyTag::Web));
+                    WebUi {
+                        info: WebSessionInfo {
+                            url: String::new(),
+                            code: String::new(),
+                            qr_uri: String::new(),
+                            urls: None,
+                        },
+                        pending: Vec::new(),
+                    }
+                });
+                if !w.pending.iter().any(|p| p.request == request) {
+                    w.pending.push(WebRequestUi {
+                        request,
+                        user_agent,
+                        ip,
+                        received_at_millis: crate::views::chats::now_millis(),
+                    });
+                }
+                fx
+            }
+            Event::WebSessionChanged { info } => {
+                match info {
+                    Some(info) => {
+                        self.web_suppressed = false;
+                        self.set_web_info(info);
+                    }
+                    None => {
+                        self.web = None;
+                        self.web_open = false;
+                    }
+                }
+                Vec::new()
+            }
+            Event::ScanFinished { probed, found, .. } => {
+                self.scanning = None;
+                self.scan_result = Some(strings::net_scan_result(probed, found));
+                Vec::new()
+            }
+            Event::FirewallMissing => {
+                self.firewall_missing = true;
+                Vec::new()
+            }
+            Event::FirewallOk => {
+                self.firewall_missing = false;
                 Vec::new()
             }
             Event::ConversationUpdated { summary } => {
@@ -914,7 +1107,6 @@ impl Model {
                 }
                 fx
             }
-            _ => Vec::new(),
         }
     }
 
@@ -979,10 +1171,15 @@ impl Model {
             Page::Files => self.query_files(true),
             Page::Stations => vec![call(Request::StationList, ReplyTag::Stations)],
             // 设置页内嵌“我的设备”，一并刷新设备列表
-            Page::Settings => vec![
-                call(Request::GetSettings, ReplyTag::Settings),
-                call(Request::ListMyDevices, ReplyTag::Devices),
-            ],
+            Page::Settings => {
+                let mut fx = vec![
+                    call(Request::GetSettings, ReplyTag::Settings),
+                    call(Request::ListMyDevices, ReplyTag::Devices),
+                    call(Request::ListManualPeers, ReplyTag::ManualPeers),
+                ];
+                fx.extend(self.load_interfaces());
+                fx
+            }
         }
     }
 
@@ -1242,7 +1439,105 @@ impl Model {
                 return Vec::new();
             }
         };
+        self.manual_connecting = true;
+        self.manual_result = None;
         vec![call(Request::AddManualPeer { addr }, ReplyTag::ManualPeer)]
+    }
+
+    /// 删除手动添加的对端。
+    pub fn remove_manual_peer(&mut self, addr: String) -> Vec<Effect> {
+        vec![call(
+            Request::RemoveManualPeer { addr },
+            ReplyTag::ManualPeerRemoved,
+        )]
+    }
+
+    /// 是否显示“防火墙可能阻止发现”横幅：与断开横幅同一位置，断开优先。
+    pub fn show_firewall_banner(&self) -> bool {
+        self.firewall_missing && !self.conn.is_down()
+    }
+
+    /// 读取本机网卡。
+    pub fn load_interfaces(&mut self) -> Vec<Effect> {
+        vec![call(Request::ListInterfaces, ReplyTag::Interfaces)]
+    }
+
+    /// 扫描网段；扫描中忽略。格式或范围不合规时本地提示，不发请求。
+    pub fn scan(&mut self, cidr: String) -> Vec<Effect> {
+        if self.scanning.is_some() {
+            return Vec::new();
+        }
+        let cidr = cidr.trim().to_string();
+        if !scan_cidr_ok(&cidr) {
+            self.scan_result = Some(strings::NET_SCAN_CIDR_INVALID.to_string());
+            return Vec::new();
+        }
+        self.scanning = Some(cidr.clone());
+        self.scanning_since_millis = crate::views::chats::now_millis();
+        self.scan_result = None;
+        vec![call(Request::ScanSubnet { cidr }, ReplyTag::Scan)]
+    }
+
+    /// 扫描迟迟没有结束事件时（事件丢失）兜底复位，让用户可以重新扫描。
+    pub fn scan_expire(&mut self, now_millis: i64) {
+        if self.scanning.is_some() && now_millis - self.scanning_since_millis > SCAN_TIMEOUT_MS {
+            self.scanning = None;
+        }
+    }
+
+    /// 开启网页传输并显示窗口；已开启时只显示。
+    pub fn web_start(&mut self) -> Vec<Effect> {
+        self.web_suppressed = false;
+        self.web_open = true;
+        if self.web.is_some() {
+            return Vec::new();
+        }
+        vec![call(Request::WebStart, ReplyTag::Web)]
+    }
+
+    /// 结束网页传输。
+    pub fn web_stop(&mut self) -> Vec<Effect> {
+        self.web_suppressed = true;
+        self.web = None;
+        self.web_open = false;
+        vec![call(Request::WebStop, ReplyTag::Generic)]
+    }
+
+    /// 回应一条浏览器请求。
+    pub fn web_respond(&mut self, request: &str, allow: bool) -> Vec<Effect> {
+        if let Some(w) = self.web.as_mut() {
+            w.pending.retain(|p| p.request != request);
+        }
+        vec![call(
+            Request::WebRespond {
+                request: request.to_string(),
+                allow,
+            },
+            ReplyTag::Generic,
+        )]
+    }
+
+    /// 超过 `WEB_REQUEST_TTL_MS` 仍未处理的请求按拒绝处理。
+    pub fn web_expire(&mut self, now_millis: i64) -> Vec<Effect> {
+        let Some(w) = self.web.as_mut() else {
+            return Vec::new();
+        };
+        let (expired, alive): (Vec<_>, Vec<_>) = std::mem::take(&mut w.pending)
+            .into_iter()
+            .partition(|p| now_millis - p.received_at_millis > WEB_REQUEST_TTL_MS);
+        w.pending = alive;
+        expired
+            .into_iter()
+            .map(|p| {
+                call(
+                    Request::WebRespond {
+                        request: p.request,
+                        allow: false,
+                    },
+                    ReplyTag::Generic,
+                )
+            })
+            .collect()
     }
 
     /// 切换联系人页分类并刷新该类所需数据。
@@ -4019,5 +4314,278 @@ mod tests {
         m.apply(reply(ReplyTag::StationPut, Response::Ok));
         assert_eq!(m.station_putting, 0);
         assert!(m.toast.is_none());
+    }
+    fn web_info() -> WebSessionInfo {
+        WebSessionInfo {
+            url: "http://192.168.1.2:53330/#k=abc".into(),
+            code: "K7QM3XAP".into(),
+            qr_uri: "http://192.168.1.2:53330/#k=abc".into(),
+            urls: Some(vec![
+                "http://192.168.1.2:53330/#k=abc".into(),
+                "http://10.8.0.2:53330/#k=abc".into(),
+            ]),
+        }
+    }
+
+    fn web_request(req: &str) -> Event {
+        Event::WebRequest {
+            request: req.into(),
+            user_agent: "UA".into(),
+            ip: "192.168.1.8".into(),
+        }
+    }
+
+    #[test]
+    fn web_request_event_queues_and_expires() {
+        let mut m = Model::new();
+        m.web_start();
+        m.apply(reply(
+            ReplyTag::Web,
+            Response::WebSession { value: web_info() },
+        ));
+        m.web_open = false;
+        m.apply(UiMsg::Event(web_request("w1")));
+        // 同一请求重复到达只排一次
+        m.apply(UiMsg::Event(web_request("w1")));
+        assert_eq!(m.web.as_ref().map(|w| w.pending.len()), Some(1));
+        assert!(m.web_open);
+        // 未满 60 秒不处理
+        let now = crate::views::chats::now_millis();
+        assert!(m.web_expire(now + 30_000).is_empty());
+        let fx = m.web_expire(now + 61_000);
+        assert!(m.web.as_ref().is_some_and(|w| w.pending.is_empty()));
+        assert!(has(&fx, |r| matches!(r,
+            Request::WebRespond { request, allow: false } if request == "w1")));
+    }
+
+    #[test]
+    fn web_request_without_session_info_fetches_it() {
+        // 会话由别处（CLI）开启：先排队，同时取回会话信息，回复后保留待处理项
+        let mut m = Model::new();
+        let fx = m.apply(UiMsg::Event(web_request("w1")));
+        assert!(has(&fx, |r| matches!(r, Request::WebStart)));
+        m.apply(reply(
+            ReplyTag::Web,
+            Response::WebSession { value: web_info() },
+        ));
+        let w = m.web.as_ref().expect("session");
+        assert_eq!(w.info.code, "K7QM3XAP");
+        assert_eq!(w.pending.len(), 1);
+    }
+
+    #[test]
+    fn web_start_stop_respond_flow() {
+        let mut m = Model::new();
+        let fx = m.web_start();
+        assert!(m.web_open);
+        assert!(has(&fx, |r| matches!(r, Request::WebStart)));
+        m.apply(reply(
+            ReplyTag::Web,
+            Response::WebSession { value: web_info() },
+        ));
+        // 已开启时再点只显示窗口，不重复请求
+        m.web_open = false;
+        assert!(m.web_start().is_empty());
+        assert!(m.web_open);
+        m.apply(UiMsg::Event(web_request("w1")));
+        let fx = m.web_respond("w1", true);
+        assert!(has(&fx, |r| matches!(r,
+            Request::WebRespond { request, allow: true } if request == "w1")));
+        assert!(m.web.as_ref().is_some_and(|w| w.pending.is_empty()));
+        let fx = m.web_stop();
+        assert!(has(&fx, |r| matches!(r, Request::WebStop)));
+        assert!(m.web.is_none() && !m.web_open);
+    }
+
+    #[test]
+    fn web_start_failure_closes_window_and_denies_queued_requests() {
+        let mut m = Model::new();
+        // 请求先到：占位 + 补发 WebStart，随后 WebStart 失败
+        m.apply(UiMsg::Event(web_request("w1")));
+        m.apply(UiMsg::Event(web_request("w2")));
+        let fx = m.apply(UiMsg::Reply {
+            tag: ReplyTag::Web,
+            result: Err(ApiError {
+                code: ErrorCode::Io,
+                message: "x".into(),
+            }),
+        });
+        assert!(!m.web_open && m.web.is_none());
+        for id in ["w1", "w2"] {
+            assert!(has(&fx, |r| matches!(r,
+                Request::WebRespond { request, allow: false } if request == id)));
+        }
+        assert_eq!(m.toast.as_deref(), Some(strings::ERR_IO));
+    }
+
+    #[test]
+    fn late_web_request_after_stop_does_not_reopen_session() {
+        let mut m = Model::new();
+        m.web_start();
+        m.apply(reply(
+            ReplyTag::Web,
+            Response::WebSession { value: web_info() },
+        ));
+        m.web_stop();
+        let fx = m.apply(UiMsg::Event(web_request("late")));
+        assert!(fx.is_empty());
+        assert!(m.web.is_none() && !m.web_open);
+        // 用户主动再次开启后恢复正常
+        m.web_start();
+        m.apply(reply(
+            ReplyTag::Web,
+            Response::WebSession { value: web_info() },
+        ));
+        m.apply(UiMsg::Event(web_request("w2")));
+        assert_eq!(m.web.as_ref().map(|w| w.pending.len()), Some(1));
+        // 别处重新开启（WebSessionChanged(Some)）同样解除抑制
+        m.web_stop();
+        m.apply(UiMsg::Event(Event::WebSessionChanged {
+            info: Some(web_info()),
+        }));
+        m.apply(UiMsg::Event(web_request("w3")));
+        assert_eq!(m.web.as_ref().map(|w| w.pending.len()), Some(1));
+    }
+
+    #[test]
+    fn scan_expire_clears_stuck_scanning() {
+        let mut m = Model::new();
+        m.scan("192.168.1.0/24".into());
+        let now = crate::views::chats::now_millis();
+        m.scan_expire(now + 10_000);
+        assert!(m.scanning.is_some());
+        m.scan_expire(now + SCAN_TIMEOUT_MS + 1_000);
+        assert!(m.scanning.is_none());
+    }
+
+    #[test]
+    fn web_session_changed_replaces_or_clears() {
+        let mut m = Model::new();
+        m.apply(UiMsg::Event(Event::WebSessionChanged {
+            info: Some(web_info()),
+        }));
+        assert_eq!(
+            m.web.as_ref().map(|w| w.info.code.as_str()),
+            Some("K7QM3XAP")
+        );
+        m.web_open = true;
+        m.apply(UiMsg::Event(Event::WebSessionChanged { info: None }));
+        assert!(m.web.is_none() && !m.web_open);
+    }
+
+    #[test]
+    fn scan_finished_sets_result_and_clears_scanning() {
+        let mut m = Model::new();
+        let fx = m.scan("192.168.1.0/24".into());
+        assert!(has(&fx, |r| matches!(r,
+            Request::ScanSubnet { cidr } if cidr == "192.168.1.0/24")));
+        assert_eq!(m.scanning.as_deref(), Some("192.168.1.0/24"));
+        // 扫描中再点忽略
+        assert!(m.scan("10.0.0.0/24".into()).is_empty());
+        m.apply(UiMsg::Event(Event::ScanFinished {
+            cidr: "192.168.1.0/24".into(),
+            probed: 253,
+            found: 2,
+        }));
+        assert!(m.scanning.is_none());
+        assert_eq!(
+            m.scan_result.as_deref(),
+            Some("已探测 253 个地址，发现 2 台设备")
+        );
+    }
+
+    #[test]
+    fn scan_rejects_bad_cidr_locally_and_failure_clears_scanning() {
+        let mut m = Model::new();
+        assert!(m.scan("10.0.0.0/8".into()).is_empty());
+        assert!(m.scanning.is_none());
+        assert_eq!(
+            m.scan_result.as_deref(),
+            Some(strings::NET_SCAN_CIDR_INVALID)
+        );
+        m.scan("10.0.0.0/24".into());
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::Scan,
+            result: Err(ApiError {
+                code: ErrorCode::InvalidArgument,
+                message: "x".into(),
+            }),
+        });
+        assert!(m.scanning.is_none());
+    }
+
+    #[test]
+    fn manual_peer_result_uses_error_text_and_shows_connecting() {
+        let mut m = Model::new();
+        m.add_manual_peer("10.8.0.5".into());
+        // 连接中（最坏十几秒才有结果）：不显示失败
+        assert!(m.manual_connecting);
+        assert!(m.manual_result.is_none());
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::ManualPeer,
+            result: Err(ApiError {
+                code: ErrorCode::PeerOffline,
+                message: "english detail".into(),
+            }),
+        });
+        assert!(!m.manual_connecting);
+        assert_eq!(m.manual_result.as_deref(), Some(strings::ERR_PEER_OFFLINE));
+    }
+
+    #[test]
+    fn manual_peer_list_and_remove() {
+        let mut m = Model::new();
+        let fx = m.set_page(Page::Settings);
+        assert!(has(&fx, |r| matches!(r, Request::ListManualPeers)));
+        assert!(has(&fx, |r| matches!(r, Request::ListInterfaces)));
+        m.apply(reply(
+            ReplyTag::ManualPeers,
+            Response::ManualPeers {
+                value: vec![ManualPeerView {
+                    addr: "10.8.0.5:53320".into(),
+                    device_id: None,
+                }],
+            },
+        ));
+        assert_eq!(m.manual_peers.len(), 1);
+        let fx = m.remove_manual_peer("10.8.0.5:53320".into());
+        assert!(has(&fx, |r| matches!(r,
+            Request::RemoveManualPeer { addr } if addr == "10.8.0.5:53320")));
+        let fx = m.apply(reply(ReplyTag::ManualPeerRemoved, Response::Ok));
+        assert!(has(&fx, |r| matches!(r, Request::ListManualPeers)));
+    }
+
+    #[test]
+    fn firewall_banner_yields_to_disconnected_banner() {
+        let mut m = Model::new();
+        assert!(!m.show_firewall_banner());
+        m.apply(UiMsg::Event(Event::FirewallMissing));
+        m.conn = ConnState::Connected;
+        assert!(m.show_firewall_banner());
+        m.apply(UiMsg::Disconnected("x".into()));
+        assert!(!m.show_firewall_banner());
+        // 断线期间保留标记，重连后继续显示
+        assert!(m.firewall_missing);
+    }
+
+    #[test]
+    fn interfaces_reply_and_firewall_event() {
+        let mut m = Model::new();
+        m.apply(reply(
+            ReplyTag::Interfaces,
+            Response::Interfaces {
+                value: vec![InterfaceView {
+                    name: "eth0".into(),
+                    addr: "192.168.1.2".into(),
+                    prefix: 24,
+                    tunnel_kind: None,
+                }],
+            },
+        ));
+        assert_eq!(m.interfaces.len(), 1);
+        m.apply(UiMsg::Event(Event::FirewallMissing));
+        assert!(m.firewall_missing);
+        m.apply(UiMsg::Event(Event::FirewallOk));
+        assert!(!m.firewall_missing);
     }
 }

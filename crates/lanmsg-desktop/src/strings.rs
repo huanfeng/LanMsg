@@ -427,3 +427,72 @@ pub fn station_item_count(n: u32) -> String {
 pub fn station_expires(month: u32, day: u32) -> String {
     format!("{month}月{day}日 过期")
 }
+
+/// 网页传输窗口与设置页入口。
+pub const GUEST_TITLE: &str = "网页访客";
+pub const WEB_TITLE: &str = "网页传输";
+pub const WEB_STARTING: &str = "正在开启…";
+pub const WEB_CODE_HINT: &str = "无法扫码时，在浏览器打开地址后输入此配对码";
+pub const WEB_SCAN_HINT: &str = "用手机或其他设备的浏览器扫描二维码";
+pub const WEB_COPY: &str = "复制";
+pub const WEB_COPIED: &str = "已复制地址";
+pub const WEB_STOP: &str = "结束网页传输";
+pub const WEB_HIDE: &str = "隐藏";
+pub const WEB_ALLOW: &str = "允许";
+pub const WEB_DENY: &str = "拒绝";
+pub const WEB_GUESTS: &str = "访客";
+pub const WEB_GUESTS_EMPTY: &str = "暂无访客";
+pub const WEB_OPEN_CONV: &str = "打开会话";
+pub const SETTINGS_GROUP_WEB: &str = "网页传输";
+pub const SETTINGS_WEB: &str = "网页传输";
+pub const SETTINGS_WEB_HINT: &str = "让没有安装 LanMsg 的设备通过浏览器收发文件";
+pub const SETTINGS_WEB_START: &str = "开启";
+pub const SETTINGS_WEB_SHOW: &str = "查看";
+
+/// 浏览器请求连接的提示：`有浏览器请求连接` + IP + 浏览器摘要。
+pub fn web_request_text(ip: &str, ua_summary: &str) -> String {
+    format!("有浏览器请求连接\nIP：{ip}\n浏览器：{ua_summary}")
+}
+
+/// 网络设置：手动添加、扫描、网卡。
+pub const NET_MANUAL_TITLE: &str = "手动添加设备";
+pub const NET_MANUAL_PLACEHOLDER: &str = "192.168.2.10 或 host:53320";
+pub const NET_MANUAL_CONNECTING: &str = "正在连接…";
+pub const NET_MANUAL_LIST: &str = "已添加的地址";
+pub const NET_MANUAL_EMPTY: &str = "还没有手动添加的设备";
+pub const NET_MANUAL_REMOVE: &str = "删除";
+pub const NET_MANUAL_LINKED: &str = "已连接过";
+pub const NET_SCAN_TITLE: &str = "网段扫描";
+pub const NET_SCAN_HINT: &str =
+    "组播到不了的网络，可扫描网段发现设备（仅支持 IPv4，网段不大于 /22）";
+pub const NET_SCAN_BUTTON: &str = "扫描";
+pub const NET_SCAN_PLACEHOLDER: &str = "例如 192.168.2.0/24";
+pub const NET_SCAN_CIDR_INVALID: &str =
+    "网段不合法：仅支持 IPv4，网段不大于 /22，如 192.168.2.0/24";
+pub const NET_IFACES_TITLE: &str = "本机网卡";
+pub const NET_IFACES_EMPTY: &str = "没有可用的网卡";
+pub const TUNNEL_TAILSCALE: &str = "Tailscale";
+pub const TUNNEL_ZEROTIER: &str = "ZeroTier";
+pub const TUNNEL_WIREGUARD: &str = "WireGuard";
+pub const TUNNEL_OTHER: &str = "隧道";
+pub const LOCALSEND_PORT_BUSY: &str =
+    "53317 端口被占用（可能正在运行 LocalSend），只能向 LocalSend 设备发送";
+
+/// 扫描进行中的提示。
+pub fn net_scanning(cidr: &str) -> String {
+    format!("正在扫描 {cidr}")
+}
+
+/// 扫描结束的结果。
+pub fn net_scan_result(probed: u32, found: u32) -> String {
+    format!("已探测 {probed} 个地址，发现 {found} 台设备")
+}
+
+/// 网卡行的扫描按钮：直接写出实际扫描的网段（网卡前缀过大时会回退到所在 /24）。
+pub fn net_scan_cidr_button(cidr: &str) -> String {
+    format!("扫描 {cidr}")
+}
+
+/// 防火墙横幅（仅 Windows 的后台服务会上报）。
+pub const FIREWALL_BANNER: &str = "Windows 防火墙可能阻止其他设备发现本机";
+pub const FIREWALL_ALLOW: &str = "允许";

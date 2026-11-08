@@ -15,6 +15,9 @@ pub fn notify_files(count: usize) -> String {
 /// 自设备会话的通知标题（core 给空串，这里按会话类型给出名称）。
 pub const NOTIFY_SELF_DEVICES_TITLE: &str = "我的设备";
 
+/// 网页访客会话的通知标题（core 给空串）。
+pub const NOTIFY_GUEST_TITLE: &str = "网页访客";
+
 /// 新请求通知。
 pub const NOTIFY_REQUEST_TITLE: &str = "新的请求";
 pub const NOTIFY_REQUEST_CONTACT: &str = "加你为联系人";
@@ -28,7 +31,16 @@ pub fn notify_request_body(from_name: &str, what: &str) -> String {
 
 /// 托盘菜单。
 pub const TRAY_OPEN: &str = "打开 LanMsg";
+pub const TRAY_WEB: &str = "开启网页传输";
 pub const TRAY_ONLINE: &str = "在线";
 pub const TRAY_INVISIBLE: &str = "隐身";
 pub const TRAY_BUSY: &str = "忙碌";
 pub const TRAY_QUIT: &str = "退出";
+
+/// 防火墙放行（仅 Windows 的托盘使用）。
+#[cfg(windows)]
+pub const TRAY_FIREWALL: &str = "允许 LanMsg 通过防火墙";
+#[cfg(windows)]
+pub const NOTIFY_FIREWALL_TITLE: &str = "LanMsg";
+#[cfg(windows)]
+pub const NOTIFY_FIREWALL_BODY: &str = "Windows 防火墙可能阻止其他设备发现本机，点击允许";

@@ -3,7 +3,7 @@
 
 use lanmsg_api::types::*;
 
-use crate::model::{ConnState, Model, Page, PairUi, TransferInfo};
+use crate::model::{ConnState, Model, Page, PairUi, TransferInfo, WebRequestUi, WebUi};
 use crate::views::preview::PreviewKind;
 
 /// 演示页面。
@@ -29,6 +29,12 @@ pub enum DemoPage {
     Settings,
     /// 文件中转站页。
     Stations,
+    /// 网页传输窗口（叠在会话页上）。
+    Web,
+    /// 会话页，顶部显示防火墙横幅。
+    Firewall,
+    /// 设置页（网络分组：手动对端、扫描结果、网卡）；截图时用较高的窗口。
+    Network,
     /// 会话页上叠着图片预览。
     PreviewImage,
     /// 会话页上叠着文本预览。
@@ -53,6 +59,9 @@ impl DemoPage {
             "files-grid" => DemoPage::FilesGrid,
             "settings" => DemoPage::Settings,
             "stations" => DemoPage::Stations,
+            "web" => DemoPage::Web,
+            "network" => DemoPage::Network,
+            "firewall" => DemoPage::Firewall,
             "preview-image" => DemoPage::PreviewImage,
             "preview-text" => DemoPage::PreviewText,
             _ => return None,
@@ -679,7 +688,8 @@ pub fn demo_model(p: DemoPage) -> Model {
         conv(
             "c-guest",
             ConvKind::Guest,
-            "网页访客 192.168.1.8",
+            // core 对网页访客会话给空标题，界面按类型显示“网页访客”
+            "",
             "[图片]",
             1560,
             1,
@@ -748,6 +758,36 @@ pub fn demo_model(p: DemoPage) -> Model {
         device("a2", "我的手机", "phone", true, false),
     ];
     m.files = demo_files();
+    m.interfaces = vec![
+        InterfaceView {
+            name: "eth0".into(),
+            addr: "192.168.1.2".into(),
+            prefix: 24,
+            tunnel_kind: None,
+        },
+        InterfaceView {
+            name: "tailscale0".into(),
+            addr: "100.101.102.103".into(),
+            prefix: 10,
+            tunnel_kind: Some("tailscale".into()),
+        },
+        InterfaceView {
+            name: "wg0".into(),
+            addr: "10.8.0.2".into(),
+            prefix: 24,
+            tunnel_kind: Some("wireguard".into()),
+        },
+    ];
+    m.manual_peers = vec![
+        ManualPeerView {
+            addr: "10.8.0.5:53320".into(),
+            device_id: Some("dev-w1".into()),
+        },
+        ManualPeerView {
+            addr: "office.example.net:53320".into(),
+            device_id: None,
+        },
+    ];
     m.settings = Some(SettingsDto {
         device_name: "我的电脑".into(),
         download_dir: "/home/demo/Downloads/LanMsg".into(),
@@ -788,6 +828,41 @@ pub fn demo_model(p: DemoPage) -> Model {
         DemoPage::Contacts => {
             m.page = Page::Contacts;
             m.contacts_tab = 0;
+        }
+        DemoPage::Web => {
+            m.page = Page::Chats;
+            m.current_conv = Some("c-guest".into());
+            m.web_open = true;
+            m.web = Some(WebUi {
+                info: WebSessionInfo {
+                    url: "http://192.168.1.2:53330/#k=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2Q".into(),
+                    code: "K7QM3XAP".into(),
+                    qr_uri: "http://192.168.1.2:53330/#k=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2Q"
+                        .into(),
+                    urls: Some(vec![
+                        "http://192.168.1.2:53330/#k=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2Q".into(),
+                        "http://10.8.0.2:53330/#k=Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2Q".into(),
+                    ]),
+                },
+                pending: vec![WebRequestUi {
+                    request: "req-1".into(),
+                    user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 \
+                        (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                        .into(),
+                    ip: "192.168.1.8".into(),
+                    received_at_millis: real_now(),
+                }],
+            });
+        }
+        DemoPage::Firewall => {
+            m.page = Page::Chats;
+            m.current_conv = Some("c-dm".into());
+            m.messages = demo_messages();
+            m.firewall_missing = true;
+        }
+        DemoPage::Network => {
+            m.page = Page::Settings;
+            m.scan_result = Some(crate::strings::net_scan_result(253, 2));
         }
         DemoPage::Devices => {
             m.page = Page::Contacts;

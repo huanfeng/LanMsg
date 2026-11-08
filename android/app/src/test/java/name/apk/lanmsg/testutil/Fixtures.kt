@@ -20,6 +20,7 @@ import uniffi.lanmsg_api.SelfInfo
 import uniffi.lanmsg_api.StationItemView
 import uniffi.lanmsg_api.StationView
 import uniffi.lanmsg_api.StatusDto
+import uniffi.lanmsg_api.WebSessionInfo
 
 object Fixtures {
     fun conv(id: String = "c1", title: String = "", unread: UInt = 0u, last: Long? = 1000, kind: ConvKind = ConvKind.SELF_DEVICES, lastKind: LastMessageKind? = null, lastText: String? = null): ConversationSummary =
@@ -75,6 +76,9 @@ object Fixtures {
             state = state, sourceName = "桌面", sourceIsMe = false, holderName = null,
         ),
     )
+
+    fun webSessionInfo(urls: List<String>? = listOf("http://192.168.1.5:53320/", "http://10.0.0.5:53320/")): WebSessionInfo =
+        WebSessionInfo(url = "http://192.168.1.5:53320/", code = "K7QM3XAP", qrUri = "http://192.168.1.5:53320/#k=abc", urls = urls)
 
     fun selfInfo(initialized: Boolean = true): SelfInfo = SelfInfo(
         initialized = initialized,

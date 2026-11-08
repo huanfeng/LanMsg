@@ -40,6 +40,9 @@ class DeviceConditions(ctx: Context, prefs: LocalPrefs, scope: CoroutineScope) {
     )
     val conditions: StateFlow<Conditions> = _conditions.asStateFlow()
 
+    /** 网页传输开始 / 结束时由界面设置；托管期间保持前台服务。 */
+    fun setWebHosting(on: Boolean) = _conditions.update { it.copy(webHosting = on) }
+
     @Volatile private var trusted: Set<String> = emptySet()
 
     init {

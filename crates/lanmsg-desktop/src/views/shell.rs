@@ -7,7 +7,9 @@ use crate::model::Page;
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
-use crate::views::{chats, contacts, files, pair, preview, settings, stations, wizard};
+use crate::views::{
+    chats, contacts, files, pair, preview, settings, stations, web_transfer, wizard,
+};
 
 /// 页面内容。
 fn page_view(ui: &UiState, p: Page) -> Element {
@@ -184,11 +186,30 @@ pub fn shell(ui: &UiState) -> Element {
                 .visible_signal(ui.daemon_quit()),
         );
 
+    // 防火墙横幅与断开横幅同一位置、同一样式；断开优先（断开时本横幅隐藏）
+    let ui_allow = ui.clone();
+    let firewall_banner = Element::row()
+        .width_match()
+        .padding_xy(style::SPACE_LG, style::SPACE_SM)
+        .spacing(style::SPACE_MD)
+        .cross(Align::Center)
+        .bg_role(Role::Warning)
+        .visible_signal(ui.derive(|m| m.show_firewall_banner()))
+        .child(
+            Element::label(strings::FIREWALL_BANNER)
+                .font_size(style::FONT_BODY)
+                .fg_role(Role::OnAccent),
+        )
+        .child(
+            Element::button(strings::FIREWALL_ALLOW).on_click(move |_| ui_allow.allow_firewall()),
+        );
+
     let ui_page = ui.clone();
     let content = Element::col()
         .weight(1.0)
         .height_match()
         .child(banner)
+        .child(firewall_banner)
         .child(Element::switcher(page, move |p| page_view(&ui_page, p).fill()).weight(1.0));
 
     let main = Element::row()
@@ -201,5 +222,6 @@ pub fn shell(ui: &UiState) -> Element {
         .fill()
         .child(main)
         .child(pair::pair_host(ui))
+        .child(web_transfer::web_transfer_host(ui))
         .child(preview::preview_host(ui))
 }

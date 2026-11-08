@@ -98,6 +98,8 @@ fn message_notice(msg: &MessageView, focus: Option<&str>, titles: &TitleCache) -
     // 自设备会话的标题由 core 留空，这里按 kind 给出名称。
     let title = match cached {
         Some((_, ConvKind::SelfDevices)) => strings::NOTIFY_SELF_DEVICES_TITLE.to_string(),
+        // 网页访客会话的标题同样由 core 留空
+        Some((t, ConvKind::Guest)) if t.is_empty() => strings::NOTIFY_GUEST_TITLE.to_string(),
         Some((t, _)) => t.clone(),
         None => msg.author_device_name.clone(),
     };
@@ -240,6 +242,16 @@ mod tests {
         let n = notice_for(&added(m), None, &StatusDto::Online, &titles).unwrap();
         assert_eq!(n.title, "我的设备");
         assert_eq!(n.body, "手机: hi");
+    }
+
+    #[test]
+    fn guest_conv_with_empty_title_uses_guest_title() {
+        let mut titles = TitleCache::default();
+        titles.observe(&conv_event("c1", "", ConvKind::Guest));
+        let ev = added(msg("c1", text("hi")));
+        let n = notice_for(&ev, None, &StatusDto::Online, &titles).unwrap();
+        assert_eq!(n.title, "网页访客");
+        assert_eq!(n.body, "hi");
     }
 
     #[test]

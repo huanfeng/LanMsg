@@ -76,10 +76,11 @@ pub fn request_preview_text(p: &RequestPreviewView) -> Option<String> {
     }
 }
 
-/// 会话标题：自设备会话由 core 给空串，这里按 kind 显示本地化名称。
+/// 会话标题：自设备与网页访客会话由 core 给空串，这里按 kind 显示本地化名称。
 pub fn conv_title(c: &ConversationSummary) -> String {
     match c.kind {
         ConvKind::SelfDevices => strings::SELF_DEVICES_TITLE.to_string(),
+        ConvKind::Guest if c.title.is_empty() => strings::GUEST_TITLE.to_string(),
         _ => c.title.clone(),
     }
 }
@@ -119,6 +120,7 @@ pub fn source_line(item: &FileItemView) -> String {
 pub fn file_conv_title(f: &FileView) -> String {
     match f.conv_kind {
         ConvKind::SelfDevices => strings::SELF_DEVICES_TITLE.to_string(),
+        ConvKind::Guest if f.conv_title.is_empty() => strings::GUEST_TITLE.to_string(),
         _ => f.conv_title.clone(),
     }
 }
@@ -238,6 +240,7 @@ mod tests {
     fn self_devices_title_is_localized_by_kind() {
         assert_eq!(conv_title(&summary(ConvKind::SelfDevices, "")), "我的设备");
         assert_eq!(conv_title(&summary(ConvKind::Dm, "小王")), "小王");
+        assert_eq!(conv_title(&summary(ConvKind::Guest, "")), "网页访客");
     }
 
     fn item(state: BlobState, is_me: bool, holder: Option<&str>) -> FileItemView {

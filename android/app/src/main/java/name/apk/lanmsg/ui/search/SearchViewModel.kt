@@ -21,8 +21,8 @@ import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
 
 class SearchViewModel(private val core: CoreApi) : ViewModel() {
-    /** [selfDevices] 为“我的设备”会话：标题由界面换成本地化文案（ViewModel 拿不到 Context）。 */
-    data class Row(val msg: MessageView, val convTitle: String, val selfDevices: Boolean = false)
+    /** [kind] 为“我的设备”或网页访客会话时标题由界面换成本地化文案（ViewModel 拿不到 Context）。 */
+    data class Row(val msg: MessageView, val convTitle: String, val kind: ConvKind? = null)
 
     data class UiState(
         val query: String = "",
@@ -79,7 +79,7 @@ class SearchViewModel(private val core: CoreApi) : ViewModel() {
                 }
                 val rows = found.map { m ->
                     val summary = map[m.conv]
-                    Row(m, summary?.title.orEmpty(), summary?.kind == ConvKind.SELF_DEVICES)
+                    Row(m, summary?.title.orEmpty(), summary?.kind)
                 }
                 _state.update { it.copy(rows = rows, loading = false, error = null, coreOutdated = false) }
             } catch (e: ApiException) {

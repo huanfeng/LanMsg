@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,10 +55,10 @@ import name.apk.lanmsg.ui.theme.LanMsgControls
 import uniffi.lanmsg_api.StatusDto
 
 @Composable
-fun MeScreen(onOpenDevices: () -> Unit, onOpenSettings: () -> Unit) {
+fun MeScreen(onOpenDevices: () -> Unit, onOpenWeb: () -> Unit, onOpenSettings: () -> Unit) {
     val vm: MeViewModel = viewModel(factory = viewModelFactory { initializer { MeViewModel(ServiceLocator.coreHolder.api) } })
     val state by vm.state.collectAsStateWithLifecycle()
-    MeContent(state, vm::rename, vm::setStatus, onOpenDevices, onOpenSettings)
+    MeContent(state, vm::rename, vm::setStatus, onOpenDevices, onOpenWeb, onOpenSettings)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -67,6 +68,7 @@ fun MeContent(
     onRename: (String) -> Unit,
     onStatus: (StatusDto) -> Unit,
     onOpenDevices: () -> Unit,
+    onOpenWeb: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val c = LanMsgColors.current
@@ -118,6 +120,8 @@ fun MeContent(
             HorizontalDivider(color = c.line)
             Column(Modifier.padding(top = 16.dp).fillMaxWidth().background(c.surface)) {
                 NavRow(Icons.Outlined.Devices, R.string.me_my_devices, onOpenDevices)
+                HorizontalDivider(color = c.line)
+                NavRow(Icons.Outlined.Language, R.string.me_web_transfer, onOpenWeb)
                 HorizontalDivider(color = c.line)
                 NavRow(Icons.Outlined.Settings, R.string.me_settings, onOpenSettings)
             }

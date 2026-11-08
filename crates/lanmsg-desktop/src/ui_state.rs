@@ -48,6 +48,14 @@ pub struct UiState {
     composer: Rc<RefCell<Option<ComposerSlot>>>,
     /// 配对对话框的显隐信号：ESC 只隐藏、不改 Model，由 `tick_pair` 发现后取消配对。
     pair_show: Rc<RefCell<Option<Signal<bool>>>>,
+    /// 网页传输窗口的显隐信号：ESC 只隐藏面板，由 `tick_web` 发现后把 `web_open` 置假。
+    web_show: Rc<RefCell<Option<Signal<bool>>>>,
+    /// 网页传输窗口里当前选中的访问地址下标；放在这里，窗口重建后选择不丢。
+    pub web_url_sel: Signal<usize>,
+    /// 防火墙放行提权的结果通道：提权在后台线程（会等 UAC），结果由 `tick_firewall` 取走。
+    firewall_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<bool>>>>,
+    /// `--web` 带来的待办：连接上后台服务后开启网页传输。
+    pending_web: Rc<RefCell<bool>>,
     /// 配对完成（Done）后开始计时的时刻，用于 1.5 秒后自动关闭。
     pair_done_since: Rc<RefCell<Option<Instant>>>,
     /// 选择界面上次刷新候选设备的时刻；离开选择界面即清空。
@@ -100,6 +108,10 @@ impl UiState {
             preview: PreviewState::new(),
             composer: Rc::new(RefCell::new(None)),
             pair_show: Rc::new(RefCell::new(None)),
+            web_show: Rc::new(RefCell::new(None)),
+            web_url_sel: signal(0usize),
+            firewall_rx: Rc::new(RefCell::new(None)),
+            pending_web: Rc::new(RefCell::new(false)),
             pair_done_since: Rc::new(RefCell::new(None)),
             pair_refresh_at: Rc::new(RefCell::new(None)),
             debouncer: Rc::new(RefCell::new(Debouncer::new(SEARCH_DEBOUNCE_MS))),
@@ -131,6 +143,7 @@ impl UiState {
         if matches!(msg, UiMsg::Disconnected(_)) {
             self.pending_open.borrow_mut().take();
         }
+        let is_connected = matches!(msg, UiMsg::Connected);
         let is_convs_reply = matches!(
             &msg,
             UiMsg::Reply {
@@ -144,6 +157,116 @@ impl UiState {
         self.restore_draft();
         if is_convs_reply {
             self.resolve_pending_open();
+        }
+        // `--web`：首次连上后开启网页传输
+        if is_connected && self.pending_web.replace(false) {
+            self.act(|m| m.web_start());
+        }
+    }
+
+    /// 请求开启网页传输（`--web` 参数 / 单实例转发）：已连接则立即开启，否则等连接上后再开。
+    /// 向导未完成时忽略。
+    pub fn request_web(&self) {
+        if self.read(|m| m.page == Page::Wizard) {
+            return;
+        }
+        if self.read(|m| m.conn == ConnState::Connected) {
+            self.act(|m| m.web_start());
+        } else {
+            *self.pending_web.borrow_mut() = true;
+        }
+    }
+
+    /// 点击横幅“允许”：以管理员身份运行同目录的 `lanmsgd --add-firewall-rule`（仅 Windows 有效，
+    /// 其他平台不会出现该横幅）。正在进行时忽略；结果由 `tick_firewall` 处理。
+    pub fn allow_firewall(&self) {
+        #[cfg(windows)]
+        {
+            if self.firewall_rx.borrow().is_some() {
+                return;
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            *self.firewall_rx.borrow_mut() = Some(rx);
+            std::thread::spawn(move || {
+                let ok = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("lanmsgd.exe")))
+                    .map(|exe| lanmsg_core::firewall::elevate_add_rule(&exe))
+                    .is_some_and(|r| match r {
+                        Ok(ok) => ok,
+                        Err(e) => {
+                            tracing::warn!("failed to elevate firewall rule command: {e}");
+                            false
+                        }
+                    });
+                let _ = tx.send(ok);
+            });
+        }
+    }
+
+    /// 周期调用：取走提权结果，成功（退出码 0）则隐藏横幅；取消或失败保留横幅可再试。
+    pub fn tick_firewall(&self) {
+        let done = match self.firewall_rx.borrow().as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(ok)) => Some(ok),
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Some(false),
+            _ => None,
+        };
+        if let Some(ok) = done {
+            self.firewall_rx.borrow_mut().take();
+            if ok {
+                self.act(|m| {
+                    m.firewall_missing = false;
+                    Vec::new()
+                });
+            }
+        }
+    }
+
+    /// 周期调用：扫描迟迟没有结束事件时兜底复位。
+    pub fn tick_scan(&self) {
+        if self.read(|m| m.scanning.is_some()) {
+            let now = crate::views::chats::now_millis();
+            if self.read(|m| now - m.scanning_since_millis > crate::model::SCAN_TIMEOUT_MS) {
+                self.act(|m| {
+                    m.scan_expire(now);
+                    Vec::new()
+                });
+            }
+        }
+    }
+
+    /// 登记网页传输窗口的显隐信号（窗口每次重建时调用）。
+    pub fn register_web_show(&self, show: Signal<bool>) {
+        *self.web_show.borrow_mut() = Some(show);
+    }
+
+    /// 周期调用：窗口被 ESC 隐藏时同步 `web_open`；超过 60 秒无人处理的浏览器请求按拒绝处理。
+    pub fn tick_web(&self) {
+        if !self.read(|m| m.web_open) {
+            self.web_show.borrow_mut().take();
+        } else if self
+            .web_show
+            .borrow()
+            .as_ref()
+            .is_some_and(|show| !show.get())
+        {
+            self.act(|m| {
+                m.web_open = false;
+                Vec::new()
+            });
+        }
+        if self.read(|m| m.web.as_ref().is_some_and(|w| !w.pending.is_empty())) {
+            let now = crate::views::chats::now_millis();
+            let fx = self.read(|m| {
+                m.web.as_ref().is_some_and(|w| {
+                    w.pending
+                        .iter()
+                        .any(|p| now - p.received_at_millis > crate::model::WEB_REQUEST_TTL_MS)
+                })
+            });
+            if fx {
+                self.act(|m| m.web_expire(now));
+            }
         }
     }
 
@@ -398,6 +521,23 @@ impl UiState {
 mod tests {
     use super::*;
     use lanmsg_api::types::{ConvKind, ConversationSummary};
+
+    #[test]
+    fn request_web_waits_for_connection() {
+        let ui = UiState::new(Model::new(), Bridge::detached());
+        ui.request_web();
+        // 未连接：先记待办，不开窗口
+        assert!(!ui.read(|m| m.web_open));
+        ui.dispatch(UiMsg::Connected);
+        assert!(ui.read(|m| m.web_open));
+        // 待办只执行一次
+        ui.act(|m| {
+            m.web_open = false;
+            Vec::new()
+        });
+        ui.dispatch(UiMsg::Connected);
+        assert!(!ui.read(|m| m.web_open));
+    }
 
     #[test]
     fn pair_refresh_step_skips_first_then_throttles_to_3s() {

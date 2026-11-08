@@ -57,6 +57,7 @@ import name.apk.lanmsg.files.FileOpener
 import name.apk.lanmsg.files.FilePreview
 import name.apk.lanmsg.files.PreviewKind
 import name.apk.lanmsg.notify.VisibleConversation
+import name.apk.lanmsg.ui.common.convTitle
 import name.apk.lanmsg.ui.common.formatTime
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import name.apk.lanmsg.ui.theme.LanMsgControls
@@ -180,7 +181,7 @@ fun ChatContent(
             Column {
                 TopAppBar(
                     title = {
-                        Text(if (state.kind == ConvKind.SELF_DEVICES) stringResource(R.string.conv_self_title) else state.title, maxLines = 1)
+                        Text(convTitle(state.kind, state.title), maxLines = 1)
                     },
                     navigationIcon = {
                         IconButton(onClick = actions.onBack) {

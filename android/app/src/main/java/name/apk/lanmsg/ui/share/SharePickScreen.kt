@@ -38,11 +38,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.convTitle
 import name.apk.lanmsg.ui.common.ConversationAvatar
 import name.apk.lanmsg.ui.common.EmptyState
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import name.apk.lanmsg.ui.theme.LanMsgControls
-import uniffi.lanmsg_api.ConvKind
 
 /** 分享入口的会话选择页；发送成功后调用 [onSent] 进入聊天页。 */
 @Composable
@@ -99,8 +99,7 @@ fun SharePickContent(
             } else {
                 LazyColumn(Modifier.fillMaxSize()) {
                     items(state.items, key = { it.conv }) { s ->
-                        val selfDevices = s.kind == ConvKind.SELF_DEVICES
-                        val title = if (selfDevices) stringResource(R.string.conv_self_title) else s.title
+                        val title = convTitle(s.kind, s.title)
                         Column(Modifier.fillMaxWidth().background(c.surface).clickable(enabled = !state.busy) { onPick(s.conv) }) {
                             Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 ConversationAvatar(s, size = 40.dp, online = s.peerOnline)

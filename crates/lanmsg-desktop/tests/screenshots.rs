@@ -35,6 +35,9 @@ fn every_demo_page_renders() {
         "files-grid",
         "settings",
         "stations",
+        "web",
+        "network",
+        "firewall",
         "preview-image",
         "preview-text",
     ] {

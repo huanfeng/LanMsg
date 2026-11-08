@@ -1,6 +1,7 @@
 package name.apk.lanmsg.service
 
 import android.annotation.SuppressLint
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -15,6 +16,9 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import name.apk.lanmsg.MainActivity
 import name.apk.lanmsg.R
@@ -49,6 +53,12 @@ class LanMsgService : LifecycleService() {
         lifecycleScope.launch {
             ServiceLocator.coreHolder.backgroundMode.collect { mode ->
                 locks?.setWifiLockWanted(mode == BackgroundMode.REALTIME)
+            }
+        }
+        // 网页传输开始 / 结束时刷新常驻通知文字
+        lifecycleScope.launch {
+            ServiceLocator.deviceConditions.conditions.map { it.webHosting }.distinctUntilChanged().drop(1).collect {
+                getSystemService(NotificationManager::class.java).notify(NOTIF_ID_SERVICE, buildNotification())
             }
         }
         // 网络变化时让 core 清零重连退避、立即重拨已配对设备
@@ -94,6 +104,7 @@ class LanMsgService : LifecycleService() {
     private fun buildNotification(): android.app.Notification {
         // 服务可能先于 Application 之外的入口启动，自己保证渠道存在
         NotificationChannels.ensure(this)
+        val webHosting = ServiceLocator.deviceConditions.conditions.value.webHosting
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
@@ -101,7 +112,7 @@ class LanMsgService : LifecycleService() {
         return NotificationCompat.Builder(this, NotificationChannels.SERVICE)
             .setSmallIcon(R.drawable.ic_stat_lanmsg)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText(getString(R.string.notif_service_text))
+            .setContentText(getString(if (webHosting) R.string.notif_service_web_text else R.string.notif_service_text))
             .setContentIntent(open)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

@@ -33,10 +33,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import name.apk.lanmsg.R
+import name.apk.lanmsg.ui.common.convTitle
 import name.apk.lanmsg.ui.common.ConversationAvatar
 import name.apk.lanmsg.ui.common.formatTime
 import name.apk.lanmsg.ui.theme.LanMsgColors
-import uniffi.lanmsg_api.ConvKind
 
 /** 会话行（规范 §5）：点按进入聊天，长按弹出免打扰菜单。 */
 @OptIn(ExperimentalFoundationApi::class)
@@ -45,8 +45,7 @@ fun ConversationRow(row: ConversationListViewModel.Row, onClick: () -> Unit, onT
     val c = LanMsgColors.current
     val s = row.summary
     var menu by remember { mutableStateOf(false) }
-    val selfDevices = s.kind == ConvKind.SELF_DEVICES
-    val title = if (selfDevices) stringResource(R.string.conv_self_title) else s.title
+    val title = convTitle(s.kind, s.title)
 
     Box {
         Column(

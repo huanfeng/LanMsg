@@ -9,7 +9,7 @@ use lanmsg_api::{Event, Request, Response, StatusDto};
 use windui::platform::{resident_available, tray_supported};
 use windui::prelude::*;
 
-use crate::launch::{conv_from_tag, open_gui};
+use crate::launch::{conv_from_tag, open_gui, open_gui_with};
 use crate::notify::{notice_for, Notice, TitleCache};
 use crate::runtime::DaemonRuntime;
 use crate::strings;
@@ -17,12 +17,52 @@ use crate::strings;
 /// 托盘图标（32x32 PNG，编译期内嵌）。
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray-32.png");
 
+/// 防火墙提示通知的 tag：点击时提权放行而不是打开界面。
+#[cfg(windows)]
+const FIREWALL_TAG: &str = "firewall";
+
 /// 后台线程送回 UI 线程的消息。
 enum UiMsg {
     /// 核心事件。
     Event(Event),
     /// 服务已被外部关闭（IPC Shutdown / SIGTERM），托盘需退出。
     Quit,
+    /// 防火墙放行规则的状态（来自共享的 watch）：`true` = 缺失，`false` = 已放行。
+    #[cfg(windows)]
+    Firewall { missing: bool },
+}
+
+/// 提权正在进行：连点菜单或通知只弹一个 UAC。
+#[cfg(windows)]
+static ELEVATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 点击托盘提示 / 菜单项后在后台线程提权添加规则：成功后复查并写入共享状态，
+/// 托盘菜单与通知随共享状态统一更新。提权会阻塞到 UAC 与命令完成，不能占用托盘消息线程。
+#[cfg(windows)]
+fn start_firewall_elevation(firewall: std::sync::Arc<tokio::sync::watch::Sender<bool>>) {
+    use std::sync::atomic::Ordering;
+    if ELEVATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    std::thread::spawn(move || {
+        match std::env::current_exe() {
+            Ok(exe) => match lanmsg_core::firewall::elevate_add_rule(&exe) {
+                // 命令退出码 0 即规则已添加：直接置为已放行，不依赖解析 netsh 输出复查
+                // （非中英文的 Windows 上解析不了，会永久显示缺失并重复添加规则）
+                Ok(true) => {
+                    firewall.send_replace(false);
+                }
+                // 用户取消 UAC：保持现状
+                Ok(false) => tracing::info!("firewall elevation cancelled or failed"),
+                Err(e) => tracing::warn!("failed to elevate firewall rule command: {e}"),
+            },
+            Err(e) => tracing::warn!("cannot locate own executable: {e}"),
+        }
+        ELEVATING.store(false, Ordering::SeqCst);
+    });
 }
 
 /// 解码托盘图标为 RGBA；失败返回 None（托盘用系统默认图标）。
@@ -122,36 +162,70 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     }
     let dir_left = data_dir.clone();
     let dir_menu = data_dir.clone();
+    let dir_web = data_dir.clone();
     let dir_click = data_dir.clone();
     let service_quit = rt.service.clone();
     let handle_quit = handle.clone();
     let dir_quit = data_dir.clone();
+    #[cfg(windows)]
+    let fw_state = rt.firewall_tx();
+    #[cfg(windows)]
+    let fw_click = fw_state.clone();
+    #[cfg(windows)]
+    let fw_missing = signal(false);
     let tray = tray
         .on_left_click(move |_ctx| open_gui_logged(&dir_left, None))
         .on_notification_click(move |_ctx, tag| {
+            // 防火墙提示：不开界面，直接提权放行
+            #[cfg(windows)]
+            if tag.as_deref() == Some(FIREWALL_TAG) {
+                start_firewall_elevation(fw_click.clone());
+                return;
+            }
             // tag 为空 / None 时只激活界面；否则尽力定位会话（Windows 的 tag 可能不对应被点的那条）。
             open_gui_logged(&dir_click, conv_from_tag(tag).as_deref());
         })
         .on_availability_changed(|_ctx, up| {
             tracing::debug!("tray availability changed: {up}");
         })
-        .menu(vec![
-            TrayMenuItem::item(strings::TRAY_OPEN, move |_ctx| {
-                open_gui_logged(&dir_menu, None)
-            }),
-            TrayMenuItem::separator(),
-            status_item(strings::TRAY_ONLINE, StatusDto::Online, status, &rt),
-            status_item(strings::TRAY_INVISIBLE, StatusDto::Invisible, status, &rt),
-            status_item(strings::TRAY_BUSY, StatusDto::Busy, status, &rt),
-            TrayMenuItem::separator(),
-            TrayMenuItem::item(strings::TRAY_QUIT, move |ctx| {
-                if let Err(e) = handle_quit.block_on(service_quit.handle(Request::Shutdown)) {
-                    tracing::warn!("quit request failed: {e:?}");
-                }
-                crate::runtime::write_quit_marker(&dir_quit);
-                ctx.quit();
-            }),
-        ]);
+        .menu({
+            #[allow(unused_mut)]
+            let mut items = vec![
+                TrayMenuItem::item(strings::TRAY_OPEN, move |_ctx| {
+                    open_gui_logged(&dir_menu, None)
+                }),
+                TrayMenuItem::item(strings::TRAY_WEB, move |_ctx| {
+                    if let Err(e) = open_gui_with(&dir_web, &["--web"]) {
+                        tracing::warn!("failed to launch UI for web transfer: {e}");
+                    }
+                }),
+                TrayMenuItem::separator(),
+                status_item(strings::TRAY_ONLINE, StatusDto::Online, status, &rt),
+                status_item(strings::TRAY_INVISIBLE, StatusDto::Invisible, status, &rt),
+                status_item(strings::TRAY_BUSY, StatusDto::Busy, status, &rt),
+                TrayMenuItem::separator(),
+                TrayMenuItem::item(strings::TRAY_QUIT, move |ctx| {
+                    if let Err(e) = handle_quit.block_on(service_quit.handle(Request::Shutdown)) {
+                        tracing::warn!("quit request failed: {e:?}");
+                    }
+                    crate::runtime::write_quit_marker(&dir_quit);
+                    ctx.quit();
+                }),
+            ];
+            // 仅 Windows：规则缺失时可用的放行入口，位于“开启网页传输”之后
+            #[cfg(windows)]
+            {
+                let fw_menu = fw_state.clone();
+                items.insert(
+                    2,
+                    TrayMenuItem::item(strings::TRAY_FIREWALL, move |_ctx| {
+                        start_firewall_elevation(fw_menu.clone());
+                    })
+                    .enabled(fw_missing),
+                );
+            }
+            items
+        });
 
     let mut app = App::resident("LanMsg").tray(tray);
     let tray_handle = app.tray_handle();
@@ -161,6 +235,19 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     titles.set_self_device(self_device);
     let tx = app.channel::<UiMsg>(move |_ctx, msg| match msg {
         UiMsg::Quit => tray_handle.quit(),
+        #[cfg(windows)]
+        UiMsg::Firewall { missing } => {
+            let was_missing = fw_missing.get();
+            fw_missing.set(missing);
+            // 只在由“已放行”变为“缺失”时提示一次
+            if crate::firewall_cmd::should_notify(was_missing, missing) {
+                tray_handle.notify_tagged(
+                    strings::NOTIFY_FIREWALL_TITLE,
+                    strings::NOTIFY_FIREWALL_BODY,
+                    FIREWALL_TAG,
+                );
+            }
+        }
         UiMsg::Event(ev) => {
             titles.observe(&ev);
             let focus = service.ui_focus().map(|c| c.to_hex());
@@ -180,6 +267,23 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
         }
     });
 
+    #[cfg(windows)]
+    {
+        // 托盘菜单与通知跟随共享状态：后台检查、提权成功都只写这一处
+        let mut fw_rx = rt.firewall_tx().subscribe();
+        let fw_ui_tx = tx.clone();
+        handle.spawn(async move {
+            loop {
+                let missing = *fw_rx.borrow_and_update();
+                let _ = fw_ui_tx.send(UiMsg::Firewall { missing });
+                if fw_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
+        // 后台检查（netsh 较慢）：缺失期间定期复查
+        crate::firewall_cmd::spawn_monitor(rt.firewall_tx(), |_| {});
+    }
     let ev_tx = tx.clone();
     rt.spawn_event_forwarder(move |ev| {
         let _ = ev_tx.send(UiMsg::Event(ev));

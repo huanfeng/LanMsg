@@ -2,13 +2,14 @@
 // 联系人页的“我的设备”分类与设置页共用 `devices_panel`，确认框宿主 `remove_confirm_host` 由页面放在滚动区之外。
 // 注释中文，标识符英文。
 
-use lanmsg_api::types::{DeviceView, PairMethod, PathClassDto};
+use lanmsg_api::types::{DeviceView, PairMethod};
 use windui::prelude::*;
 
 use crate::strings;
 use crate::style;
 use crate::ui_state::UiState;
 use crate::views::confirm::{confirm_host, Confirm, ConfirmState};
+use crate::views::network::path_badge_text;
 
 /// 设备类型的中文名；未知类型原样显示。
 pub fn device_type_label(ty: &str) -> String {
@@ -20,16 +21,6 @@ pub fn device_type_label(ty: &str) -> String {
         other => other,
     }
     .to_string()
-}
-
-/// 非局域网路径的角标文字；局域网不标。
-pub fn path_label(path: &PathClassDto) -> Option<&'static str> {
-    match path {
-        PathClassDto::Lan => None,
-        PathClassDto::Vpn => Some(strings::PATH_VPN),
-        PathClassDto::Internet => Some(strings::PATH_INTERNET),
-        PathClassDto::Relay => Some(strings::PATH_RELAY),
-    }
 }
 
 /// 一台设备的一行：名字 + 本机标记 / 路径角标，下方类型与指纹；非本机带“移除”。
@@ -47,7 +38,7 @@ pub fn device_row(d: &DeviceView, confirm: Option<ConfirmState>) -> Element {
     if d.is_self {
         title = title.child(style::pill(strings::DEVICES_THIS));
     }
-    if let Some(p) = d.path.as_ref().and_then(path_label) {
+    if let Some(p) = d.path.as_ref().and_then(path_badge_text) {
         title = title.child(style::pill(p));
     }
     let status = if d.online {
@@ -190,11 +181,5 @@ mod tests {
     fn device_type_label_maps_known_and_keeps_unknown() {
         assert_eq!(device_type_label("phone"), "手机");
         assert_eq!(device_type_label("localsend"), "localsend");
-    }
-
-    #[test]
-    fn path_label_hides_lan_only() {
-        assert_eq!(path_label(&PathClassDto::Lan), None);
-        assert_eq!(path_label(&PathClassDto::Vpn), Some(strings::PATH_VPN));
     }
 }

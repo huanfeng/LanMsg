@@ -113,6 +113,9 @@
 - **T16**：测试断言 `ErrorCode`；`Conditions` 在现有 4 个字段的基础上追加 `webHosting`。
 - **T17**：在 wind-installer 仓库（/home/dufeng/develop/windinput/wind-installer）实施，提权复用 `util/admin.rs`。遵守该仓库 AGENTS.md 和 `--only` 提交纪律，**不推送**。
 - **T18**：托盘文案进 strings.rs；`--add-firewall-rule` 的命令行输出用英文。
+  - 实施补充：netsh/提权/规则判断放在 `lanmsg-core/src/firewall.rs`（`windows` 依赖仅 Windows 编译），启动检查与命令行在 `lanmsgd/src/firewall_cmd.rs`。缺失状态用运行时共享的 `tokio::sync::watch` 传递：IPC 连接建立时按当前值补发 `FirewallMissing`，之后值变化再推送；缺失期间后台每 30 秒复查一次（不在每次连接时跑 netsh）。托盘菜单项只有 `enabled` 没有可见性（windui 限制），缺失时才可点。判断规则按 `-----` 分块：同一块内须含程序路径、已启用、入站、允许（中英文标签都认）；netsh 输出按 OEM 代码页解码（`GetOEMCP` + `MultiByteToWideChar`）。提权 `ShellExecuteExW` 设 `lpDirectory`，调用线程先 `CoInitializeEx`。
+  - C5 追加（第 3 轮）：`Event::FirewallOk`（放在 `Event` 末尾），防火墙状态由缺失变为已放行时推送，界面据此隐藏提示；Android 绑定重新生成后若有对 `Event` 的穷尽 `when` 需补分支。托盘提权成功（命令退出码 0）直接把共享状态置为已放行，不依赖解析 netsh 输出复查。界面（桌面）自己提权成功后只在本地隐藏横幅，后台服务要等下一次定期复查才更新共享状态。
+  - 后续项（wind-installer，未做）：`wind-installer/src/installer/firewall.rs` 有同样的两个问题——`run_netsh_output` 用 `from_utf8_lossy` 解码而非 OEM 代码页（现靠“路径含非 ASCII 时只要 show 成功就视为匹配”的回退），以及 `rule_matches_program` 不按规则块判断（同名规则被禁用、拦截或出站时也会被当作有效）。T17 对应的安装器改动应同步修正。
 - **T19**：图标已有（`crates/lanmsg-desktop/assets/lanmsg.ico`、`scripts/gen-win-icon.py`），不需要占位图标；`packaging/assets` 从这里生成或引用。
   - 实施补充：`app.toml` 的 icon/logo 直接引用 `crates/lanmsg-desktop/assets/lanmsg.ico` 与 `packaging/assets/lanmsg-256.png`，不另存副本。暂不写 `url_protocol = "lanmsg"`（桌面端尚未处理 `lanmsg://`，与 Linux/macOS 一致，启用时一并处理）。sendto 快捷方式的 `--station-put` 依赖 T7。`build-dist.ps1` 增加 `-Version`（默认取 workspace 版本）、`-WindInstallerTag`（CI 用，Task 22 提供包含 firewall/sendto 能力的 wind-installer tag；未给 `-WindInstallerDir` 且无 tag 时报错）、`-SkipBuild`；wind-installer 只发布 x64 stub，arm64 安装包也用 x64 stub（经模拟运行）。脚本仿照 wind-installer 的 `pack.ps1`：先做 zip，再注入并加工卸载器（`prep-uninstaller`），最后 `build`。`scoop/lanmsg.json` 的仓库用 `@REPO@` 占位，由 `update-manifest.sh` 的 `REPO_SLUG`（默认 `huanfeng/lanmsg`）填充。`scripts/check-packaging.sh` 汇总 shellcheck、app.toml 解析、scoop 清单、macOS dry-run 与 Linux 安装测试（`--fast` 跳过后者），本机无 pwsh，ps1 未做语法检查，需在 CI（windows runner）验证；清单已用 wind-installer 的 `ProjectConfig::from_toml_str` 实测解析通过。Task 22 接入 CI 时调用 `scripts/check-packaging.sh`。
   - 第 2 轮：`[paths] data` 改为 `%APPDATA%\lanmsg\LanMsg\data`（core 默认数据目录不变，保护已有配对数据），去掉 `[localdata]`（缓存与日志在数据目录内）。已确认 wind-installer 原先的 `paths.data` 只是向导里数据目录输入框的初值，卸载“删除用户数据”写死删 `%APPDATA%\{app.id}`。第 3 轮：wind-installer 新增可选清单字段 `[paths] user_data`（提交 693db55，本地未推送；缺省行为不变，须以 `%APPDATA%\` / `%LOCALAPPDATA%\` 开头、其下至少一级、无 `..`/盘符/其他变量），LanMsg 用 `user_data = %APPDATA%\lanmsg\LanMsg`（directories 的应用目录；core 只用其下的 `data`，`config_dir`/`cache_dir` 当前代码未使用，`cache`、`logs` 均在 `data` 内；删整个应用目录可覆盖将来可能出现的 `config`，空的 `%APPDATA%\lanmsg` 会留下）。CI 下载的 wind-installer tag 必须包含该字段。`paths.rs` 的 Windows 路径注释已更正。scoop `autoupdate` 加 `hash.url = $baseurl/SHA256SUMS`（scoop 对 `<hash>  <文件名>` 多行格式按下载 URL 的文件名自动匹配，release 须上传 `SHA256SUMS` 资产）。
@@ -131,3 +134,45 @@
 主线（串行，因为都要改热点文件）：T1 → T2 → T3 → T3B → T4 → T5 → T6 → T7 → T8 → T11 → T14 → T15 → T16 → T18 → T19 → T20 → T21 → T22。
 
 旁线（与主线并行，不碰热点文件；使用独立的 CARGO_TARGET_DIR）：T9 → T10（新 crate `lanmsg-localsend`）；T12 → T13（`web/` 与 `lanmsg-web-assets`）；T17（外部仓库）。
+
+## 用户追加需求（2026-11-08 第二批）：仓库、CI/Release 与自动更新
+
+用户决定：
+- 代码推送到已存在的私有仓库 `huanfeng/lanmsg`。旧 Flutter 代码已改名保存在 `flutter-legacy` 分支，`main` 是默认分支。仓库暂时保持私有。
+- windui 依赖 tag `v0.32.0`（已发布，提交 78a088c）。wind-installer 依赖 tag `v0.131.0`（包含 firewall、sendto、args、user_data），CI 从源码构建它的工具，不依赖它的 Release 产物。
+- Android 正式包使用 WindInputAndroid 的同一把签名。GitHub Secrets 已配置 `ANDROID_SIGNING_KEYSTORE_BASE64`、`ANDROID_SIGNING_STORE_PASSWORD`、`ANDROID_SIGNING_KEY_ALIAS`、`ANDROID_SIGNING_KEY_PASSWORD`；本地签名配置写在 `android/keystore.properties`（已被 gitignore 忽略）。
+- 仓库私有时，匿名下载 Release 不可用（scoop 安装、curl 安装、应用内更新都受影响）。这些功能按公开仓库的方式实现；私有期间失败时要给出明确提示，不能崩溃。
+
+### T22（重写）：CI 与发布流水线
+- windui 依赖改为 `{ git = "https://github.com/huanfeng/wind-ui-rust", tag = "v0.32.0" }`，涉及 lanmsg-desktop 和 lanmsgd（optional）。不提交 `[patch]`。本地需要联调 windui 时，用 `cargo --config` 临时覆盖，写法记在 README 的开发约定里。
+- 版本号只有一个来源：`Cargo.toml` 的 `[workspace.package].version`。Android 的 `versionName` 从它读取，`versionCode = major*10000 + minor*100 + patch`，在 gradle 里解析，不要手写。新增 `scripts/bump-version.sh <x.y.z>`，同步修改版本号和 CHANGELOG。
+- `ci.yml`（push/PR 时触发）：
+  - Linux 跑 fmt、clippy、test --workspace、check-no-cjk、`node --test web/test/*.test.mjs`、`scripts/check-packaging.sh --fast`。
+  - Windows 跑 `cargo test -p lanmsg-desktop -p lanmsgd`。
+  - Android 跑 `:app:testDebugUnitTest`。
+- `release.yml`（推送 tag `v*` 或 workflow_dispatch 时触发；dispatch 默认只构建、不发布）：
+  - Windows x64：build-dist.ps1 生成安装包和 scoop zip。
+  - Linux x86_64：桌面版在 ubuntu:20.04 容器构建，无头版在 rust:alpine 用 musl 构建。aarch64 如果 runner 可用就一起构建，否则记为后续。
+  - macOS：生成通用 dmg（未签名）。
+  - Android：生成签名的 arm64 release APK，校验签名与 Secrets 中的密钥一致。可参考 /home/dufeng/develop/windinput/WindInputAndroid/.github/workflows/release.yml。
+  - 生成 `SHA256SUMS`，创建 GitHub Release（附 CHANGELOG 对应段落），并用 `packaging/scoop/update-manifest.sh` 生成 `bucket/lanmsg.json` 提交回 main。仓库本身就是 scoop bucket，安装命令为 `scoop bucket add lanmsg https://github.com/huanfeng/lanmsg`。
+  - 产物文件名以现有脚本为准，最终清单写进本附录 T22 条目，供 T23 使用。
+- 验证方式：push 后 CI 通过；用 workflow_dispatch 跑一遍 release 只构建、不发布，所有 job 成功。主控确认后再打第一个 tag 正式发布。
+- curl 一键安装：README 写明 `curl -fsSL https://github.com/huanfeng/lanmsg/releases/latest/download/install.sh | sh`，因此 install.sh 要作为 Release 资产上传。
+
+### T23（新增）：应用内检查更新与自动更新
+- core 新增 `update` 模块：
+  - `Request::CheckUpdate`（C5 追加）请求 `https://api.github.com/repos/huanfeng/lanmsg/releases/latest`。地址可由设置或环境变量 `LANMSG_UPDATE_URL` 覆盖，便于测试。按语义化版本比较，返回 `UpdateInfo { version, notes, published_at, assets }`。
+  - `Request::DownloadUpdate { asset }` 下载到数据目录下的 `updates/`，用 Release 中的 SHA256SUMS 校验，下载进度通过事件上报。
+  - 请求失败（404、私有仓库、离线）返回明确的 ErrorCode，界面显示为"无法检查更新"。
+  - HTTP 客户端复用 reqwest（rustls-tls-no-provider，显式使用 aws-lc-rs）。
+- 安装渠道检测（新增 `InstallChannel` 枚举）：
+  - Windows 安装版：运行下载好的安装包，然后退出界面和 lanmsgd。
+  - Windows scoop 版：可执行文件位于 `scoop\apps\lanmsg\` 下。打开一个新的命令行窗口执行 `scoop update lanmsg`，然后退出界面和 lanmsgd。
+  - Linux tarball 版：后台执行 Release 中的 install.sh，带 `--version` 参数，完成后提示重启。
+  - macOS：下载 dmg 后打开它。
+  - Android：core 下载 APK，Kotlin 通过 FileProvider 唤起系统安装器（需要 `REQUEST_INSTALL_PACKAGES` 权限，并处理"允许安装未知应用"的授权跳转）。
+  - 其他情况（源码构建、无头版）：只提示有新版本，并给出 Release 页面链接。
+- 设置：新增"启动时自动检查更新"开关（默认开，每天最多检查一次）。桌面端和 Android 的设置页都要有"检查更新"入口，显示当前版本、新版本、更新说明，以及"下载并安装"按钮。CLI 新增 `lanmsg-cli update check`。
+- 安全：只从固定仓库下载，并校验 SHA256SUMS。SHA256SUMS 与安装包同源，这一限制和 wind-installer 相同，写进文档。
+- 拆成两步：T23a 实现 core、桌面端、lanmsgd 和 CLI；T23b 实现 Android。两步都在 T22 产物清单确定之后进行。
