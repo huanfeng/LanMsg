@@ -668,3 +668,111 @@ async fn trusted_peer_is_only_sent_to_its_recorded_address() {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::PeerOffline);
 }
+
+fn stored_peer(fp: &str, trusted: bool, addr: Option<&str>) -> lanmsg_core::store::LsPeerRow {
+    lanmsg_core::store::LsPeerRow {
+        fingerprint: fp.to_string(),
+        pseudo_device: lanmsg_core::store::pseudo_device_id(fp),
+        alias: "Trusted".into(),
+        device_model: None,
+        device_type: None,
+        last_addr: addr.map(str::to_string),
+        protocol: "https".into(),
+        port: 1,
+        last_seen: 1,
+        trusted,
+        blocked: false,
+    }
+}
+
+#[tokio::test]
+async fn add_contact_is_refused_when_the_source_address_changed() {
+    let mut n = started().await;
+    let app = App::start("PhoneApp").await;
+    let store = n.svc.store_for_test();
+    let fp = app.fingerprint();
+    store
+        .upsert_ls_peer(&stored_peer(&fp, true, Some("10.9.9.9")))
+        .unwrap();
+    let result = spawn_send_text(&app, &n, "hello");
+    let req = incoming_request(&mut n).await;
+    assert!(req.addr_changed);
+    let err = n
+        .try_call(Request::RespondRequest {
+            request: req.request,
+            action: RequestAction::AddContact,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(matches!(result.await.unwrap(), Err(LsError::Status(403))));
+    // 信任地址保持不变
+    let row = store.get_ls_peer(&fp).unwrap().unwrap();
+    assert_eq!(row.last_addr.as_deref(), Some("10.9.9.9"));
+}
+
+#[tokio::test]
+async fn block_works_even_when_the_peer_table_is_full() {
+    let mut n = started().await;
+    let store = n.svc.store_for_test();
+    for i in 0..512u32 {
+        let fp = format!("{:064x}", i + 1);
+        store
+            .upsert_ls_peer(&stored_peer(&fp, false, None))
+            .unwrap();
+    }
+    let app = App::start("PhoneApp").await;
+    let result = spawn_send_text(&app, &n, "spam");
+    let req = incoming_request(&mut n).await;
+    n.call(Request::RespondRequest {
+        request: req.request,
+        action: RequestAction::Block,
+    })
+    .await;
+    assert!(matches!(result.await.unwrap(), Err(LsError::Status(403))));
+    assert!(
+        store
+            .get_ls_peer(&app.fingerprint())
+            .unwrap()
+            .unwrap()
+            .blocked
+    );
+    // 之后的请求被静默拒绝
+    let err = app
+        .ls
+        .send_text(&App::target(&n), "again")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LsError::Status(403)), "{err:?}");
+}
+
+#[tokio::test]
+async fn open_dm_with_a_localsend_pseudo_device_creates_the_conversation() {
+    let mut n = started().await;
+    let app = App::start("PhoneApp").await;
+    app.announce_to(&n).await;
+    let device = match n
+        .wait_event(|e| matches!(e, Event::PeerOnline { .. }), 5)
+        .await
+    {
+        Event::PeerOnline { peer } => peer.device_id,
+        other => panic!("期望 PeerOnline，实际 {other:?}"),
+    };
+    // 在线 LocalSend 设备出现在 ListPeers 里
+    match n.call(Request::ListPeers).await {
+        Response::Peers { value } => assert!(value.iter().any(|p| p.device_id == device)),
+        other => panic!("期望 Peers，实际 {other:?}"),
+    }
+    match n.call(Request::OpenDm { user: device }).await {
+        Response::ConvId { value } => assert_eq!(value, app.conv()),
+        other => panic!("期望 ConvId，实际 {other:?}"),
+    }
+    match n.call(Request::ListConversations).await {
+        Response::Conversations { value } => {
+            assert!(value
+                .iter()
+                .any(|c| c.conv == app.conv() && c.kind == ConvKind::LocalSend));
+        }
+        other => panic!("期望 Conversations，实际 {other:?}"),
+    }
+}

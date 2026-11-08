@@ -247,14 +247,23 @@ impl LocalSendBridge {
         );
         // 只有用户做出接受 / 信任 / 屏蔽的决定后才落库对端与会话（拒绝不留痕）
         let persisted = match action {
-            RequestAction::AcceptOnce | RequestAction::Block => self
+            RequestAction::AcceptOnce => self
                 .inner
-                .ensure_peer(&p.peer, &p.fingerprint, false)
+                .ensure_peer(&p.peer, &p.fingerprint, false, true)
                 .map(|_| ()),
+            RequestAction::Block => self
+                .inner
+                .ensure_peer(&p.peer, &p.fingerprint, false, false)
+                .map(|_| ()),
+            // 已信任对端换了地址：不能借一次点击就把新地址变成信任地址，
+            // 需对方在原地址上线，或先移除信任后重新建立
+            RequestAction::AddContact if p.view.addr_changed => Err(CoreError::InvalidArgument(
+                "source address differs from the trusted address".into(),
+            )),
             RequestAction::AddContact => {
                 // 信任以本次请求的来源 IP 为准：之后只有同一 IP 的请求才会自动接受
                 self.inner
-                    .ensure_peer(&p.peer, &p.fingerprint, true)
+                    .ensure_peer(&p.peer, &p.fingerprint, true, true)
                     .map(|_| ())
             }
             RequestAction::Reject => Ok(()),
@@ -317,11 +326,51 @@ impl LocalSendBridge {
         };
         match found {
             Some((fp, peer)) => {
-                self.inner.ensure_peer(&peer, &fp, false)?;
+                self.inner.ensure_peer(&peer, &fp, false, true)?;
                 Ok(true)
             }
             None => Ok(false),
         }
+    }
+
+    /// 按伪设备 ID（`PeerView.device_id`）打开 LocalSend 会话：在线对端按需建立会话，
+    /// 库里已有的对端直接返回；都不是返回 `None`。
+    pub fn open_by_pseudo(&self, device: &DeviceId) -> Result<Option<ConvId>, CoreError> {
+        let found = {
+            let g = lock(&self.inner.seen);
+            g.iter()
+                .find(|(fp, s)| s.online && pseudo_device_id(fp) == *device)
+                .map(|(fp, s)| (fp.clone(), s.peer.clone()))
+        };
+        if let Some((fp, peer)) = found {
+            self.inner.ensure_peer(&peer, &fp, false, true)?;
+            return Ok(Some(ConvId::localsend(&fp)));
+        }
+        Ok(self
+            .inner
+            .deps
+            .store
+            .ls_peer_by_pseudo(device)?
+            .map(|r| ConvId::localsend(&r.fingerprint)))
+    }
+
+    /// 当前在线的 LocalSend 设备（并入 `ListPeers`）。
+    pub fn online_peer_views(&self) -> Vec<PeerView> {
+        let list: Vec<(String, LsPeer)> = lock(&self.inner.seen)
+            .iter()
+            .filter(|(_, s)| s.online)
+            .map(|(fp, s)| (fp.clone(), s.peer.clone()))
+            .collect();
+        list.into_iter()
+            .map(|(fp, peer)| {
+                let existing = self.inner.deps.store.get_ls_peer(&fp).ok().flatten();
+                let row = self
+                    .inner
+                    .row_from_peer(&peer, &fp, existing.as_ref(), false);
+                let addr = std::net::SocketAddr::new(peer.ip, peer.info.port).to_string();
+                self.inner.peer_view(&row, addr)
+            })
+            .collect()
     }
 
     /// 对端当前是否在线（最近被发现过）。
@@ -487,10 +536,17 @@ impl BridgeInner {
 
     /// 落库一个对端并确保会话存在（只在用户主动操作或对端已存在时调用）。
     /// 新对端超过库级上限时拒绝。
-    fn ensure_peer(&self, peer: &LsPeer, fp: &str, confirm: bool) -> Result<LsPeerRow, CoreError> {
+    fn ensure_peer(
+        &self,
+        peer: &LsPeer,
+        fp: &str,
+        confirm: bool,
+        capped: bool,
+    ) -> Result<LsPeerRow, CoreError> {
         let store = &self.deps.store;
         let existing = store.get_ls_peer(fp)?;
-        if existing.is_none() && store.count_ls_peers()? >= MAX_STORED_PEERS {
+        // 屏蔽不受上限限制，否则库满后就无法再拉黑骚扰者
+        if capped && existing.is_none() && store.count_ls_peers()? >= MAX_STORED_PEERS {
             return Err(CoreError::Rejected("too many localsend peers".into()));
         }
         let row = self.row_from_peer(peer, fp, existing.as_ref(), confirm);
@@ -604,7 +660,7 @@ impl BridgeInner {
         };
         let row = self.row_from_peer(&peer, &fp, existing.as_ref(), false);
         if existing.is_some() {
-            if let Err(e) = self.ensure_peer(&peer, &fp, false) {
+            if let Err(e) = self.ensure_peer(&peer, &fp, false, true) {
                 tracing::warn!(error = %e, "failed to refresh localsend peer");
             }
         }
@@ -652,7 +708,7 @@ impl BridgeInner {
         };
         // 未经批准的请求不落库；已信任对端（Auto）的行与会话本来就在库里
         if verdict == Verdict::Auto {
-            if let Err(e) = self.ensure_peer(&peer, &fp, false) {
+            if let Err(e) = self.ensure_peer(&peer, &fp, false, true) {
                 tracing::warn!(error = %e, "failed to refresh localsend peer");
                 let _ = reply.send(LsDecision::Reject);
                 return;

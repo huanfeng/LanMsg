@@ -126,8 +126,10 @@ private fun RequestItem(item: RequestView, onRespond: (String, RequestAction) ->
             TextButton(onClick = { onRespond(item.request, RequestAction.ACCEPT_ONCE) }, colors = LanMsgButtons.text()) {
                 Text(stringResource(R.string.req_accept_once))
             }
-            TextButton(onClick = { onRespond(item.request, RequestAction.ADD_CONTACT) }, colors = LanMsgButtons.text()) {
-                Text(stringResource(R.string.req_add_contact))
+            if (!item.addrChanged) {
+                TextButton(onClick = { onRespond(item.request, RequestAction.ADD_CONTACT) }, colors = LanMsgButtons.text()) {
+                    Text(stringResource(R.string.req_add_contact))
+                }
             }
             TextButton(onClick = { onRespond(item.request, RequestAction.REJECT) }, colors = LanMsgButtons.text()) {
                 Text(stringResource(R.string.req_reject))

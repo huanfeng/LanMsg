@@ -29,7 +29,7 @@ import uniffi.lanmsg_api.SettingsDto
 class NetworkSettingsViewModelTest {
     @get:Rule val main = MainDispatcherRule()
 
-    private var settings = SettingsDto("n", "/d", 0uL, 0uL, false, true, emptyList(), BackgroundMode.REALTIME, true)
+    private var settings = SettingsDto("n", "/d", 0uL, 0uL, false, true, emptyList(), BackgroundMode.REALTIME, true, 53317u)
     private var addError: ErrorCode? = null
     private var scanError: ErrorCode? = null
     private var peers = listOf(ManualPeerView("192.168.1.9:53320", null))

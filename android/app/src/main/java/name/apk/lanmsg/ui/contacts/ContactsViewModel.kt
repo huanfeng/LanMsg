@@ -25,6 +25,8 @@ class ContactsViewModel(private val core: CoreApi) : ViewModel() {
         /** 附近的人：排除联系人与自己的设备，同一用户多台设备只留一行。 */
         val nearby: List<PeerView> = emptyList(),
         val requestCount: Int = 0,
+        /** 点击 LocalSend 设备打开的会话；界面跳转后调用 [openConvHandled]。 */
+        val openConv: String? = null,
         /** 字符串资源 id，界面显示后调用 [toastShown]。 */
         val toast: Int? = null,
         /** 文案资源 id（按错误码取）。 */
@@ -57,6 +59,20 @@ class ContactsViewModel(private val core: CoreApi) : ViewModel() {
         }
     }
 
+    /** LocalSend 设备没有用户身份：用其伪设备 ID 打开（或创建）会话。 */
+    fun openLocalSend(deviceId: String) {
+        viewModelScope.launch {
+            try {
+                val conv = core.call<Response.ConvId>(Request.OpenDm(deviceId)).value
+                _state.update { it.copy(openConv = conv, error = null) }
+            } catch (e: ApiException) {
+                _state.update { it.copy(error = errorText(e)) }
+            }
+        }
+    }
+
+    fun openConvHandled() = _state.update { it.copy(openConv = null) }
+
     fun toastShown() = _state.update { it.copy(toast = null) }
 
     private fun onEvent(e: Event) {
@@ -83,7 +99,7 @@ class ContactsViewModel(private val core: CoreApi) : ViewModel() {
         viewModelScope.launch {
             try {
                 val peers = core.call<Response.Peers>(Request.ListPeers).value
-                val nearby = peers.filter { !it.isContact && !it.isMine }.distinctBy { it.userId }
+                val nearby = peers.filter { !it.isContact && !it.isMine }.distinctBy { it.userId.ifEmpty { it.deviceId } }
                 _state.update { it.copy(nearby = nearby, error = null) }
             } catch (e: ApiException) {
                 _state.update { it.copy(error = errorText(e)) }

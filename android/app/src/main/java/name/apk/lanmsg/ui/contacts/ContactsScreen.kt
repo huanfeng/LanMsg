@@ -48,10 +48,16 @@ import name.apk.lanmsg.ui.theme.LanMsgButtons
 import name.apk.lanmsg.ui.theme.LanMsgColors
 
 @Composable
-fun ContactsScreen(onOpenRequests: () -> Unit, onOpenContact: (String) -> Unit, onAddDevice: () -> Unit) {
+fun ContactsScreen(onOpenRequests: () -> Unit, onOpenContact: (String) -> Unit, onAddDevice: () -> Unit, onOpenChat: (String) -> Unit) {
     val vm: ContactsViewModel = viewModel(factory = viewModelFactory { initializer { ContactsViewModel(ServiceLocator.coreHolder.api) } })
     val state by vm.state.collectAsStateWithLifecycle()
-    ContactsContent(state, vm::add, vm::toastShown, onOpenRequests, onOpenContact, onAddDevice, vm::clearError)
+    LaunchedEffect(state.openConv) {
+        state.openConv?.let {
+            onOpenChat(it)
+            vm.openConvHandled()
+        }
+    }
+    ContactsContent(state, vm::add, vm::toastShown, onOpenRequests, onOpenContact, onAddDevice, vm::clearError, vm::openLocalSend)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -63,6 +69,7 @@ fun ContactsContent(
     onOpenRequests: () -> Unit,
     onOpenContact: (String) -> Unit,
     onAddDevice: () -> Unit,    onDismissError: () -> Unit = {},
+    onOpenLocalSend: (String) -> Unit = {},
 ) {
     val c = LanMsgColors.current
     val snackbar = remember { SnackbarHostState() }
@@ -112,10 +119,14 @@ fun ContactsContent(
                     }
                     if (state.nearby.isNotEmpty()) {
                         item(key = "nearby-header") { SectionHeader(stringResource(R.string.contacts_nearby)) }
-                        items(state.nearby, key = { "n:" + it.userId }) { peer ->
-                            PersonRow(peer.displayName, peer.userId, peer.deviceName, true, onClick = null) {
-                                TextButton(onClick = { onAdd(peer.userId) }, colors = LanMsgButtons.text()) {
-                                    Text(stringResource(R.string.contacts_add))
+                        items(state.nearby, key = { "n:" + it.userId.ifEmpty { it.deviceId } }) { peer ->
+                            val localSend = peer.userId.isEmpty()
+                            PersonRow(peer.displayName, peer.userId.ifEmpty { peer.deviceId }, peer.deviceName, true, onClick = null) {
+                                TextButton(
+                                    onClick = { if (localSend) onOpenLocalSend(peer.deviceId) else onAdd(peer.userId) },
+                                    colors = LanMsgButtons.text(),
+                                ) {
+                                    Text(stringResource(if (localSend) R.string.contact_send_message else R.string.contacts_add))
                                 }
                             }
                         }

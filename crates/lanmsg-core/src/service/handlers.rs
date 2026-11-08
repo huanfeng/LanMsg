@@ -341,6 +341,14 @@ async fn list_peers(inner: &Inner) -> Result<Response, ApiError> {
             self_user.as_ref(),
         ));
     }
+    // 并入在线的 LocalSend 设备。
+    if let Some(b) = inner.localsend.get() {
+        for v in b.online_peer_views() {
+            if !value.iter().any(|x| x.device_id == v.device_id) {
+                value.push(v);
+            }
+        }
+    }
     Ok(Response::Peers { value })
 }
 
@@ -427,6 +435,14 @@ async fn list_messages(
 }
 
 async fn open_dm(inner: &Inner, user: String) -> Result<Response, ApiError> {
+    // LocalSend 设备没有用户身份：界面传来的是 PeerView 里的伪设备 ID
+    if let (Ok(device), Some(bridge)) = (DeviceId::from_hex(&user), inner.localsend.get()) {
+        if let Some(conv) = bridge.open_by_pseudo(&device)? {
+            return Ok(Response::ConvId {
+                value: conv.to_hex(),
+            });
+        }
+    }
     let user = parse_user(&user)?;
     let conv = inner.msg.open_dm(&user)?;
     Ok(Response::ConvId {

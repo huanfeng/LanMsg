@@ -164,6 +164,7 @@ fun LanMsgNavHost(nav: NavHostController, startDestination: String, shareVm: () 
                     onOpenRequests = { nav.navigate(Routes.REQUESTS) },
                     onOpenContact = { nav.navigate(Routes.contact(it)) },
                     onAddDevice = { nav.navigate(Routes.DEVICES) },
+                    onOpenChat = { nav.navigate(Routes.chat(it)) },
                 )
             }
             composable(Routes.REQUESTS) { RequestsScreen(onBack = { nav.popBackStack() }) }

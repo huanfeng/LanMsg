@@ -25,6 +25,8 @@ const CONTENT_MAX_W: i32 = 760;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Nearby {
     pub user_id: String,
+    /// LocalSend 设备没有用户身份（user_id 为空），用伪设备 ID 打开会话。
+    pub device_id: String,
     pub name: String,
     /// 设备名列表。
     pub devices: Vec<String>,
@@ -39,7 +41,15 @@ pub fn nearby_people(peers: &[PeerView]) -> Vec<Nearby> {
     let mut out: Vec<(Nearby, u8)> = Vec::new();
     for p in peers.iter().filter(|p| !p.is_contact && !p.is_mine) {
         let rank = path_rank(&p.path);
-        match out.iter_mut().find(|(n, _)| n.user_id == p.user_id) {
+        let local_send = p.user_id.is_empty();
+        let same = |n: &Nearby| {
+            if local_send {
+                n.user_id.is_empty() && n.device_id == p.device_id
+            } else {
+                n.user_id == p.user_id
+            }
+        };
+        match out.iter_mut().find(|(n, _)| same(n)) {
             Some((n, best)) => {
                 n.devices.push(p.device_name.clone());
                 if rank < *best {
@@ -50,6 +60,7 @@ pub fn nearby_people(peers: &[PeerView]) -> Vec<Nearby> {
             None => out.push((
                 Nearby {
                     user_id: p.user_id.clone(),
+                    device_id: p.device_id.clone(),
                     name: p.display_name.clone(),
                     devices: vec![p.device_name.clone()],
                     short: p.device_short.clone(),
@@ -426,7 +437,7 @@ fn request_card(ui: &UiState, r: &RequestView, confirm: ConfirmState) -> Element
                 .width_match()
                 .spacing(style::SPACE_SM)
                 .child(act(strings::REQUEST_ACCEPT_ONCE, RequestAction::AcceptOnce))
-                .child(add)
+                .children((!r.addr_changed).then_some(add))
                 .child(act(strings::REQUEST_REJECT, RequestAction::Reject))
                 .child(block),
         )
@@ -503,7 +514,8 @@ fn manual_peer_card(ui: &UiState) -> Element {
 }
 
 fn nearby_card(ui: &UiState, n: &Nearby) -> Element {
-    let (ui, user) = (ui.clone(), n.user_id.clone());
+    let (ui, user, device) = (ui.clone(), n.user_id.clone(), n.device_id.clone());
+    let local_send = n.user_id.is_empty();
     let mut title = Element::row()
         .spacing(style::SPACE_SM)
         .cross(Align::Center)
@@ -526,10 +538,22 @@ fn nearby_card(ui: &UiState, n: &Nearby) -> Element {
                     .child(meta(n.devices.join(strings::LIST_SEPARATOR)))
                     .child(meta(format!("{} {}", strings::NEARBY_FINGERPRINT, n.short))),
             )
-            .child(Element::button(strings::CONTACT_ADD).on_click(move |_| {
-                let u = user.clone();
-                ui.act(|m| m.request_contact(u));
-            })),
+            .child(
+                Element::button(if local_send {
+                    strings::CONTACT_SEND_MESSAGE
+                } else {
+                    strings::CONTACT_ADD
+                })
+                .on_click(move |_| {
+                    if local_send {
+                        let d = device.clone();
+                        ui.act(|m| m.open_dm(d));
+                    } else {
+                        let u = user.clone();
+                        ui.act(|m| m.request_contact(u));
+                    }
+                }),
+            ),
     )
 }
 
@@ -644,6 +668,18 @@ mod tests {
         assert_eq!(n.len(), 1);
         assert_eq!(n[0].user_id, "u3");
         assert_eq!(n[0].badge, None);
+    }
+
+    #[test]
+    fn localsend_devices_without_user_are_listed_separately() {
+        let ps = vec![
+            peer("d1", "", PathClassDto::Lan, false, false),
+            peer("d2", "", PathClassDto::Lan, false, false),
+        ];
+        let n = nearby_people(&ps);
+        assert_eq!(n.len(), 2);
+        assert_eq!(n[0].device_id, "d1");
+        assert_eq!(n[1].device_id, "d2");
     }
 
     #[test]
