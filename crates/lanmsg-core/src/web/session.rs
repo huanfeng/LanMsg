@@ -214,6 +214,7 @@ pub(crate) struct Shared {
     deps: WebDeps,
     idle_timeout_ms: AtomicU64,
     /// 测试钩子：把所有来源按非局域网处理。
+    #[cfg(feature = "test-hooks")]
     force_non_lan: std::sync::atomic::AtomicBool,
     state: Mutex<Option<Run>>,
 }
@@ -346,6 +347,7 @@ impl WebHost {
             shared: Arc::new(Shared {
                 deps,
                 idle_timeout_ms: AtomicU64::new(WEB_IDLE_TIMEOUT.as_millis() as u64),
+                #[cfg(feature = "test-hooks")]
                 force_non_lan: std::sync::atomic::AtomicBool::new(false),
                 state: Mutex::new(None),
             }),
@@ -354,6 +356,7 @@ impl WebHost {
 
     /// 测试钩子：把所有来源当作非局域网（验证 403）。
     #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
     pub fn set_force_non_lan(&self, on: bool) {
         self.shared.force_non_lan.store(on, Ordering::SeqCst);
     }
@@ -542,7 +545,11 @@ impl Shared {
 
     /// 来源是否允许访问（非局域网一律拒绝）。
     pub(crate) fn allows(&self, addr: SocketAddr) -> bool {
-        !self.force_non_lan.load(Ordering::SeqCst) && peer_is_lan(addr)
+        #[cfg(feature = "test-hooks")]
+        if self.force_non_lan.load(Ordering::SeqCst) {
+            return false;
+        }
+        peer_is_lan(addr)
     }
 
     fn idle_timeout(&self) -> Duration {
@@ -886,6 +893,7 @@ impl Shared {
             return Err(WebErr::BadRequest);
         }
         // 同一 client_key 重连后续传：直接返回已有进度。
+        let reserved: u64;
         {
             let mut g = self.lock();
             let sess = allowed_mut(&mut g, sid)?;
@@ -906,6 +914,16 @@ impl Shared {
             if declared.saturating_add(size) > MAX_SESSION_BYTES {
                 return Err(WebErr::TooLarge);
             }
+            // 本会话已声明但尚未写入的字节也要占用磁盘余量。
+            reserved = sess
+                .uploads
+                .values()
+                .filter(|u| u.finished.is_none())
+                .map(|u| {
+                    let written = u.have.iter().filter(|b| **b).count() as u64 * CHUNK_SIZE as u64;
+                    u.size.saturating_sub(written)
+                })
+                .sum();
         }
         let settings = crate::settings::load_settings(&self.deps.store)?;
         let dir = PathBuf::from(settings.download_dir).join(UPLOAD_DIR_NAME);
@@ -923,7 +941,7 @@ impl Shared {
         // 先建目录再查可用空间，不足则不创建 .part。
         let enough = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
             std::fs::create_dir_all(&dir)?;
-            if fs4::available_space(&dir)? < size {
+            if fs4::available_space(&dir)? < size.saturating_add(reserved) {
                 return Ok(false);
             }
             std::fs::File::create(&part)?;

@@ -1118,3 +1118,36 @@ async fn oversized_ws_message_closes_connection() {
     .await;
     assert_eq!(closed, Ok(true));
 }
+
+#[tokio::test]
+async fn dropped_finish_request_does_not_wedge_upload() {
+    let mut n = node_offline().await;
+    n.init_first("host").await;
+    let (_, port, key) = start_web(&n).await;
+    let mut page = connect_allowed(&mut n, port, key).await;
+    let init = page.upload_init("k", "drop.bin", 4).await;
+    let fid = init["fid"].as_str().unwrap().to_string();
+    page.put_chunk(&fid, 0, b"data").await;
+    // 发出 finish 后立刻丢弃请求 future（模拟客户端断开）。
+    let h = page.req_header("finish", &fid, None);
+    let req = page
+        .http
+        .post(format!("{}/api/web/upload/{fid}/finish", page.base))
+        .header("X-LanMsg-Session", &page.sid)
+        .header("X-LanMsg-Req", h)
+        .send();
+    let _ = tokio::time::timeout(Duration::from_millis(1), req).await;
+    // 之后再次 finish：最终必须成功（幂等），不会一直 503。
+    let mut ok = false;
+    for _ in 0..50 {
+        let st = page.finish(&fid).await.status().as_u16();
+        if st == 200 {
+            ok = true;
+            break;
+        }
+        assert_eq!(st, 503);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(ok, "finish stayed busy");
+    assert_eq!(std::fs::read_dir(dl_dir(&n)).unwrap().count(), 1);
+}

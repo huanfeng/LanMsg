@@ -329,7 +329,10 @@ async fn upload_finish(
     let sid = session_id(&headers)?;
     let req = header_str(&headers, REQ_HEADER).ok_or(WebErr::Forbidden)?;
     sh.check_req(&sid, req, "finish", Some(&fid), None)?;
-    let out = sh.finish(&sid, &fid).await?;
+    // 后半段放进独立任务：客户端中途断开不会取消 finish，避免 finishing 状态残留。
+    let out = tokio::spawn(async move { sh.finish(&sid, &fid).await })
+        .await
+        .map_err(|_| WebErr::Internal)??;
     Ok(sealed(StatusCode::OK, out))
 }
 

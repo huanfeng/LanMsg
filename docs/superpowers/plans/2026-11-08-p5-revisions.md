@@ -89,6 +89,7 @@
   - **WebSocket 升级认证（T14 落地）**：升级请求查询参数 `req=b64u(seal(k_enc_p2h, {op:"ws", seq}))`，宿主校验 `op` 与 `seq` 未重放，缺失或不符 403；`connectWs` 每次（含重连）换新 `seq`。
   - **握手与资源限制（T14 落地）**：`confirm`/`wait` 要求来源 IP 等于 `hello` 的来源 IP；未完成握手总数 ≤ 5、单 IP ≤ 2，满了拒绝新的（429）；会话活动时间只在解密成功且 `seq` 通过窗口后刷新；会话声明的上传总量 ≤ 64GiB（413），创建 `.part` 前检查可用磁盘空间（不足 507，页面文案 `no_space`）。
   - **部署限制（T14 落地）**：网页传输的来源判定按 TCP 对端地址，回环地址按 Lan 处理，因此**不得放在本机反向代理（nginx、Caddy、隧道客户端等）之后**，否则公网请求会以回环来源通过检查。`hello` 响应不再返回 `host_name`（改放加密的 `welcome` 帧）；上传文件名截断到 200 字节并保留扩展名；`WebStart` 时清理遗留的 `.{32位hex}.part`；WS 单条消息上限 2MiB。
+  - **残留风险（T14）**：未完成握手有总数（5）与单 IP（2）上限，多个来源 IP 协同仍可暂时占满名额，使新浏览器短时间收到 429（握手 30 秒过期自动释放）；局域网内的信任模型下接受此风险。
   - **响应回显**：`upload/init` 响应（密封 JSON）回显 `client_key`；`finish` 响应（成功与 409）回显 `fid`；页面校验不符即失败。
   - **页面安全头（T14 在 HTTP 响应头发出）**：`Content-Security-Policy: default-src 'self'; connect-src 'self'; img-src 'self' blob:; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`（`frame-ancestors` 不能放 meta，只能放响应头）、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。
   - 页面读出 `#k=` 后立刻 `history.replaceState` 清除地址栏片段；会话结束时清零并丢弃密钥。
