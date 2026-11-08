@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>name.apk.lanmsg</string>
+	<key>CFBundleName</key>
+	<string>LanMsg</string>
+	<key>CFBundleDisplayName</key>
+	<string>LanMsg</string>
+	<key>CFBundleExecutable</key>
+	<string>lanmsg</string>
+	<key>CFBundleIconFile</key>
+	<string>lanmsg</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh-Hans</string>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>name.apk.lanmsg</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>lanmsg</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>LanMsg needs local network access to discover and connect to your other devices.</string>
+</dict>
+</plist>
