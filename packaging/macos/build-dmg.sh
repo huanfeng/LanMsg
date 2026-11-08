@@ -19,9 +19,18 @@ if [ $# -ne 1 ]; then
     exit 2
 fi
 version=${1#v}
+kc=""
+kc_password=""
 # 版本号会被写入 plist，只接受安全字符
 if ! [[ $version =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]]; then
     echo "error: invalid version: $1" >&2
+    exit 2
+fi
+
+# CFBundleVersion 只允许点分数字：取版本号开头的数字与点（1.2.3-ci -> 1.2.3）
+bundle_version=${version%%[!0-9.]*}
+if [ -z "$bundle_version" ]; then
+    echo "error: version must start with a number: $1" >&2
     exit 2
 fi
 
@@ -35,10 +44,26 @@ dmg="$out_dir/lanmsg-macos-universal.dmg"
 bins=(lanmsg lanmsgd lanmsg-cli lanmsg-thumb)
 targets=(x86_64-apple-darwin aarch64-apple-darwin)
 
-# 打印并（非 dry-run 时）执行命令
+# 临时 keychain 只在公证时创建，退出时一定删除
+cleanup() {
+    if [ -n "$kc" ] && [ "$dry_run" = 0 ]; then
+        security delete-keychain "$kc" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# 打印并（非 dry-run 时）执行命令；逐参数精确比较后脱敏（密码含 * 或 / 也安全）
 run() {
-    local line="$*"
-    echo "+ ${line//"${APPLE_APP_PASSWORD:-}"/***}"
+    local a shown="+"
+    for a in "$@"; do
+        if { [ -n "${APPLE_APP_PASSWORD:-}" ] && [ "$a" = "$APPLE_APP_PASSWORD" ]; } \
+            || { [ -n "${kc_password:-}" ] && [ "$a" = "$kc_password" ]; }; then
+            a='***'
+        fi
+        shown="$shown $a"
+    done
+    echo "$shown"
     if [ "$dry_run" = 0 ]; then
         "$@"
     fi
@@ -63,7 +88,7 @@ for b in "${bins[@]}"; do
 done
 
 # 2. Info.plist 与本地化字符串
-sed "s|@VERSION@|$version|g" "$here/Info.plist" > "$app/Contents/Info.plist"
+sed -e "s|@VERSION@|$version|g" -e "s|@BUNDLE_VERSION@|$bundle_version|g" "$here/Info.plist" > "$app/Contents/Info.plist"
 mkdir -p "$app/Contents/Resources/zh-Hans.lproj"
 cp "$here/zh-Hans.lproj/InfoPlist.strings" "$app/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"
 
@@ -94,7 +119,11 @@ for v in APPLE_DEVELOPER_ID APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
 done
 
 if [ "$signing" = 1 ]; then
-    run codesign --force --deep --options runtime --timestamp -s "$APPLE_DEVELOPER_ID" "$app"
+    # 不用 --deep：先逐个签内部可执行文件（hardened runtime），最后签 app 本身
+    for b in "${bins[@]}"; do
+        run codesign --force --options runtime --timestamp -s "$APPLE_DEVELOPER_ID" "$app/Contents/MacOS/$b"
+    done
+    run codesign --force --options runtime --timestamp -s "$APPLE_DEVELOPER_ID" "$app"
 else
     echo "Apple signing not configured (missing:$missing); building an unsigned dmg"
 fi
@@ -103,8 +132,17 @@ run hdiutil create -volname LanMsg -srcfolder "$dmg_root" -ov -format UDZO "$dmg
 
 if [ "$signing" = 1 ]; then
     run codesign --force --timestamp -s "$APPLE_DEVELOPER_ID" "$dmg"
-    run xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
-        --password "$APPLE_APP_PASSWORD" --wait
+    # 公证凭据：store-credentials 需要一次性在命令行带上 app 专用密码（短暂可见于进程列表，
+    # CI runner 为单租户一次性环境，可接受）。凭据只存进构建时创建、退出时删除的临时 keychain，
+    # 之后的 submit 都用 --keychain-profile，不再带密码。
+    kc="$out_dir/lanmsg-ci.keychain-db"
+    kc_password=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    run security create-keychain -p "$kc_password" "$kc"
+    run security set-keychain-settings -lut 3600 "$kc"
+    run security unlock-keychain -p "$kc_password" "$kc"
+    run xcrun notarytool store-credentials lanmsg-ci --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+        --password "$APPLE_APP_PASSWORD" --keychain "$kc"
+    run xcrun notarytool submit "$dmg" --keychain-profile lanmsg-ci --keychain "$kc" --wait
     run xcrun stapler staple "$dmg"
 fi
 

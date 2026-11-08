@@ -36,7 +36,9 @@ assert d["CFBundleIdentifier"] == "name.apk.lanmsg"
 assert d["CFBundleExecutable"] == "lanmsg"
 assert d["CFBundleShortVersionString"] == "1.2.3-ci", d["CFBundleShortVersionString"]
 assert d["LSMinimumSystemVersion"] == "11.0"
-assert d["CFBundleURLTypes"][0]["CFBundleURLSchemes"] == ["lanmsg"]
+assert d["CFBundleVersion"] == "1.2.3", d["CFBundleVersion"]
+assert d["CFBundleInfoDictionaryVersion"] == "6.0"
+assert "CFBundleURLTypes" not in d
 assert d["NSLocalNetworkUsageDescription"]
 assert "NSBonjourServices" not in d
 PY
@@ -47,12 +49,15 @@ echo "$out" | grep -q "missing: APPLE_DEVELOPER_ID APPLE_APP_PASSWORD" || fail "
 if echo "$out" | grep -q "codesign"; then fail "signed with partial credentials"; fi
 
 echo "== full credentials sign and notarize"
-out=$(APPLE_DEVELOPER_ID=id APPLE_ID=a APPLE_TEAM_ID=b APPLE_APP_PASSWORD=s3cr3t \
+out=$(APPLE_DEVELOPER_ID=id APPLE_ID=a APPLE_TEAM_ID=b APPLE_APP_PASSWORD='s3/cr*t' \
     bash "$here/build-dmg.sh" --dry-run 0.0.0) || fail "signed run failed"
-for s in "codesign --force --deep --options runtime --timestamp" "notarytool submit" "stapler staple"; do
+for s in "codesign --force --options runtime --timestamp -s id" "MacOS/lanmsgd" "notarytool store-credentials lanmsg-ci" \
+    "--keychain-profile lanmsg-ci" "stapler staple" "security create-keychain"; do
     echo "$out" | grep -q "$s" || fail "missing step: $s"
 done
 
-if echo "$out" | grep -q s3cr3t; then fail "password leaked into output"; fi
+if echo "$out" | grep -q -e '--deep'; then fail "--deep used"; fi
+echo "$out" | grep -qF -e '--password ***' || fail "password not redacted"
+if echo "$out" | grep -qF 's3/cr*t'; then fail "password leaked into output"; fi
 
 echo "OK"

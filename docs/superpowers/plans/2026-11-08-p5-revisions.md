@@ -101,6 +101,8 @@
   - 后续（未做）：`lanmsg.desktop` 暂不声明 `MimeType=x-scheme-handler/lanmsg`，待桌面端处理 `lanmsg://` 参数（T7/T15）后一并启用；`lanmsgd.service` 去掉了对用户单元无效的 `After=network-online.target`，桌面版若在图形会话就绪前启动会以无头运行，是否改为依赖 `graphical-session.target` 需评估。
 - **T21**：只写脚本，在 CI 的 macOS runner 上产出未签名 dmg；本地无法验证，记为外部依赖。
   - 实施补充：未创建 `name.apk.lanmsg.daemon.plist`（LaunchAgent 由 `autostart.rs` 以标识 `app.lanmsg.daemon` 写入，与 bundle id `name.apk.lanmsg` 是两回事）。`build-dmg.sh` 支持 `--dry-run`（Linux 上只组装目录布局并打印 macOS 命令），测试为 `packaging/macos/test-build-dmg.sh`；`NSLocalNetworkUsageDescription` 默认英文，中文放 `zh-Hans.lproj/InfoPlist.strings`。`scripts/check-packaging.sh` 属 Task 19，尚未存在，Task 22 接入 CI 时把 `test-build-dmg.sh` 与 shellcheck 加上。lipo/sips/iconutil/hdiutil/签名公证未在 macOS 上实跑，记为外部依赖。
+  - 第 2 轮：公证凭据存进构建时创建、退出时删除的临时 keychain（`store-credentials lanmsg-ci`），提交与 staple 用 `--keychain-profile`；`store-credentials` 一次性在命令行带密码，CI runner 单租户可接受。codesign 不再用 `--deep`，先逐个签 `Contents/MacOS/*` 再签 app。`CFBundleVersion` 只取版本号的点分数字部分，`CFBundleShortVersionString` 保留完整版本。
+  - 后续（未做）：`Info.plist` 暂不注册 `lanmsg://`（`CFBundleURLTypes`），待 macOS 端处理 Apple Event `kAEGetURL` 时（与 T7/T15 的 `lanmsg://` 参数处理一起）启用；app 本身未 staple（只 staple 了 dmg，离线首次打开 app 时需联网校验）。
 - **T22**：windui 依赖改为 `{ git = "https://github.com/huanfeng/wind-ui-rust", tag = "<tag>" }`。本地开发在 `.cargo/config.toml` 里用 `[patch."https://github.com/huanfeng/wind-ui-rust"]` 指回本地路径。注意：LanMsg 目前依赖 windui v0.31.0 之后的 12 个提交，其中 11 个还没推送，所以需要用户先在 windui 仓库发布新 tag（如 v0.32.0）并推送，CI 才能跑通。LanMsg 仓库地址为 `huanfeng/lanmsg`，**不推送、不创建远程仓库**，需要时由用户操作。
 
 ## 执行顺序

@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleIdentifier</key>
 	<string>name.apk.lanmsg</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>LanMsg</string>
 	<key>CFBundleDisplayName</key>
@@ -17,7 +19,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>@VERSION@</string>
 	<key>CFBundleVersion</key>
-	<string>@VERSION@</string>
+	<string>@BUNDLE_VERSION@</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleLocalizations</key>
@@ -29,17 +31,6 @@
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>CFBundleURLTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleURLName</key>
-			<string>name.apk.lanmsg</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>lanmsg</string>
-			</array>
-		</dict>
-	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>LanMsg needs local network access to discover and connect to your other devices.</string>
 </dict>
