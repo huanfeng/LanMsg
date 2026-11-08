@@ -526,6 +526,7 @@ async fn routing_task(
                     sync_workers.remove(&device);
                     book_limiter.forget(&device);
                     inner.address_book_sent.lock().unwrap().remove(&device);
+                    inner.conns.forget_dial_back(&device);
                     inner.sync.on_peer_down(&device);
                     // 关系可能在连接期间才变成受信（刚加联系人），断开时补建重连任务。
                     redial::ensure_task(&inner, device);

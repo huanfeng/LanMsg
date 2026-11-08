@@ -396,7 +396,9 @@ impl Connection {
                     ));
                 };
                 let Some(waiter) = dial_back.claim(&token, &peer_info.device) else {
-                    tracing::warn!(peer = %peer_info.device, "unknown, expired or foreign dial-back token");
+                    if dial_back.should_log_invalid(peer_addr.ip(), std::time::Instant::now()) {
+                        tracing::warn!(peer = %peer_info.device, ip = %peer_addr.ip(), "unknown, expired or foreign dial-back token");
+                    }
                     return Err(CoreError::Rejected("invalid dial-back token".into()));
                 };
                 // 等待者已放弃（超时）时流随之丢弃。

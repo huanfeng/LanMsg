@@ -45,6 +45,18 @@ const DIRECT_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// 拨回时的连接超时。
 const DIAL_BACK_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// 丢弃时撤销反向数据通道的等待者登记。
+struct CancelOnDrop {
+    table: Arc<DialBackTable>,
+    token: [u8; 16],
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.table.cancel(&self.token);
+    }
+}
+
 /// 控制连接管理器（Clone，内部 Arc）。
 #[derive(Clone)]
 pub struct ConnManager {
@@ -526,17 +538,18 @@ impl ConnManager {
         device: &DeviceId,
     ) -> Result<DataStream, CoreError> {
         let table = self.read_inner().dial_back.clone();
-        let (token, rx) = table.register(*device, DIAL_BACK_WAIT);
-        if let Err(e) = self.send(device, Frame::DataDialBack { token }).await {
-            table.cancel(&token);
-            return Err(e);
-        }
+        let (token, rx) = table
+            .register(*device, DIAL_BACK_WAIT)
+            .ok_or_else(|| CoreError::Rejected("too many pending dial-back requests".into()))?;
+        // future 被丢弃（调用方取消）或任何提前返回时都撤销登记。
+        let _guard = CancelOnDrop {
+            table: table.clone(),
+            token,
+        };
+        self.send(device, Frame::DataDialBack { token }).await?;
         match tokio::time::timeout(DIAL_BACK_WAIT, rx).await {
             Ok(Ok(stream)) => Ok(stream),
-            _ => {
-                table.cancel(&token);
-                Err(CoreError::PeerOffline)
-            }
+            _ => Err(CoreError::PeerOffline),
         }
     }
 
@@ -549,6 +562,17 @@ impl ConnManager {
         token: [u8; 16],
     ) -> Result<(), CoreError> {
         let peer = self.peer(device).ok_or(CoreError::PeerOffline)?;
+        // 并发/频率限制：超出直接丢弃，不拨号。
+        let table = self.read_inner().dial_back.clone();
+        let Some(_permit) = table
+            .limiter
+            .try_acquire(*device, std::time::Instant::now())
+        else {
+            if table.limiter.should_warn(std::time::Instant::now()) {
+                tracing::warn!(peer = %device, "dial-back request dropped: concurrency or rate limit exceeded");
+            }
+            return Err(CoreError::Rejected("dial-back rate limited".into()));
+        };
         let stream = self.dial_back_stream(device, token).await?;
         let handler = {
             let inner = self.read_inner();
@@ -593,6 +617,11 @@ impl ConnManager {
         })?
     }
 
+    /// 对端断开：清理它的拨回限速状态。
+    pub(crate) fn forget_dial_back(&self, device: &DeviceId) {
+        self.read_inner().dial_back.limiter.forget(device);
+    }
+
     /// 直拨地址：生产环境即对端的 dial_addr；测试钩子可覆盖以模拟直拨不通。
     fn direct_dial_addr(&self, peer: &PeerInfo) -> SocketAddr {
         #[cfg(feature = "test-hooks")]
@@ -600,7 +629,7 @@ impl ConnManager {
             .read_inner()
             .dial_addr_overrides
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&peer.device)
         {
             return *a;
@@ -615,7 +644,7 @@ impl ConnManager {
         self.read_inner()
             .dial_addr_overrides
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(device, addr);
     }
 
@@ -1534,7 +1563,7 @@ mod tests {
     async fn dial_back_token_single_use() {
         let (mgr_a, mgr_b, dev_a, dev_b) = connected_pair().await;
         let table = mgr_a.read_inner().dial_back.clone();
-        let (token, rx) = table.register(dev_b, DIAL_BACK_WAIT);
+        let (token, rx) = table.register(dev_b, DIAL_BACK_WAIT).unwrap();
 
         // 第一次：B 拨回，A 的等待者收到流。
         let _stream = mgr_b.dial_back_stream(&dev_a, token).await.unwrap();
@@ -1558,7 +1587,7 @@ mod tests {
         let (mgr_a, mgr_b, dev_a, _dev_b) = connected_pair().await;
         let table = mgr_a.read_inner().dial_back.clone();
         let other = DeviceId([0x55; 32]);
-        let (token, mut rx) = table.register(other, DIAL_BACK_WAIT);
+        let (token, mut rx) = table.register(other, DIAL_BACK_WAIT).unwrap();
 
         let mut stream = mgr_b.dial_back_stream(&dev_a, token).await.unwrap();
         use tokio::io::AsyncReadExt;
@@ -1571,5 +1600,24 @@ mod tests {
         assert!(rx.try_recv().is_err(), "waiter must not receive a stream");
         // 令牌仍属于原设备（未被第三方烧掉）。
         assert!(table.claim(&token, &other).is_some());
+    }
+
+    /// 拨回请求超出频率上限后被丢弃：不再产生出站拨号（A 的等待者表对每次拨回都会看到一次连接）。
+    #[tokio::test]
+    async fn dial_back_requests_over_limit_are_dropped_without_dialing() {
+        let (mgr_a, mgr_b, dev_a, _dev_b) = connected_pair().await;
+        let mut dialed = 0;
+        let mut dropped = 0;
+        for _ in 0..20 {
+            match mgr_b.serve_dial_back(&dev_a, [0u8; 16]).await {
+                // 已拨号：A 因令牌未知关闭连接，B 端因未设置处理器返回此错误。
+                Err(CoreError::Rejected(m)) if m == "data channel not enabled" => dialed += 1,
+                Err(CoreError::Rejected(m)) if m == "dial-back rate limited" => dropped += 1,
+                other => panic!("unexpected result: {other:?}"),
+            }
+        }
+        assert_eq!(dialed, 8, "only 8 requests per window may dial");
+        assert_eq!(dropped, 12);
+        let _ = mgr_a;
     }
 }
