@@ -86,6 +86,8 @@ pub(crate) struct Inner {
     pub(crate) transfer: Arc<crate::blob::transfer::TransferEngine>,
     /// 文件中转站主机端（P5 Task 5）。
     pub(crate) station: Arc<crate::station::StationHost>,
+    /// 网页传输宿主（P5 Task 14）。
+    pub(crate) web: Arc<crate::web::WebHost>,
     /// 中转站同步的拉取端状态与请求等待表。
     pub(crate) station_client: crate::station::client::StationClient,
     /// 数据目录（中转站副本目录等）。
@@ -306,6 +308,16 @@ impl Service {
             platform.thumbnailer.clone(),
         ));
 
+        let web = Arc::new(crate::web::WebHost::new(crate::web::WebDeps {
+            store: store.clone(),
+            identity: identity.clone(),
+            conns: conns.clone(),
+            events: events_tx.clone(),
+            clock: clock.clone(),
+            msg: msg.clone(),
+            thumbnailer: platform.thumbnailer.clone(),
+        }));
+
         let inner = Arc::new(Inner {
             store,
             identity,
@@ -325,6 +337,7 @@ impl Service {
             blob,
             transfer,
             station,
+            web,
             station_client: crate::station::client::StationClient::new(),
             data_dir: data_dir.clone(),
             clock,
@@ -484,6 +497,20 @@ impl Service {
             .store(port, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// 测试辅助：缩短网页传输会话的空闲超时。
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn set_web_idle_timeout_for_test(&self, d: std::time::Duration) {
+        self.inner.web.set_idle_timeout(d);
+    }
+
+    /// 测试辅助：让网页传输把所有来源当作非局域网。
+    #[doc(hidden)]
+    #[cfg(feature = "test-hooks")]
+    pub fn set_web_force_non_lan_for_test(&self, on: bool) {
+        self.inner.web.set_force_non_lan(on);
+    }
+
     /// 测试辅助：重连任务循环迭代总数（检测空转）。
     #[doc(hidden)]
     pub fn redial_loop_iterations_for_test(&self) -> u64 {
@@ -543,6 +570,7 @@ impl Service {
     /// 重启后续做）。
     pub async fn shutdown(&self) {
         self.inner.localsend.stop().await;
+        self.inner.web.stop().await;
         self.inner.transfer.shutdown_all();
         self.inner.msg.abort_prepares();
         self.inner.discovery.shutdown();

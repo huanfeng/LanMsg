@@ -421,7 +421,7 @@ pub fn station_item_count(n: u32) -> String {
     format!("{n} 项")
 }
 
-/// 条目的过期说明，如“· 3月5日 过期”。
+/// 条目的过期说明，如“3月5日 过期”。
 pub fn station_expires(month: u32, day: u32) -> String {
-    format!("· {month}月{day}日 过期")
+    format!("{month}月{day}日 过期")
 }

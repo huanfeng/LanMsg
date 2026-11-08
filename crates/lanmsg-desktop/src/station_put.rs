@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use lanmsg_api::ipc::{endpoint_name, IpcClient};
-use lanmsg_api::types::{Request, Response, StationPutItem, StoreMode};
+use lanmsg_api::types::{Request, Response, StationPutItem, StationView, StoreMode};
 
 use crate::bridge::spawn_daemon;
 use crate::error_text::error_text;
@@ -60,28 +60,31 @@ async fn put(data_dir: &Path, paths: Vec<PathBuf>) -> Result<(), Failure> {
                 .map_err(|e| format!("{:?}: {}", e.code, error_text(&e.code)))
         }
     };
-    let me = match call(Request::GetSelf).await? {
-        Response::SelfInfo { value } if value.initialized => value,
+    match call(Request::GetSelf).await? {
+        Response::SelfInfo { value } if value.initialized => {}
         _ => return Err("this device is not initialized".into()),
+    }
+    // 本机托管的站点（core 在 StationView 里标了 is_local）。
+    let list = || async {
+        match call(Request::StationList).await? {
+            Response::Stations { value } => Ok(value),
+            _ => Err(Failure::from("unexpected reply to StationList")),
+        }
     };
-    // 本机托管的站点：主机名等于本机设备名（StationView 给的是主机设备名）。
-    let stations = match call(Request::StationList).await? {
-        Response::Stations { value } => value,
-        _ => return Err("unexpected reply to StationList".into()),
-    };
-    let station = match stations
-        .into_iter()
-        .find(|s| Some(&s.host_device) == me.device_name.as_ref())
-    {
-        Some(s) => s.station,
-        None => match call(Request::StationCreate {
-            name: strings::STATION_DEFAULT_NAME.to_string(),
-        })
-        .await?
-        {
-            Response::ConvId { value } => value,
-            _ => return Err("unexpected reply to StationCreate".into()),
-        },
+    let station = match pick_local(&list().await?) {
+        Some(s) => s,
+        None => {
+            let created = match call(Request::StationCreate {
+                name: strings::STATION_DEFAULT_NAME.to_string(),
+            })
+            .await?
+            {
+                Response::ConvId { value } => value,
+                _ => return Err("unexpected reply to StationCreate".into()),
+            };
+            // 多个进程同时放入时可能各建了一个：重新列出，大家都用最早的本机站点。
+            after_create(&list().await?, created)
+        }
     };
     call(Request::StationPut {
         station,
@@ -98,6 +101,20 @@ async fn put(data_dir: &Path, paths: Vec<PathBuf>) -> Result<(), Failure> {
     Ok(())
 }
 
+/// 列表里第一个（最早的）本机托管站点。
+fn pick_local(stations: &[StationView]) -> Option<String> {
+    stations
+        .iter()
+        .find(|s| s.is_local)
+        .map(|s| s.station.clone())
+}
+
+/// 创建之后重新列出的结果里取站点：并发创建时大家都用最早的本机站点，
+/// 列表里一个本机站点也没有时退回刚创建的那个。
+fn after_create(relisted: &[StationView], created: String) -> String {
+    pick_local(relisted).unwrap_or(created)
+}
+
 /// 把失败原因追加到 `<data_dir>/logs/lanmsg.log`（尽力而为）。
 pub fn log_failure(data_dir: &Path, msg: &str) {
     use std::io::Write;
@@ -109,5 +126,40 @@ pub fn log_failure(data_dir: &Path, msg: &str) {
         .open(dir.join("lanmsg.log"))
     {
         let _ = writeln!(f, "station-put failed: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn st(id: &str, is_local: bool) -> StationView {
+        StationView {
+            station: id.into(),
+            name: id.into(),
+            host_device: "h".into(),
+            host_online: true,
+            is_local,
+            item_count: 0,
+        }
+    }
+
+    #[test]
+    fn pick_local_takes_first_local_station() {
+        assert_eq!(pick_local(&[]), None);
+        assert_eq!(pick_local(&[st("r", false)]), None);
+        assert_eq!(
+            pick_local(&[st("r", false), st("a", true), st("b", true)]).as_deref(),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn after_create_prefers_earliest_local_over_own_creation() {
+        // 并发创建：别的进程先建的 a 排在前面，本进程建的 b 不用
+        let relisted = [st("a", true), st("b", true)];
+        assert_eq!(after_create(&relisted, "b".into()), "a");
+        // 重新列出时一个本机站点都没有（异常）：退回刚创建的
+        assert_eq!(after_create(&[st("r", false)], "b".into()), "b");
     }
 }

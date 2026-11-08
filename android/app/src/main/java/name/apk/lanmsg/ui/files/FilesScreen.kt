@@ -3,6 +3,7 @@ package name.apk.lanmsg.ui.files
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -80,6 +81,10 @@ import name.apk.lanmsg.ui.theme.LanMsgControls
 import uniffi.lanmsg_api.BlobState
 import uniffi.lanmsg_api.FileKindFilter
 import uniffi.lanmsg_api.FileView
+import uniffi.lanmsg_api.StationView
+import name.apk.lanmsg.ui.theme.LanMsgButtons
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
 import java.io.File
 
 @Composable
@@ -95,9 +100,14 @@ fun FilesScreen(
         factory = viewModelFactory { initializer { FilesViewModel(ServiceLocator.coreHolder.api, initialConv) } },
     )
     val state by vm.state.collectAsStateWithLifecycle()
+    val stations by vm.stations.collectAsStateWithLifecycle()
     val ctx = LocalContext.current
     FilesContent(
         state = state,
+        stations = stations,
+        onLoadStations = vm::loadStations,
+        onPutToStation = vm::putToStation,
+        onDismissPutDone = vm::clearPutToStationDone,
         onKind = vm::setKind,
         onState = vm::setState,
         onDevice = vm::setSourceDevice,
@@ -137,6 +147,10 @@ private val kindTabs = listOf(
 @Composable
 fun FilesContent(
     state: FilesViewModel.UiState,
+    stations: List<StationView> = emptyList(),
+    onLoadStations: () -> Unit = {},
+    onPutToStation: (station: String, hash: String) -> Unit = { _, _ -> },
+    onDismissPutDone: () -> Unit = {},
     onKind: (FileKindFilter) -> Unit,
     onState: (BlobState?) -> Unit,
     onDevice: (String?) -> Unit,
@@ -158,6 +172,12 @@ fun FilesContent(
     LaunchedEffect(downloadErrorText) {
         downloadErrorText?.let { snackbar.showSnackbar(it); onDismissDownloadError() }
     }
+    val putDoneText = if (state.putToStationDone) stringResource(R.string.toast_put_station) else null
+    LaunchedEffect(putDoneText) {
+        putDoneText?.let { snackbar.showSnackbar(it); onDismissPutDone() }
+    }
+    // 待放入中转站的文件 hash；非空时显示站点选择对话框
+    var stationPick by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
     var filterMenu by remember { mutableStateOf(false) }
 
@@ -232,11 +252,16 @@ fun FilesContent(
                 state.items.isEmpty() -> EmptyState(stringResource(R.string.files_empty), Icons.Outlined.Folder)
                 else -> LazyColumn(Modifier.fillMaxSize()) {
                     items(state.items, key = { it.msg + it.item.hash }) { v ->
-                        FileRow(v, state.filter.conv == null, state.progress[v.item.hash], onClick, onCancel, onOpenChat, onForward)
+                        FileRow(v, state.filter.conv == null, state.progress[v.item.hash], onClick, onCancel, onOpenChat, onForward) {
+                            onLoadStations(); stationPick = it
+                        }
                     }
                 }
             }
         }
+    }
+    stationPick?.let { hash ->
+        StationPickDialog(stations, onPick = { stationPick = null; onPutToStation(it, hash) }, onDismiss = { stationPick = null })
     }
 }
 
@@ -297,6 +322,7 @@ private fun FileRow(
     onCancel: (String) -> Unit,
     onOpenChat: (String) -> Unit,
     onForward: (List<String>) -> Unit,
+    onPutStation: (String) -> Unit,
 ) {
     val c = LanMsgColors.current
     val item = v.item
@@ -339,6 +365,10 @@ private fun FileRow(
                 text = { Text(stringResource(R.string.action_forward), color = c.ink) },
                 onClick = { menu = false; onForward(listOf(item.hash)) },
             )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.files_put_station), color = c.ink) },
+                onClick = { menu = false; onPutStation(item.hash) },
+            )
         }
     }
 }
@@ -354,4 +384,36 @@ private fun Thumb(v: FileView) {
             Icon(fileKindIcon(fileKindOf(v.item.mime)), contentDescription = null, tint = c.inkSubtle, modifier = Modifier.size(28.dp))
         }
     }
+}
+
+@Composable
+private fun StationPickDialog(stations: List<StationView>, onPick: (String) -> Unit, onDismiss: () -> Unit) {
+    val c = LanMsgColors.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = c.surface,
+        titleContentColor = c.ink,
+        textContentColor = c.inkMuted,
+        title = { Text(stringResource(R.string.files_put_station)) },
+        text = {
+            if (stations.isEmpty()) {
+                Text(stringResource(R.string.files_no_station))
+            } else {
+                Column {
+                    for (st in stations) {
+                        Text(
+                            st.name,
+                            color = c.ink,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.fillMaxWidth().clickable { onPick(st.station) }.padding(vertical = 12.dp),
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss, colors = LanMsgButtons.text()) { Text(stringResource(R.string.cancel)) }
+        },
+    )
 }

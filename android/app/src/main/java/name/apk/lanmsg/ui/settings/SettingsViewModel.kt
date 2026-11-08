@@ -149,16 +149,34 @@ class SettingsViewModel(
     /** 清理“已送达或 7 天前”的副本：已送达由 core 判定（对方所有设备都已下载）。 */
     fun clearOutbox() {
         viewModelScope.launch {
+            // 中转站条目引用的副本主机可能尚未拉取，必须保留；读不到引用就不清理
+            val protectedPaths = try {
+                stationLocalPaths()
+            } catch (e: ApiException) {
+                _state.update { it.copy(error = errorTextRes(e.code), errorSeq = it.errorSeq + 1) }
+                return@launch
+            }
             // core 过旧或出错时只按日期清理，不阻塞用户操作
             val delivered = try {
                 core.call<Response.Paths>(Request.DeliveredLocalPaths(outbox.rootPath())).value.toSet()
             } catch (e: ApiException) {
                 emptySet()
             }
-            val freed = withContext(io) { outbox.clear(delivered, clock() - OUTBOX_KEEP_MILLIS) }
+            val freed = withContext(io) { outbox.clear(delivered, clock() - OUTBOX_KEEP_MILLIS, protectedPaths) }
             _state.update { it.copy(clearedBytes = freed) }
             refreshOutboxSize()
         }
+    }
+
+    /** 所有中转站条目引用的本机文件路径。 */
+    private suspend fun stationLocalPaths(): Set<String> {
+        val out = HashSet<String>()
+        for (s in core.call<Response.Stations>(Request.StationList).value) {
+            for (item in core.call<Response.StationItems>(Request.StationItems(s.station)).value) {
+                item.file?.localPath?.let(out::add)
+            }
+        }
+        return out
     }
 
     fun clearedShown() = _state.update { it.copy(clearedBytes = null) }

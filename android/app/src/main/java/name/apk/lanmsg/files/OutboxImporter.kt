@@ -29,8 +29,9 @@ interface OutboxStore {
     /**
      * 清理副本：[deliveredPaths]（core 判定已全部送达）里位于发件箱内的普通文件，
      * 以及整天都早于 [olderThanMillis] 的日期子目录。返回释放的字节数。
+     * [protectedPaths]（被中转站条目引用、主机可能尚未拉取的副本）无论如何都不删。
      */
-    fun clear(deliveredPaths: Set<String>, olderThanMillis: Long): Long
+    fun clear(deliveredPaths: Set<String>, olderThanMillis: Long, protectedPaths: Set<String> = emptySet()): Long
 }
 
 /**
@@ -109,14 +110,16 @@ class OutboxImporter(
      * 所以只清理两类：core 判定已全部送达的文件；早于 cutoff 的日期目录（yyyyMMdd，该日结束时刻 <= cutoff）。
      * 非日期命名或解析失败的目录、符号链接、发件箱之外的路径一律不动。
      */
-    override fun clear(deliveredPaths: Set<String>, olderThanMillis: Long): Long {
-        var freed = clearDelivered(deliveredPaths)
-        freed += clearOlderThan(olderThanMillis)
+    override fun clear(deliveredPaths: Set<String>, olderThanMillis: Long, protectedPaths: Set<String>): Long {
+        // 用规范路径比较，与 core 记录的路径形态无关
+        val keep = protectedPaths.mapNotNullTo(HashSet()) { runCatching { File(it).canonicalPath }.getOrNull() }
+        var freed = clearDelivered(deliveredPaths, keep)
+        freed += clearOlderThan(olderThanMillis, keep)
         return freed
     }
 
     /** 删除已送达的单个文件；删空的日期目录一并移除。 */
-    private fun clearDelivered(paths: Set<String>): Long {
+    private fun clearDelivered(paths: Set<String>, keep: Set<String>): Long {
         val root = outboxRoot.canonicalFile
         var freed = 0L
         for (p in paths) {
@@ -124,6 +127,7 @@ class OutboxImporter(
             if (java.nio.file.Files.isSymbolicLink(f.toPath()) || !f.isFile) continue
             // 路径必须真实位于发件箱内（防 core 之外传入的路径逃逸）
             if (!f.canonicalPath.startsWith(root.path + File.separator)) continue
+            if (f.canonicalPath in keep) continue
             val size = f.length()
             val parent = f.parentFile
             if (f.delete()) {
@@ -134,7 +138,7 @@ class OutboxImporter(
         return freed
     }
 
-    private fun clearOlderThan(cutoffMillis: Long): Long {
+    private fun clearOlderThan(cutoffMillis: Long, keep: Set<String>): Long {
         val fmt = SimpleDateFormat("yyyyMMdd", Locale.ROOT).apply { isLenient = false }
         var freed = 0L
         for (dir in outboxRoot.listFiles().orEmpty()) {
@@ -147,8 +151,18 @@ class OutboxImporter(
             } ?: continue
             val dayEnd = Calendar.getInstance().apply { time = dayStart; add(Calendar.DAY_OF_MONTH, 1) }.timeInMillis
             if (dayEnd > cutoffMillis) continue
-            val size = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-            if (dir.deleteRecursively()) freed += size
+            val files = dir.walkTopDown().filter { it.isFile }.toList()
+            if (files.none { it.canonicalPath in keep }) {
+                val size = files.sumOf { it.length() }
+                if (dir.deleteRecursively()) freed += size
+                continue
+            }
+            // 目录里有受保护的副本：只删其余文件，目录随受保护文件保留
+            for (f in files) {
+                if (f.canonicalPath in keep) continue
+                val size = f.length()
+                if (f.delete()) freed += size
+            }
         }
         return freed
     }

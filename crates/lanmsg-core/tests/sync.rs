@@ -1025,3 +1025,69 @@ async fn localsend_conv_is_never_synced() {
     }
     assert!(list_msgs(&b2, &ls_conv.to_hex()).await.is_empty());
 }
+
+/// 访客（网页）会话只存在于本机：配对并同步后，另一台设备看不到它。
+#[tokio::test]
+async fn guest_conv_is_never_synced() {
+    use lanmsg_proto::ids::{DeviceId, MsgId};
+    use lanmsg_proto::types::{Envelope, Hlc, MsgBody, Signature64};
+
+    let mut a = node_offline().await;
+    let a_user = a.init_first("甲").await;
+
+    // A 有一个访客会话与一条伪设备消息。
+    let guest = ConvId([0x77; 32]);
+    let pseudo = DeviceId([0x66; 32]);
+    let store = a.svc.store_for_test();
+    store
+        .ensure_conversation(&ConvRow {
+            conv: guest,
+            kind: ConvKindRow::Guest,
+            peer_user: None,
+            title: None,
+            created_at: 1,
+        })
+        .unwrap();
+    let env = Envelope {
+        conv: guest,
+        id: MsgId {
+            author: pseudo,
+            seq: 1,
+        },
+        conv_seq: 1,
+        hlc: Hlc {
+            millis: 1000,
+            counter: 0,
+        },
+        body: MsgBody::Text {
+            text: "from a browser".into(),
+        },
+        enc: None,
+        sig: Signature64([0u8; 64]),
+    };
+    store
+        .insert_envelope(&env, lanmsg_core::store::MsgStateRow::Delivered, 1000)
+        .unwrap();
+
+    // 对照：自设备会话的消息会同步到 B。
+    let self_conv = ConvId::self_devices(&user(&a_user)).to_hex();
+    a.call(Request::SendText {
+        conv: self_conv.clone(),
+        text: "visible".into(),
+    })
+    .await;
+
+    let mut b = node_offline().await;
+    init_join(&b).await;
+    pair(&mut a, &mut b).await;
+    wait_until(|| async { list_texts(&b, &self_conv).await.len() == 1 }, 5).await;
+
+    let convs = match b.try_call(Request::ListConversations).await.unwrap() {
+        Response::Conversations { value } => value,
+        other => panic!("expected Conversations, got {other:?}"),
+    };
+    assert!(
+        !convs.iter().any(|cv| cv.conv == guest.to_hex()),
+        "guest conversation must not be synced: {convs:?}"
+    );
+}

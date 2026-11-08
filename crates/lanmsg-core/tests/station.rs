@@ -94,7 +94,9 @@ async fn phone_sees_station_items_after_connect() {
     assert_eq!(view.text.as_deref(), Some("a"));
     let list = stations(&p).await;
     assert!(list[0].host_online);
+    assert!(!list[0].is_local, "phone is not the host");
     assert_eq!(list[0].item_count, 1);
+    assert!(stations(&h).await[0].is_local);
 }
 
 #[tokio::test]

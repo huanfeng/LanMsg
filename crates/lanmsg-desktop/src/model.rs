@@ -348,16 +348,19 @@ impl Model {
                 self.conn = ConnState::Disconnected(reason);
                 // 断线后在途请求的回复可能不会再来，别让保存按钮一直停在“正在保存”
                 self.settings_saving = 0;
+                self.station_putting = 0;
                 Vec::new()
             }
             UiMsg::DaemonQuit => {
                 self.conn = ConnState::DaemonQuit;
                 self.settings_saving = 0;
+                self.station_putting = 0;
                 Vec::new()
             }
             UiMsg::LaunchFailed(reason) => {
                 self.conn = ConnState::LaunchFailed(reason);
                 self.settings_saving = 0;
+                self.station_putting = 0;
                 Vec::new()
             }
             UiMsg::Reply { tag, result } => match result {
@@ -3813,6 +3816,7 @@ mod tests {
             name: id.into(),
             host_device: "host".into(),
             host_online: true,
+            is_local: false,
             item_count: 0,
         }
     }
@@ -3984,5 +3988,34 @@ mod tests {
             },
         ));
         assert_eq!(m.convs.len(), 1);
+    }
+
+    #[test]
+    fn station_putting_cleared_when_connection_drops() {
+        for msg in [
+            UiMsg::Disconnected("x".into()),
+            UiMsg::DaemonQuit,
+            UiMsg::LaunchFailed("x".into()),
+        ] {
+            let mut m = Model::new();
+            m.current_station = Some("s1".into());
+            m.station_put_text("a".into(), 1_000);
+            assert_eq!(m.station_putting, 1);
+            m.apply(msg);
+            assert_eq!(m.station_putting, 0);
+        }
+    }
+
+    #[test]
+    fn station_put_in_flight_shows_busy_without_failure_toast() {
+        // 连接中（回复尚未到达）：计数为 1，没有任何失败提示；成功回复后释放
+        let mut m = Model::new();
+        m.current_station = Some("s1".into());
+        m.station_put_text("a".into(), 1_000);
+        assert_eq!(m.station_putting, 1);
+        assert!(m.toast.is_none());
+        m.apply(reply(ReplyTag::StationPut, Response::Ok));
+        assert_eq!(m.station_putting, 0);
+        assert!(m.toast.is_none());
     }
 }
