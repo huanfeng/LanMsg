@@ -1,0 +1,12 @@
+[Unit]
+Description=LanMsg background service
+# 注意：用户单元不能依赖 network-online.target（它属于系统实例，此处无效）。
+# 桌面版若在图形会话就绪前被拉起，会因检测不到显示环境而以无头模式运行。
+
+[Service]
+ExecStart=%h/.local/bin/lanmsgd @HEADLESS@
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

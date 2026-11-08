@@ -97,6 +97,8 @@
 - **T18**：托盘文案进 strings.rs；`--add-firewall-rule` 的命令行输出用英文。
 - **T19**：图标已有（`crates/lanmsg-desktop/assets/lanmsg.ico`、`scripts/gen-win-icon.py`），不需要占位图标；`packaging/assets` 从这里生成或引用。
 - **T20**：把 `lanmsgd` 的 windui 依赖改为 optional，归入 `desktop` feature。
+  - 实施补充：`LANMSG_BASE_URL` 现为发布页根（默认 `https://github.com/huanfeng/lanmsg/releases`），下载目录为 `<根>/latest/download` 或 `<根>/download/<版本>`；`LANMSG_NO_SYSTEMD=1` 跳过 systemd 操作（测试用）。安装时二进制先复制到临时名再 `mv` 原子替换，服务已运行则 `restart`；`--prefix` 含空白、`|`、`&`、`\` 时拒绝；解压前预检成员路径。
+  - 后续（未做）：`lanmsg.desktop` 暂不声明 `MimeType=x-scheme-handler/lanmsg`，待桌面端处理 `lanmsg://` 参数（T7/T15）后一并启用；`lanmsgd.service` 去掉了对用户单元无效的 `After=network-online.target`，桌面版若在图形会话就绪前启动会以无头运行，是否改为依赖 `graphical-session.target` 需评估。
 - **T21**：只写脚本，在 CI 的 macOS runner 上产出未签名 dmg；本地无法验证，记为外部依赖。
 - **T22**：windui 依赖改为 `{ git = "https://github.com/huanfeng/wind-ui-rust", tag = "<tag>" }`。本地开发在 `.cargo/config.toml` 里用 `[patch."https://github.com/huanfeng/wind-ui-rust"]` 指回本地路径。注意：LanMsg 目前依赖 windui v0.31.0 之后的 12 个提交，其中 11 个还没推送，所以需要用户先在 windui 仓库发布新 tag（如 v0.32.0）并推送，CI 才能跑通。LanMsg 仓库地址为 `huanfeng/lanmsg`，**不推送、不创建远程仓库**，需要时由用户操作。
 
