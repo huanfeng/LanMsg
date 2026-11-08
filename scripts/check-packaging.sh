@@ -32,6 +32,8 @@ assert d["firewall"][0]["program"] == "lanmsgd.exe"
 assert any(s["location"] == "sendto" and s["args"] == "--station-put" for s in d["shortcut"])
 assert d["package"]["source_dir"].endswith("windows-" + arch)
 assert d["paths"]["data"] == r"%APPDATA%\lanmsg\LanMsg\data"
+assert d["paths"]["user_data"] == r"%APPDATA%\lanmsg\LanMsg"
+assert d["paths"]["user_data"] in d["paths"]["data"]
 assert "localdata" not in d
 assert d["package"]["output_name"] == "lanmsg-windows-%s-setup" % arch
 PY

@@ -21,6 +21,8 @@ install  = '%ProgramFiles%\{id}'
 portable = '%USERPROFILE%\{id}'
 # 与 core 的默认数据目录一致（directories 的 data_dir）：%APPDATA%\lanmsg\LanMsg\data
 data     = '%APPDATA%\lanmsg\LanMsg\data'
+# 卸载“删除用户数据”删除整个应用目录（含 data；core 目前只用 data，config 等将来也在其下）
+user_data = '%APPDATA%\lanmsg\LanMsg'
 
 [autostart]
 exe = "lanmsgd.exe"
