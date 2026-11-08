@@ -18,6 +18,7 @@ pub const LAUNCH_FAILED_PREFIX: &str = "无法启动 lanmsgd：";
 pub const NAV_CHATS: &str = "会话";
 pub const NAV_CONTACTS: &str = "联系人";
 pub const NAV_FILES: &str = "文件";
+pub const NAV_STATIONS: &str = "中转站";
 pub const NAV_SETTINGS: &str = "设置";
 
 /// 页面标题。
@@ -369,4 +370,56 @@ pub fn files_in_conv(title: &str) -> String {
 /// 删除确认里追加的说明：被删的消息里不止这一个文件。
 pub fn files_delete_siblings(n: usize) -> String {
     format!("这条消息共有 {n} 个文件，会一并移除。")
+}
+
+/// 文件中转站页。
+pub const STATION_DEFAULT_NAME: &str = "我的中转站";
+pub const STATION_NEW: &str = "新建中转站";
+pub const STATION_NEW_TITLE: &str = "新建中转站";
+pub const STATION_NAME_PLACEHOLDER: &str = "给中转站起个名字，1–64 个字符";
+pub const STATION_NEW_CONFIRM: &str = "创建";
+pub const STATION_CANCEL: &str = "取消";
+pub const STATION_HOST_ONLINE: &str = "主机在线";
+pub const STATION_HOST_OFFLINE: &str = "主机离线，仅可查看清单";
+pub const STATION_ADD_FILE: &str = "添加文件";
+pub const STATION_ADD_FOLDER: &str = "添加文件夹";
+pub const STATION_ADD_TEXT: &str = "添加文字";
+pub const STATION_ADD_TEXT_TITLE: &str = "添加文字";
+pub const STATION_TEXT_PLACEHOLDER: &str = "输入要放进中转站的文字";
+pub const STATION_ADD_TEXT_CONFIRM: &str = "放入";
+pub const STATION_PICK_FILES_TITLE: &str = "选择要放入中转站的文件";
+pub const STATION_PICK_FOLDER_TITLE: &str = "选择要放入中转站的文件夹";
+pub const STATION_MODE_REFERENCE: &str = "引用原文件（默认）";
+pub const STATION_MODE_COPY: &str = "复制到中转站";
+pub const STATION_EXPIRY: &str = "保留时间";
+pub const STATION_EXPIRY_NEVER: &str = "不过期";
+pub const STATION_EXPIRY_1D: &str = "1 天";
+pub const STATION_EXPIRY_7D: &str = "7 天";
+pub const STATION_EXPIRY_30D: &str = "30 天";
+pub const STATION_UNAVAILABLE: &str = "已失效（原文件被移动或修改）";
+pub const STATION_COPY_TEXT: &str = "复制";
+pub const STATION_COPIED: &str = "已复制";
+pub const STATION_PIN: &str = "置顶";
+pub const STATION_UNPIN: &str = "取消置顶";
+pub const STATION_PINNED_TAG: &str = "置顶";
+pub const STATION_DELETE: &str = "删除";
+pub const STATION_DELETE_TITLE: &str = "删除这个条目？";
+pub const STATION_DELETE_MESSAGE: &str =
+    "条目会从中转站移除；复制到中转站的副本也会一并删除，引用的原文件不受影响。";
+pub const STATION_EMPTY: &str = "还没有中转站。在常开的电脑上新建一个，手机就能随时来取文件。";
+pub const STATION_EMPTY_TITLE: &str = "没有中转站";
+pub const STATION_ITEMS_EMPTY: &str = "把文件拖到这里，或点击上方按钮添加。";
+pub const STATION_ITEMS_EMPTY_TITLE: &str = "中转站是空的";
+pub const STATION_PUTTING: &str = "正在放入…";
+pub const FILES_PUT_STATION: &str = "放入中转站";
+pub const FILES_PUT_STATION_NONE: &str = "请先在“中转站”页新建";
+
+/// 站点条目数。
+pub fn station_item_count(n: u32) -> String {
+    format!("{n} 项")
+}
+
+/// 条目的过期说明，如“· 3月5日 过期”。
+pub fn station_expires(month: u32, day: u32) -> String {
+    format!("· {month}月{day}日 过期")
 }

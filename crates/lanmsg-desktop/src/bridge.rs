@@ -105,6 +105,16 @@ pub enum ReplyTag {
         query: String,
     },
     Forwarded,
+    /// 中转站列表。
+    Stations,
+    /// 某个中转站的条目；回复时站点已不是当前站点则丢弃。
+    StationItems {
+        station: String,
+    },
+    /// 新建中转站：成功后切到新站点。
+    StationCreated,
+    /// 放入中转站（路径 / 文字 / 已知文件）：回复时释放“正在放入”计数。
+    StationPut,
     Generic,
 }
 
@@ -376,7 +386,7 @@ async fn serve(
 }
 
 /// 拉起同目录的 lanmsgd（分离进程，`--data-dir <dir>`）。
-fn spawn_daemon(data_dir: &Path) -> std::io::Result<()> {
+pub(crate) fn spawn_daemon(data_dir: &Path) -> std::io::Result<()> {
     let name = if cfg!(windows) {
         "lanmsgd.exe"
     } else {

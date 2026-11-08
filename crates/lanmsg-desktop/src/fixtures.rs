@@ -27,6 +27,8 @@ pub enum DemoPage {
     /// 文件页，筛选为“图片”（网格）。
     FilesGrid,
     Settings,
+    /// 文件中转站页。
+    Stations,
     /// 会话页上叠着图片预览。
     PreviewImage,
     /// 会话页上叠着文本预览。
@@ -50,6 +52,7 @@ impl DemoPage {
             "files" => DemoPage::Files,
             "files-grid" => DemoPage::FilesGrid,
             "settings" => DemoPage::Settings,
+            "stations" => DemoPage::Stations,
             "preview-image" => DemoPage::PreviewImage,
             "preview-text" => DemoPage::PreviewText,
             _ => return None,
@@ -556,6 +559,89 @@ fn demo_files() -> Vec<FileView> {
 }
 
 /// 构造某个演示页面的 Model。
+fn station_item(
+    id: &str,
+    added_by: &str,
+    ago_min: i64,
+    text: Option<&str>,
+    file: Option<FileItemView>,
+) -> StationItemView {
+    StationItemView {
+        item: id.into(),
+        added_by: added_by.into(),
+        added_at: real_now() - ago_min * MIN,
+        expires_at: None,
+        text: text.map(str::to_string),
+        file,
+        pinned: false,
+        unavailable: None,
+    }
+}
+
+/// 中转站演示条目：置顶文字、已下载图片、未下载视频、主机离线时的源离线文件、已失效文件、带过期时间的文字。
+fn demo_station_items() -> Vec<StationItemView> {
+    let mut pinned = station_item(
+        "i1",
+        "我的电脑",
+        600,
+        Some("Wi-Fi 密码：lanmsg-2026\n会议室投影仪在 3 楼"),
+        None,
+    );
+    pinned.pinned = true;
+    let image = station_item(
+        "i2",
+        "我的手机",
+        25,
+        None,
+        Some(file_item(
+            "现场照片.jpg",
+            "image/jpeg",
+            3_200_000,
+            BlobState::Local,
+        )),
+    );
+    let video = station_item(
+        "i3",
+        "我的电脑",
+        90,
+        None,
+        Some(file_item(
+            "演示录屏.mp4",
+            "video/mp4",
+            48_000_000,
+            BlobState::Remote,
+        )),
+    );
+    let offline = station_item(
+        "i4",
+        "我的手机",
+        300,
+        None,
+        Some(file_item(
+            "旧版本.rar",
+            "application/x-rar",
+            12_000_000,
+            BlobState::SourceOffline,
+        )),
+    );
+    let mut stale = station_item(
+        "i5",
+        "我的电脑",
+        1500,
+        None,
+        Some(file_item(
+            "预算表.xlsx",
+            "application/vnd.ms-excel",
+            240_000,
+            BlobState::Remote,
+        )),
+    );
+    stale.unavailable = Some(true);
+    let mut expiring = station_item("i6", "我的手机", 5, Some("取件码 6-2-1048"), None);
+    expiring.expires_at = Some(real_now() + 2 * 86_400_000);
+    vec![pinned, expiring, image, video, offline, stale]
+}
+
 pub fn demo_model(p: DemoPage) -> Model {
     let mut m = Model::new();
     m.conn = ConnState::Connected;
@@ -781,6 +867,27 @@ pub fn demo_model(p: DemoPage) -> Model {
         DemoPage::Settings => {
             m.page = Page::Settings;
         }
+        DemoPage::Stations => {
+            m.page = Page::Stations;
+            m.stations = vec![
+                StationView {
+                    station: "s1".into(),
+                    name: "办公室中转站".into(),
+                    host_device: "我的电脑".into(),
+                    host_online: true,
+                    item_count: 6,
+                },
+                StationView {
+                    station: "s2".into(),
+                    name: "家里的 NAS".into(),
+                    host_device: "书房主机".into(),
+                    host_online: false,
+                    item_count: 2,
+                },
+            ];
+            m.current_station = Some("s1".into());
+            m.station_items = demo_station_items();
+        }
     }
     m
 }
@@ -816,6 +923,7 @@ mod tests {
             "files",
             "files-grid",
             "settings",
+            "stations",
             "preview-image",
             "preview-text",
         ] {
