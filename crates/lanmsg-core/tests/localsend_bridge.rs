@@ -808,3 +808,60 @@ async fn blocked_localsend_peer_is_hidden_from_peer_list_and_cannot_be_opened() 
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::NotFound);
 }
+
+#[tokio::test]
+async fn blocked_peer_coming_back_does_not_emit_peer_online_or_rejoin_the_list() {
+    let mut n = started().await;
+    let app = App::start("PhoneApp").await;
+    // 首次 announce 正常进入附近列表
+    app.announce_to(&n).await;
+    let device = match n
+        .wait_event(|e| matches!(e, Event::PeerOnline { .. }), 5)
+        .await
+    {
+        Event::PeerOnline { peer } => peer.device_id,
+        other => panic!("期望 PeerOnline，实际 {other:?}"),
+    };
+    // 屏蔽对端（走完整请求流程）
+    let result = spawn_send_text(&app, &n, "spam");
+    let req = incoming_request(&mut n).await;
+    n.call(Request::RespondRequest {
+        request: req.request,
+        action: RequestAction::Block,
+    })
+    .await;
+    let _ = result.await;
+    // 屏蔽动作立即发 PeerOffline：desktop 收到后马上把条目从附近列表移除
+    let offline = n
+        .wait_event(|e| matches!(e, Event::PeerOffline { .. }), 5)
+        .await;
+    let Event::PeerOffline { device: off } = offline else {
+        unreachable!()
+    };
+    assert_eq!(off, device);
+
+    // 重启 LocalSend（关闭再开启）会重建桥并清空发现表；对端重新 announce
+    // 相当于“离线超 PEER_OFFLINE_AFTER 后重新被发现”（announce=true），
+    // 但已屏蔽 → 不应发 PeerOnline
+    let mut s = match n.call(Request::GetSettings).await {
+        Response::Settings { value } => value,
+        other => panic!("期望 Settings，实际 {other:?}"),
+    };
+    s.localsend_enabled = false;
+    n.call(Request::SetSettings {
+        settings: s.clone(),
+    })
+    .await;
+    wait_until(|| async { n.svc.localsend_port_for_test().is_none() }, 5).await;
+    s.localsend_enabled = true;
+    n.call(Request::SetSettings { settings: s }).await;
+    wait_until(|| async { n.svc.localsend_port_for_test().is_some() }, 5).await;
+    app.announce_to(&n).await;
+    n.no_event(|e| matches!(e, Event::PeerOnline { .. }), 300)
+        .await;
+    // ListPeers 同样不含该对端
+    match n.call(Request::ListPeers).await {
+        Response::Peers { value } => assert!(!value.iter().any(|p| p.device_id == device)),
+        other => panic!("期望 Peers，实际 {other:?}"),
+    }
+}

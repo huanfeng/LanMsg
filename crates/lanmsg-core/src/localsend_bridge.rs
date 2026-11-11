@@ -279,6 +279,12 @@ impl LocalSendBridge {
             }
             RequestAction::Block => {
                 store.set_ls_trust(&p.fingerprint, false, true)?;
+                // 屏蔽后立即把条目从附近列表移除：desktop 收到 PeerOffline 才会从
+                // 列表里删掉（屏蔽动作只发 ContactsChanged，不会刷新 peers 列表），
+                // 否则已屏蔽对端要一直显示到下一次 ListPeers
+                let _ = self.inner.deps.events.send(Event::PeerOffline {
+                    device: pseudo_device_id(&p.fingerprint).to_hex(),
+                });
                 let _ = self.inner.deps.events.send(Event::ContactsChanged);
             }
             RequestAction::AcceptOnce | RequestAction::Reject => {}
@@ -678,6 +684,13 @@ impl BridgeInner {
             }
         }
         if announce {
+            // 已屏蔽对端离线（或发现表重建）后重新被发现时 announce 仍为 true；若照发
+            // PeerOnline，它会绕过附近列表的 blocked 过滤重新回到列表里。与
+            // `online_peer_views` 一致，这里同样查库跳过；会话摘要刷新保留
+            if existing.as_ref().is_some_and(|r| r.blocked) {
+                self.emit_conv_updated(&ConvId::localsend(&fp));
+                return;
+            }
             let addr = std::net::SocketAddr::new(peer.ip, peer.info.port).to_string();
             let _ = self.deps.events.send(Event::PeerOnline {
                 peer: self.peer_view(&row, addr),
