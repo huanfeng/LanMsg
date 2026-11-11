@@ -149,7 +149,22 @@ impl IpcListener {
             }
         }
         let name = endpoint.to_fs_name::<GenericFilePath>()?;
-        let inner = ListenerOptions::new().name(name).create_tokio()?;
+        // Windows 命名管道命名空间全局唯一：同名管道的默认安全描述符只允许原创建者
+        // 或管理员再次创建，其他进程重复创建返回 ERROR_ACCESS_DENIED（os error 5，
+        // PermissionDenied）。这是“端点已被另一实例占用”的平台信号，与 Unix 上
+        // “残留 socket 连得上”等价，统一归一化为 AddrInUse，让上层按 AlreadyRunning
+        // 处理（退出码 2）。真正的创建权限问题在 \\.\pipe\ 下对普通用户不存在。
+        #[cfg(windows)]
+        let created = match ListenerOptions::new().name(name).create_tokio() {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("named pipe endpoint already exists: {e}"),
+            )),
+            r => r,
+        };
+        #[cfg(not(windows))]
+        let created = ListenerOptions::new().name(name).create_tokio();
+        let inner = created?;
         Ok(IpcListener { inner })
     }
 

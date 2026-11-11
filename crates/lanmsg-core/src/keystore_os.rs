@@ -327,8 +327,19 @@ pub fn os_keystore(data_dir: &Path) -> Arc<dyn KeyStore> {
     let canonical = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
     let digest = blake3::hash(canonical.to_string_lossy().as_bytes());
     let service = format!("LanMsg-{}", &digest.to_hex()[..8]);
+    // LANMSG_KEYSTORE=file：强制只用文件库（primary=None，resolve 恒走文件分支，
+    // 不写后端标记）。CI 并发环境下 Windows 凭据 API 可瞬时 Access denied，probe
+    // 成功后 os 模式读写仍可能失败，daemon 随即启动失败；文件库不受影响。
+    // 注意：数据目录已选定系统库（标记=os）的用户误设此变量会让旧密钥不可见
+    // （文件库为空时将重新生成身份），仅供测试与特殊环境使用。
+    let primary: Option<Box<dyn SecretBackend>> =
+        if std::env::var("LANMSG_KEYSTORE").ok().as_deref() == Some("file") {
+            None
+        } else {
+            Some(Box::new(KeyringBackend::new(service)))
+        };
     Arc::new(OsKeyStore::new(
-        Some(Box::new(KeyringBackend::new(service))),
+        primary,
         FileKeyStore::new(data_dir.join("keys")),
         data_dir.join(KEYSTORE_BACKEND_MARKER),
     ))

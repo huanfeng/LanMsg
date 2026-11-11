@@ -14,6 +14,9 @@ static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 启动一个 lanmsgd 子进程（无组播、随机端口、指定数据目录）。
 /// 先把 XDG_RUNTIME_DIR 指向本测试的临时目录，子进程与客户端计算同一端点。
+/// 注入 LANMSG_KEYSTORE=file：与测试进程并行的其他 crate 测试（真实凭据 API
+/// 操作）并发写 Windows 凭据存储可瞬时 Access denied，daemon 会因 keystore
+/// 错误启动失败；文件库不受影响，测试统一强制文件库。
 fn spawn_daemon(dir: &tempfile::TempDir) -> tokio::process::Child {
     tokio::process::Command::new(env!("CARGO_BIN_EXE_lanmsgd"))
         .args([
@@ -24,6 +27,7 @@ fn spawn_daemon(dir: &tempfile::TempDir) -> tokio::process::Child {
             "--data-dir",
             dir.path().to_str().unwrap(),
         ])
+        .env("LANMSG_KEYSTORE", "file")
         .spawn()
         .expect("lanmsgd 子进程启动失败")
 }
@@ -115,24 +119,37 @@ async fn second_daemon_refuses_to_start() {
 }
 
 /// 显式指定子进程的 XDG_RUNTIME_DIR（客户端侧手工构造同一端点，
-/// 避免污染测试进程环境）。
+/// 避免污染测试进程环境）。注入 LANMSG_KEYSTORE=file：与测试并行的其他
+/// crate 测试对 Windows 凭据存储的并发写可瞬时 Access denied，daemon 会因
+/// keystore 错误启动失败；文件库不受影响，测试统一强制文件库。
 fn spawn_daemon_env(dir: &tempfile::TempDir, args: &[&str]) -> tokio::process::Child {
     tokio::process::Command::new(env!("CARGO_BIN_EXE_lanmsgd"))
         .args(args)
+        .env("LANMSG_KEYSTORE", "file")
         .env("XDG_RUNTIME_DIR", dir.path().join("run"))
         .spawn()
         .expect("lanmsgd 子进程启动失败")
 }
 
-/// 与 spawn_daemon_env 注入的 XDG_RUNTIME_DIR 对应的 IPC 端点（Unix 分支
-/// 的 endpoint_name 实现为 <XDG_RUNTIME_DIR>/lanmsg/lanmsgd.sock）。
+/// 与 spawn_daemon_env 注入的 XDG_RUNTIME_DIR 对应、且 daemon 侧实际监听的
+/// IPC 端点。Unix：手工构造 `<XDG_RUNTIME_DIR>/lanmsg/lanmsgd.sock`（不调
+/// endpoint_name，避免早前测试 set_var 污染的进程环境参与计算）。Windows：
+/// daemon 监听命名管道，名字由 endpoint_name 的 Windows 分支从 USERNAME +
+/// blake3(data_dir) 计算，与 XDG_RUNTIME_DIR 无关，直接调用即可。
 fn runtime_endpoint(dir: &tempfile::TempDir) -> String {
-    dir.path()
-        .join("run")
-        .join("lanmsg")
-        .join("lanmsgd.sock")
-        .to_string_lossy()
-        .into_owned()
+    #[cfg(windows)]
+    {
+        lanmsg_api::ipc::endpoint_name(dir.path())
+    }
+    #[cfg(unix)]
+    {
+        dir.path()
+            .join("run")
+            .join("lanmsg")
+            .join("lanmsgd.sock")
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 /// 轮询连接指定端点，最多 10 秒。
