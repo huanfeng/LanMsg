@@ -270,6 +270,9 @@
     <string name="net_manual_add">手动添加设备</string>
     <string name="net_manual_hint">192.168.2.10 或 mypc.local:53320</string>
     <string name="net_manual_help">可填 IP 或主机名，端口可省略</string>
+    <string name="net_localsend_port">LocalSend 端口</string>
+    <string name="net_localsend_port_hint">默认 53317，范围 1024 到 65535。改端口后，使用默认端口的设备可能无法自动发现本机</string>
+    <string name="net_localsend_port_invalid">端口须在 1024 到 65535 之间</string>
     <string name="net_connect">连接</string>
     <string name="net_connecting">正在连接</string>
     <string name="net_connected">已连接</string>
@@ -289,6 +292,6 @@
     <string name="net_tunnel_zerotier">ZeroTier</string>
     <string name="net_tunnel_wireguard">WireGuard</string>
     <string name="net_tunnel_generic">隧道</string>
-    <string name="localsend_port_busy">%1$d 端口被占用（可能正在运行 LocalSend），只能向 LocalSend 设备发送</string>
+    <string name="localsend_port_busy">%1$d 端口被占用（可能本机正在运行 LocalSend），请改用其他端口；改好前只能向 LocalSend 设备发送</string>
     <string name="toast_copied">已复制</string>
 </resources>

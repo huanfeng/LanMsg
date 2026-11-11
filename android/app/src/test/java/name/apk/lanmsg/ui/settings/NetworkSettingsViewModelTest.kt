@@ -155,6 +155,50 @@ class NetworkSettingsViewModelTest {
         bad.forEach { assertFalse(it, NetworkSettingsViewModel.isValidUnicastTarget(it)) }
     }
 
+    @Test fun port_text_follows_core_and_valid_port_is_written() = runTest {
+        val vm = NetworkSettingsViewModel(fake())
+        advanceUntilIdle()
+        assertEquals("53317", vm.state.value.portText)
+        vm.editPort("54000")
+        vm.savePort()
+        advanceUntilIdle()
+        assertEquals(54000.toUShort(), settings.localsendPort)
+        assertEquals("n", settings.deviceName)
+        assertFalse(vm.state.value.portInvalid)
+    }
+
+    @Test fun invalid_port_not_written() = runTest {
+        val f = fake()
+        val vm = NetworkSettingsViewModel(f)
+        advanceUntilIdle()
+        for (bad in listOf("", "80", "1023", "65536")) {
+            vm.editPort(bad)
+            vm.savePort()
+            advanceUntilIdle()
+            assertTrue(bad, vm.state.value.portInvalid)
+        }
+        assertTrue(f.requests.none { it is Request.SetSettings })
+    }
+
+    @Test fun port_range_matches_core() {
+        assertTrue(NetworkSettingsViewModel.isValidPort(1024))
+        assertTrue(NetworkSettingsViewModel.isValidPort(65535))
+        assertFalse(NetworkSettingsViewModel.isValidPort(1023))
+        assertFalse(NetworkSettingsViewModel.isValidPort(65536))
+    }
+
+    @Test fun core_rejection_of_port_reported_as_error_code() = runTest {
+        val f = fake()
+        val base = f.handler
+        f.handler = { req -> if (req is Request.SetSettings) throw ApiException(ErrorCode.INVALID_ARGUMENT, "x") else base(req) }
+        val vm = NetworkSettingsViewModel(f)
+        advanceUntilIdle()
+        vm.editPort("54000")
+        vm.savePort()
+        advanceUntilIdle()
+        assertEquals(ErrorCode.INVALID_ARGUMENT, vm.state.value.error)
+    }
+
     @Test fun unicast_text_follows_core_until_user_edits() = runTest {
         val f = fake()
         val vm = NetworkSettingsViewModel(f)

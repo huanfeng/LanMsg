@@ -36,6 +36,10 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
         /** 最近一次手动添加成功。 */
         val manualOk: Boolean = false,
         val manualError: ErrorCode? = null,
+        /** LocalSend 端口输入框内容。 */
+        val portText: String = "",
+        /** 端口输入不在 1024 到 65535 之间（未提交）。 */
+        val portInvalid: Boolean = false,
         /** 单播通告目标输入框内容（每行一个）。 */
         val unicastText: String = "",
         /** 单播通告目标有格式不合法的行（未提交）。 */
@@ -49,6 +53,7 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
 
     /** 用户改过输入框后，core 侧设置的变化不再覆盖输入框，保存成功后才恢复同步。 */
     private var unicastEdited = false
+    private var portEdited = false
 
     /** SetSettings 是整体回写，读-改-写必须串行。 */
     private val writeLock = Mutex()
@@ -69,6 +74,7 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
                     it.copy(
                         settings = settings, interfaces = interfaces, manualPeers = peers,
                         unicastText = if (unicastEdited) it.unicastText else settings.unicastTargets.joinToString("\n"),
+                        portText = if (portEdited) it.portText else settings.localsendPort.toString(),
                     )
                 }
             } catch (e: ApiException) {
@@ -117,6 +123,25 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
                 _state.update { it.copy(scanning = null, error = e.code) }
             }
         }
+    }
+
+    fun editPort(text: String) {
+        portEdited = true
+        _state.update { it.copy(portText = text.filter(Char::isDigit).take(5), portInvalid = false) }
+    }
+
+    /** 提交端口；范围错误只在本地提示，core 侧的拒绝按 ErrorCode 报告。 */
+    fun savePort() {
+        val port = _state.value.portText.toIntOrNull()?.takeIf(::isValidPort)
+        if (port == null) {
+            _state.update { it.copy(portInvalid = true) }
+            return
+        }
+        _state.update { it.copy(portInvalid = false) }
+        write(onDone = {
+            portEdited = false
+            _state.update { st -> st.copy(portText = port.toString()) }
+        }) { it.copy(localsendPort = port.toUShort()) }
     }
 
     fun editUnicast(text: String) {
@@ -189,6 +214,9 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
 
     companion object {
         private const val TAG = "NetworkSettingsVM"
+
+        /** 与 core 的 set_settings 同一范围：1024 到 65535。 */
+        fun isValidPort(port: Int): Boolean = port in 1024..65535
 
         /**
          * 与 core 的 parse_unicast_targets 同一规则（Rust 标准库的解析）：IP、IP:端口（端口 1 到 65535）、
