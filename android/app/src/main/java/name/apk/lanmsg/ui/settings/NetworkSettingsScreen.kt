@@ -109,9 +109,30 @@ fun NetworkSettingsContent(state: NetworkSettingsViewModel.UiState, vm: NetworkS
                         settings.localsendEnabled,
                         vm::setLocalSendEnabled,
                     )
+                    HorizontalDivider(color = c.line)
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = state.portText,
+                                onValueChange = vm::editPort,
+                                singleLine = true,
+                                label = { Text(stringResource(R.string.net_localsend_port)) },
+                                isError = state.portInvalid,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                colors = LanMsgControls.textField(),
+                                modifier = Modifier.weight(1f).testTag("localsend_port"),
+                            )
+                            Button(onClick = vm::savePort) { Text(stringResource(R.string.net_unicast_save)) }
+                        }
+                        Text(
+                            stringResource(if (state.portInvalid) R.string.net_localsend_port_invalid else R.string.net_localsend_port_hint),
+                            color = if (state.portInvalid) c.danger else c.inkMuted,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                     if (settings.localsendEnabled && settings.localsendListening == false) {
                         Text(
-                            stringResource(R.string.localsend_port_busy, LOCALSEND_DEFAULT_PORT),
+                            stringResource(R.string.localsend_port_busy, settings.localsendPort.toInt()),
                             color = c.danger,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
@@ -294,8 +315,6 @@ internal fun scanCidrFor(iface: InterfaceView): String {
 
 /** 网卡列表的展示结果：可扫描的 IPv4 网卡，以及被折叠的其他 IPv6 地址个数。 */
 internal data class VisibleInterfaces(val ipv4: List<InterfaceView>, val otherIpv6: Int)
-
-private const val LOCALSEND_DEFAULT_PORT = 53317
 
 /** IPv4 在前并按（名称，地址）去重；IPv6 中隐藏链路本地（fe80::/10）与已废弃的站点本地（fec0::/10），其余只计数。 */
 internal fun visibleInterfaces(all: List<InterfaceView>): VisibleInterfaces {
