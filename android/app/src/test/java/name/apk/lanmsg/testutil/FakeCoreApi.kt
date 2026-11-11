@@ -10,7 +10,9 @@ import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
 
 class FakeCoreApi : CoreApi {
-    val requests = mutableListOf<Request>()
+    // request() 在服务后台线程追加、测试线程遍历断言，跨线程无同步——
+    // mutableListOf 会抛 ConcurrentModificationException，用 CopyOnWriteArrayList。
+    val requests = java.util.concurrent.CopyOnWriteArrayList<Request>()
     var handler: suspend (Request) -> Response = { throw ApiException(ErrorCode.INTERNAL, "fake not configured") }
     val eventsFlow = MutableSharedFlow<Event>(extraBufferCapacity = 64)
     val laggedFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
