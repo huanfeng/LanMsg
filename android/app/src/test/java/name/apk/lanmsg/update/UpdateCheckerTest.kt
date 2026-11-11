@@ -6,8 +6,11 @@ import android.app.NotificationManager
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -142,5 +145,51 @@ class UpdateCheckerTest {
         fake.handler = { throw ApiException(ErrorCode.NOT_INITIALIZED, "not initialized") }
         assertNull(c.runCheck())
         assertEquals(0, active().size)
+    }
+
+    /** core 反复启停时每轮 false→true 都尝试检查；节流窗口内跳过、窗口外再查（“每天最多一次”兜底）。 */
+    @Test fun checks_again_on_each_core_restart() = runTest {
+        val holder = CoreHolder({ fake }, backgroundScope, StandardTestDispatcher(testScheduler))
+        val c = UpdateChecker(ctx, holder, prefs, backgroundScope, { now })
+        c.start()
+        runCurrent()
+        fun checkRequests() = fake.requests.count { it is Request.CheckUpdate }
+        holder.acquire(CoreHolder.UI)
+        advanceUntilIdle()
+        assertEquals(1, checkRequests())
+        holder.release(CoreHolder.UI)
+        advanceUntilIdle()
+        // 节流窗口内重启：不检查
+        holder.acquire(CoreHolder.UI)
+        advanceUntilIdle()
+        assertEquals(1, checkRequests())
+        holder.release(CoreHolder.UI)
+        advanceUntilIdle()
+        // 节流窗口外重启：再检查
+        now += 25 * 60 * 60 * 1000L
+        holder.acquire(CoreHolder.UI)
+        advanceUntilIdle()
+        assertEquals(2, checkRequests())
+    }
+
+    /** 并发 runCheck（快速关-开 core 或与手动路径同时发生）只执行一个，不双发请求。 */
+    @Test fun concurrent_run_checks_are_deduplicated() = runTest {
+        val c = checker()
+        val gate = CompletableDeferred<Unit>()
+        val base = fake.handler
+        fake.handler = { req ->
+            if (req is Request.GetSettings) {
+                gate.await()
+                base(req)
+            } else base(req)
+        }
+        val a = launch { c.runCheck() }
+        runCurrent() // a 已持锁并挂在 gate.await
+        val b = launch { c.runCheck() }
+        advanceUntilIdle() // b 被去重直接返回
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, fake.requests.count { it is Request.GetSettings })
+        assertEquals(1, fake.requests.count { it is Request.CheckUpdate })
     }
 }

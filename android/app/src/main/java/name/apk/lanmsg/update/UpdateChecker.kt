@@ -22,11 +22,12 @@ import name.apk.lanmsg.ui.nav.Routes
 import uniffi.lanmsg_api.Request
 import uniffi.lanmsg_api.Response
 import uniffi.lanmsg_api.UpdateInfo
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 启动自动检查更新：core 被任意 owner（服务/界面/worker）拉起后检查一次，24 小时内不重复
- * （附录 T23：启动自动检查，每天最多一次）。请求失败（core 未初始化、无网络等）只记日志，
- * 绝不影响启动。有新版本时在“应用更新”渠道发通知，点击进设置页。
+ * 启动自动检查更新：core 每次被任意 owner（服务/界面/worker）拉起都尝试检查，24 小时内不重复
+ * （附录 T23：启动自动检查，每天最多一次；节流兜底跨翻转生效）。请求失败（core 未初始化、无网络等）
+ * 只记日志，绝不影响启动。有新版本时在“应用更新”渠道发通知，点击进设置页。
  */
 class UpdateChecker(
     ctx: Context,
@@ -41,46 +42,69 @@ class UpdateChecker(
     /** 通知 id 固定：重复检查同一更新时只刷新这一条。 */
     internal val NOTIF_ID = 40
 
-    /** core 一旦运行就检查一次；重复调用 start() 在本进程内只产生一次检查。 */
+    /** 正在检查：防止快速关-开 core（或与手动路径）并发 runCheck 双写时间戳/双发请求。 */
+    private val checking = AtomicBoolean(false)
+
+    /** 观察循环已启动：重复调用 start() 不再挂新的循环。 */
+    private val loopStarted = AtomicBoolean(false)
+
+    /**
+     * 每次 core 运行（false→true 翻转）都尝试检查：runCheck 完成后等 core 关闭，再观察下一次
+     * 拉起，循环往复；“每天最多一次”由 24h 节流兜底。重复调用 start() 只挂一个观察循环。
+     */
     fun start() {
+        if (!loopStarted.compareAndSet(false, true)) return
         scope.launch {
-            holder.running.filter { it }.first()
-            runCheck()
+            while (true) {
+                holder.running.filter { it }.first()
+                runCheck()
+                // 等本轮 core 关闭再观察下一次拉起；进程存活期间 core 反复启停时每轮都会尝试
+                holder.running.filter { !it }.first()
+            }
         }
     }
 
     /**
      * 一次自动检查：24h 节流（无论结果）→ 读开关 → CheckUpdate → 有更新发通知。
-     * 返回 null = 被节流/开关关闭/失败；true = 发了通知；false = 已是最新。
+     * 返回 null = 被节流/开关关闭/失败/已在检查中；true = 发了通知；false = 已是最新。
+     * 入口原子去重：并发调用只执行一个，其余直接返回 null。
      */
     internal suspend fun runCheck(): Boolean? {
-        val now = clock()
-        val last = prefs.lastAutoUpdateCheck.first()
-        if (last != null && now - last < AUTO_CHECK_INTERVAL_MS) {
-            Log.i(TAG, "Auto update check throttled (last check ${now - last}ms ago)")
+        if (!checking.compareAndSet(false, true)) {
+            Log.i(TAG, "Auto update check already in progress; skipped")
             return null
         }
-        prefs.setLastAutoUpdateCheck(now)
-        val settings = try {
-            holder.api.call<Response.Settings>(Request.GetSettings).value
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.i(TAG, "Auto update check skipped: settings unavailable: ${e.message}")
-            return null
+        try {
+            val now = clock()
+            val last = prefs.lastAutoUpdateCheck.first()
+            if (last != null && now - last < AUTO_CHECK_INTERVAL_MS) {
+                Log.i(TAG, "Auto update check throttled (last check ${now - last}ms ago)")
+                return null
+            }
+            prefs.setLastAutoUpdateCheck(now)
+            val settings = try {
+                holder.api.call<Response.Settings>(Request.GetSettings).value
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.i(TAG, "Auto update check skipped: settings unavailable: ${e.message}")
+                return null
+            }
+            if (!settings.autoCheckUpdate) return null
+            val view = try {
+                holder.api.call<Response.UpdateCheck>(Request.CheckUpdate).value
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Auto update check failed: ${e.message}")
+                return null
+            }
+            val info: UpdateInfo = view.update ?: return false
+            notify(info)
+            return true
+        } finally {
+            checking.set(false)
         }
-        if (!settings.autoCheckUpdate) return null
-        val view = try {
-            holder.api.call<Response.UpdateCheck>(Request.CheckUpdate).value
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.w(TAG, "Auto update check failed: ${e.message}")
-            return null
-        }
-        val info: UpdateInfo = view.update ?: return false
-        notify(info)
-        return true
     }
 
     /** “应用更新”渠道通知：标题带新版本号，点击进设置页看更新说明。 */
