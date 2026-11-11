@@ -27,25 +27,48 @@ pub const DEFAULT_RELEASE_URL: &str = "https://github.com/huanfeng/lanmsg/releas
 
 /// 启动自动检查的延迟：等发现与网络就绪。
 const AUTO_CHECK_DELAY: Duration = Duration::from_secs(15);
-/// 自动检查节流：每天最多一次。
-const AUTO_CHECK_INTERVAL_MS: i64 = 4;
-/// 下载请求超时（连接与整体读），GitHub API 响应小，30 秒足够。
+/// 自动检查节流：每天最多一次（24 小时）。
+const AUTO_CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+/// API 请求总超时 / 下载单次读空闲超时：GitHub API 响应小，30 秒足够。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// 进度事件节流步长：百分比变化才发。
 const PROGRESS_STEP: u64 = 1;
 
-/// HTTP 客户端：显式 aws-lc-rs provider 的 rustls，正常 CA 校验（GitHub 用）。
-fn http_client() -> Result<reqwest::Client, CoreError> {
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+/// rustls 配置：显式 aws-lc-rs provider + 内置 webpki 根证书，正常 CA 校验（GitHub 用）；
+/// 两类 client 共用。reqwest 的 manual-roots 特性集要求调用方给出完整 ClientConfig
+/// （含根证书），只传未完成的 builder 会在 build() 时报 Unknown TLS backend。
+fn rustls_config() -> Result<rustls::ClientConfig, CoreError> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()
-    .map_err(|e| CoreError::Tls(e.to_string()))?;
+    .map_err(|e| CoreError::Tls(e.to_string()))?
+    .with_root_certificates(roots)
+    .with_no_client_auth())
+}
+
+/// API 客户端（更新检查 / SHA256SUMS 拉取）：响应小，带 30 秒总超时快速失败。
+fn api_client() -> Result<reqwest::Client, CoreError> {
     reqwest::Client::builder()
-        .use_preconfigured_tls(config)
+        .use_preconfigured_tls(rustls_config()?)
         .user_agent(format!("lanmsg/{}", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| CoreError::Io(std::io::Error::other(e)))
+}
+
+/// 下载客户端（安装包可达几十 MB）：总时长取决于网速与包大小，不设总超时——
+/// 连接建立 10 秒、单次读空闲 30 秒兜底防连接卡死；中断的下载由 .part + SHA256
+/// 校验兜底，不会落盘半成品。
+fn download_client() -> Result<reqwest::Client, CoreError> {
+    reqwest::Client::builder()
+        .use_preconfigured_tls(rustls_config()?)
+        .user_agent(format!("lanmsg/{}", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|e| CoreError::Io(std::io::Error::other(e)))
 }
@@ -315,7 +338,7 @@ fn channel_for_exe(exe: &std::path::Path) -> InstallChannel {
 
 /// 拉取并解析最新 release（网络失败 / HTTP 非 2xx / 解析失败都返回明确错误）。
 async fn fetch_release(api_url: &str) -> Result<Release, CoreError> {
-    let client = http_client()?;
+    let client = api_client()?;
     let resp = client
         .get(api_url)
         .header("Accept", "application/vnd.github+json")
@@ -466,7 +489,11 @@ async fn download_inner(inner: &Inner, asset: &str) -> Result<PathBuf, CoreError
     let final_path = dir.join(&name);
     let _ = std::fs::remove_file(&part);
     let file = Arc::new(StdMutex::new(std::fs::File::create(&part)?));
-    let resp = http_client()?.get(&url).send().await.map_err(reqwest_err)?;
+    let resp = download_client()?
+        .get(&url)
+        .send()
+        .await
+        .map_err(reqwest_err)?;
     if !resp.status().is_success() {
         return Err(CoreError::NotFound(format!(
             "update download failed: HTTP {}",
@@ -536,7 +563,7 @@ fn parse_sha256sums(text: &str, name: &str) -> Option<String> {
 
 /// 拉取 SHA256SUMS 并返回指定资产的哈希。
 async fn fetch_sha256(sums_url: &str, name: &str) -> Result<String, CoreError> {
-    let client = http_client()?;
+    let client = api_client()?;
     let resp = client.get(sums_url).send().await.map_err(reqwest_err)?;
     if !resp.status().is_success() {
         return Err(CoreError::NotFound(format!(
@@ -640,6 +667,13 @@ mod tests {
         assert_eq!(strip_v("v1.2.3"), "1.2.3");
         assert_eq!(strip_v("1.2.3"), "1.2.3");
         assert_eq!(strip_v("release-42"), "release-42");
+    }
+
+    #[test]
+    fn clients_build_with_expected_timeouts() {
+        // 两类 client 都能构造（TLS 配置共用）；下载 client 与 API client 超时策略不同。
+        assert!(api_client().is_ok());
+        assert!(download_client().is_ok());
     }
 
     #[test]
