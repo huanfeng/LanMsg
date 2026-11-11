@@ -43,7 +43,7 @@ import uniffi.lanmsg_api.SettingsDto
 class CoreHolderTest {
     private fun settings(dir: String = "/d", mode: BackgroundMode = BackgroundMode.REALTIME) = SettingsDto(
         deviceName = "p", downloadDir = dir, autoImageMax = 0uL, autoFileMax = 0uL, autoFileWifiOnly = true,
-        localsendEnabled = false, unicastTargets = emptyList(), backgroundMode = mode, localsendListening = null, localsendPort = 53317u,
+        localsendEnabled = false, unicastTargets = emptyList(), backgroundMode = mode, localsendListening = null, localsendPort = 53317u, autoCheckUpdate = true,
     )
 
     @Test fun core_holder_starts_core_once_for_concurrent_acquires() = runTest {

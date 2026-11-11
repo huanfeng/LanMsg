@@ -21,6 +21,7 @@ import name.apk.lanmsg.notify.Notifier
 import name.apk.lanmsg.service.BackgroundController
 import name.apk.lanmsg.service.DeviceConditions
 import name.apk.lanmsg.service.SystemServiceActions
+import name.apk.lanmsg.update.UpdateChecker
 import java.io.File
 
 object ServiceLocator {
@@ -79,6 +80,11 @@ object ServiceLocator {
             },
             scope = appScope,
         )
+    }
+
+    /** 启动自动检查更新（24h 节流）；core 由任意 owner 拉起后触发一次。 */
+    val updateChecker: UpdateChecker by lazy {
+        UpdateChecker(app, coreHolder, localPrefs, appScope)
     }
 
     /** 应用专属外部下载目录下的 LanMsg 子目录（无需存储权限）；外部存储不可用时返回 null。在 IO 线程调用。 */

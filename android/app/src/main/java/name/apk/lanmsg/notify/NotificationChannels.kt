@@ -5,14 +5,15 @@ import android.app.NotificationManager
 import android.content.Context
 import name.apk.lanmsg.R
 
-/** 四个通知渠道的统一入口（docs/ui-architecture.md §7）。 */
+/** 五个通知渠道的统一入口（docs/ui-architecture.md §7）。 */
 object NotificationChannels {
     const val MESSAGES = "messages"
     const val REQUESTS = "requests"
     const val TRANSFERS = "transfers"
     const val SERVICE = "service"
+    const val UPDATES = "updates"
 
-    /** 幂等创建 4 个渠道；重复调用不会覆盖用户对渠道的设置。 */
+    /** 幂等创建 5 个渠道；重复调用不会覆盖用户对渠道的设置。 */
     fun ensure(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
         nm.createNotificationChannels(
@@ -21,6 +22,7 @@ object NotificationChannels {
                 NotificationChannel(REQUESTS, ctx.getString(R.string.notif_channel_requests), NotificationManager.IMPORTANCE_HIGH),
                 NotificationChannel(TRANSFERS, ctx.getString(R.string.notif_channel_transfers), NotificationManager.IMPORTANCE_LOW),
                 NotificationChannel(SERVICE, ctx.getString(R.string.notif_channel_service), NotificationManager.IMPORTANCE_MIN),
+                NotificationChannel(UPDATES, ctx.getString(R.string.notif_channel_updates), NotificationManager.IMPORTANCE_DEFAULT),
             ),
         )
     }

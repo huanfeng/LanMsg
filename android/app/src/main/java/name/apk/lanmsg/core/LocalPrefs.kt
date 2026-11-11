@@ -3,6 +3,7 @@ package name.apk.lanmsg.core
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -42,8 +43,16 @@ interface BackgroundModePrefs {
     suspend fun setLastBackgroundMode(mode: BackgroundMode)
 }
 
+/** 更新自动检查的节流时间戳，便于 ViewModel 测试注入内存实现。 */
+interface UpdatePrefs {
+    /** 上次自动检查更新的时间（epoch 毫秒）；null = 从未检查过。 */
+    val lastAutoUpdateCheck: Flow<Long?>
+
+    suspend fun setLastAutoUpdateCheck(millis: Long)
+}
+
 /** 只属于本机、不进 core 的偏好（免打扰、相册保存、可信 Wi-Fi、通知开关）。 */
-class LocalPrefs(ctx: Context) : NotifierPrefs, BackgroundModePrefs {
+class LocalPrefs(ctx: Context) : NotifierPrefs, BackgroundModePrefs, UpdatePrefs {
     private val store = ctx.applicationContext.dataStore
 
     override val mutedConversations: Flow<Set<String>> = store.data.map { it[MUTED] ?: emptySet() }
@@ -95,6 +104,12 @@ class LocalPrefs(ctx: Context) : NotifierPrefs, BackgroundModePrefs {
         store.edit { it[LAST_MODE] = mode.name }
     }
 
+    override val lastAutoUpdateCheck: Flow<Long?> = store.data.map { it[LAST_UPDATE_CHECK] }
+
+    override suspend fun setLastAutoUpdateCheck(millis: Long) {
+        store.edit { it[LAST_UPDATE_CHECK] = millis }
+    }
+
     private companion object {
         val LAST_MODE = stringPreferencesKey("last_background_mode")
         val MUTED = stringSetPreferencesKey("muted_conversations")
@@ -103,5 +118,6 @@ class LocalPrefs(ctx: Context) : NotifierPrefs, BackgroundModePrefs {
         val NOTIFY = booleanPreferencesKey("notifications_enabled")
         val VENDOR_HINT_SEEN = booleanPreferencesKey("vendor_hint_seen")
         val NOTIF_ASKED = booleanPreferencesKey("notification_permission_asked")
+        val LAST_UPDATE_CHECK = longPreferencesKey("last_auto_update_check")
     }
 }
