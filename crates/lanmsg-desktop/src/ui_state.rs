@@ -17,7 +17,7 @@ use crate::strings;
 use crate::views::composer::PastedImage;
 use crate::views::files::FilesUi;
 use crate::views::preview::PreviewState;
-use lanmsg_api::types::{PairStateDto, Response};
+use lanmsg_api::types::{PairStateDto, Request, Response};
 
 /// 当前输入框的登记：(会话, 文本信号)。
 type ComposerSlot = (String, Signal<String>);
@@ -336,6 +336,23 @@ impl UiState {
                     if let Err(e) = autostart::set_enabled(true, &self.data_dir) {
                         self.model.borrow_mut().toast =
                             Some(format!("{}{}", strings::AUTOSTART_FAILED, e));
+                    }
+                }
+                Effect::RunInstall {
+                    path,
+                    channel,
+                    version,
+                } => {
+                    match crate::update::run_install(path.as_deref(), channel, &version) {
+                        crate::update::InstallOutcome::Exit => {
+                            // 通知后台服务退出（写清 IPC socket），随后界面进程退出。
+                            // 安装器/scoop 自己会接管后续的进程关闭与文件替换。
+                            let _ = self
+                                .bridge
+                                .call_sync(Request::Shutdown, std::time::Duration::from_secs(5));
+                            std::process::exit(0);
+                        }
+                        crate::update::InstallOutcome::Stay => {}
                     }
                 }
             }

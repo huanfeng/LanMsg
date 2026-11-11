@@ -125,6 +125,10 @@ pub enum ReplyTag {
     StationCreated,
     /// 放入中转站（路径 / 文字 / 已知文件）：回复时释放“正在放入”计数。
     StationPut,
+    /// 应用内更新（P5 T23 追加）：CheckUpdate 的回复。
+    UpdateCheck,
+    /// 应用内更新（P5 T23 追加）：DownloadUpdate 的受理回复（结果经事件到达）。
+    UpdateDownload,
     Generic,
 }
 

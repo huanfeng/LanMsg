@@ -29,9 +29,22 @@ pub fn notify_request_body(from_name: &str, what: &str) -> String {
     format!("{from_name} 想要{what}")
 }
 
+/// 更新检查通知（P5 T23 追加）。
+pub const NOTIFY_UPDATE_TITLE: &str = "LanMsg 更新";
+/// 已是最新。
+pub const NOTIFY_UPDATE_UPTODATE: &str = "已是最新版本";
+/// 发现新版本（`v` 为版本号）。
+pub fn notify_update_available(v: &str) -> String {
+    format!("发现新版本 v{v}，可在设置页的“检查更新”里下载安装")
+}
+/// 检查失败。
+pub const NOTIFY_UPDATE_FAILED: &str = "无法检查更新，请稍后重试";
+
 /// 托盘菜单。
 pub const TRAY_OPEN: &str = "打开 LanMsg";
 pub const TRAY_WEB: &str = "开启网页传输";
+/// 检查更新入口（P5 T23 追加）：结果经通知展示。
+pub const TRAY_UPDATE: &str = "检查更新";
 pub const TRAY_ONLINE: &str = "在线";
 pub const TRAY_INVISIBLE: &str = "隐身";
 pub const TRAY_BUSY: &str = "忙碌";

@@ -112,6 +112,8 @@ pub fn start_runtime(args: &Args) -> Result<DaemonRuntime> {
         .await
         .context("failed to start service (if the data directory marker selects the system keystore but it is unavailable, check the keystore service)")?;
         tracing::info!("lanmsgd started, IPC endpoint: {endpoint}");
+        // 应用内更新：启动自动检查（默认开，24h 节流；开关与节流在 core 的 update 模块内判定）。
+        service.spawn_auto_check();
 
         // IPC 接入循环。
         let svc = service.clone();

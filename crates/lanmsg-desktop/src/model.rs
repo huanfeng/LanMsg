@@ -217,6 +217,34 @@ pub enum Effect {
     Call(Request, ReplyTag),
     /// 首台设备初始化成功后登记 lanmsgd 开机自启（失败只提示）。
     EnableAutostart,
+    /// 应用内更新（P5 T23 追加）：执行安装动作（桌面端执行器 crate::update::run_install）。
+    /// `path` 为下载完成的文件路径；scoop 渠道不需要文件（None）。
+    RunInstall {
+        path: Option<String>,
+        channel: InstallChannel,
+        version: String,
+    },
+}
+
+/// 按渠道挑选 Release 资产名；没有适配的资产返回 None。
+/// 规则：安装器版取 .exe（wind-installer 产物）、Linux 渠道取 install.sh、macOS 取 .dmg；
+/// scoop 渠道不需要下载（scoop 自行获取）。
+pub fn pick_update_asset(assets: &[UpdateAsset], channel: InstallChannel) -> Option<String> {
+    match channel {
+        InstallChannel::WindowsInstaller => assets
+            .iter()
+            .find(|a| a.name.ends_with(".exe"))
+            .map(|a| a.name.clone()),
+        InstallChannel::LinuxSh => assets
+            .iter()
+            .find(|a| a.name == "install.sh")
+            .map(|a| a.name.clone()),
+        InstallChannel::MacDmg => assets
+            .iter()
+            .find(|a| a.name.ends_with(".dmg"))
+            .map(|a| a.name.clone()),
+        _ => None,
+    }
 }
 
 /// 文件项的有效状态：核心报告待下载，但本地已发出请求或正在传输时按“下载中”显示。
@@ -333,6 +361,22 @@ pub struct Model {
     pub manual_result: Option<String>,
     /// 防火墙缺少放行规则（仅 Windows 的事件会置位）。
     pub firewall_missing: bool,
+    /// 应用内更新（P5 T23 追加）：检查结果（Some = 有新版本；None = 已是最新）。
+    pub update: Option<UpdateInfo>,
+    /// CheckUpdate 已发出、尚未回复（按钮禁用）。
+    pub update_checking: bool,
+    /// CheckUpdate 已回复过（区分“未检查”与“已是最新”）。
+    pub update_checked: bool,
+    /// 本机安装渠道（CheckUpdate 回复带来；未检查时按 Manual 处理）。
+    pub update_channel: InstallChannel,
+    /// 下载已受理、尚未收到结束事件（按钮禁用）。
+    pub update_downloading: bool,
+    /// 下载进度 (done, total)；结束事件到达时清除。
+    pub update_progress: Option<(u64, u64)>,
+    /// 最近一次检查或下载失败（界面据此显示失败说明）。
+    pub update_failed: bool,
+    /// 发布页地址（Manual 渠道展示；CheckUpdate 回复带来）。
+    pub update_release_url: String,
 }
 
 impl Default for Model {
@@ -412,6 +456,14 @@ impl Model {
             manual_connecting: false,
             manual_result: None,
             firewall_missing: false,
+            update: None,
+            update_checking: false,
+            update_checked: false,
+            update_channel: InstallChannel::Manual,
+            update_downloading: false,
+            update_progress: None,
+            update_failed: false,
+            update_release_url: String::new(),
         }
     }
 
@@ -508,6 +560,17 @@ impl Model {
                         }
                         ReplyTag::Responded { request } => {
                             self.pending_requests.remove(request);
+                        }
+                        // 应用内更新（P5 T23 追加）：检查/下载受理失败时复位在途状态并置失败标志，
+                        // 否则按钮会一直禁用。
+                        ReplyTag::UpdateCheck => {
+                            self.update_checking = false;
+                            self.update_failed = true;
+                        }
+                        ReplyTag::UpdateDownload => {
+                            self.update_downloading = false;
+                            self.update_progress = None;
+                            self.update_failed = true;
                         }
                         ReplyTag::Requested { user } => {
                             self.pending_contact_requests.remove(user);
@@ -885,6 +948,27 @@ impl Model {
                 self.set_web_info(value);
                 Vec::new()
             }
+            (ReplyTag::UpdateCheck, Response::UpdateCheck { value }) => {
+                self.update = value.update;
+                self.update_channel = value.channel;
+                self.update_release_url = value.release_url;
+                self.update_checking = false;
+                self.update_checked = true;
+                self.update_failed = false;
+                Vec::new()
+            }
+            (ReplyTag::UpdateDownload, Response::Ok) => {
+                // 受理成功：下载中状态保持到 UpdateDownloadFinished 事件到达。
+                Vec::new()
+            }
+            (ReplyTag::UpdateDownload, _) => {
+                // 受理失败（资产不存在 / 已有下载在跑等）：复位下载状态并提示。
+                self.update_downloading = false;
+                self.update_progress = None;
+                self.update_failed = true;
+                self.toast = Some(strings::UPDATE_FAILED.to_string());
+                Vec::new()
+            }
             (ReplyTag::Forwarded, _) => {
                 self.toast = Some(strings::FORWARDED.to_string());
                 Vec::new()
@@ -1008,6 +1092,44 @@ impl Model {
             Event::FirewallOk => {
                 self.firewall_missing = false;
                 Vec::new()
+            }
+            Event::UpdateDownloadProgress { done, total, .. } => {
+                self.update_progress = Some((done, total));
+                Vec::new()
+            }
+            Event::UpdateDownloadFinished {
+                ok, path, asset, ..
+            } => {
+                self.update_downloading = false;
+                self.update_progress = None;
+                if !ok {
+                    self.update_failed = true;
+                    self.toast = Some(strings::UPDATE_FAILED.to_string());
+                    return Vec::new();
+                }
+                // 失败信息不使用：失败走上面的 toast；成功按渠道自动执行安装动作。
+                let _ = &asset;
+                match self.update.as_ref() {
+                    Some(info) => {
+                        let channel = self.update_channel;
+                        // Linux/macOS 拉起动作后留在进程内，先给一句说明；安装器/scoop 渠道即将退出，不提示。
+                        self.toast = match channel {
+                            InstallChannel::LinuxSh => Some(strings::UPDATE_INSTALLING.to_string()),
+                            InstallChannel::MacDmg => Some(strings::UPDATE_DMGS_OPENED.to_string()),
+                            _ => self.toast.clone(),
+                        };
+                        vec![Effect::RunInstall {
+                            path,
+                            channel,
+                            version: info.version.clone(),
+                        }]
+                    }
+                    // 没有检查结果（极少见）：只提示下载完成，不自动执行安装动作。
+                    None => {
+                        self.toast = Some(strings::UPDATE_DOWNLOADED.to_string());
+                        Vec::new()
+                    }
+                }
             }
             Event::ConversationUpdated { summary } => {
                 match self.convs.iter_mut().find(|c| c.conv == summary.conv) {
@@ -1501,6 +1623,64 @@ impl Model {
         self.web = None;
         self.web_open = false;
         vec![call(Request::WebStop, ReplyTag::Generic)]
+    }
+    // ===== 应用内更新（P5 T23 追加） =====
+
+    /// 检查更新：发出 CheckUpdate；结果经 ReplyTag::UpdateCheck 回来。
+    pub fn update_check(&mut self) -> Vec<Effect> {
+        if self.update_checking {
+            return Vec::new();
+        }
+        self.update_checking = true;
+        self.update_checked = false;
+        self.update_failed = false;
+        vec![call(Request::CheckUpdate, ReplyTag::UpdateCheck)]
+    }
+
+    /// “下载并安装”：按渠道选择资产并发起下载；scoop 渠道无需下载，
+    /// 直接拉起更新命令窗口（core 不参与）。Manual 渠道不提供该入口。
+    pub fn update_install(&mut self) -> Vec<Effect> {
+        let Some(info) = self.update.as_ref() else {
+            return Vec::new();
+        };
+        if self.update_downloading {
+            return Vec::new();
+        }
+        if self.update_channel == InstallChannel::WindowsScoop {
+            return vec![Effect::RunInstall {
+                path: None,
+                channel: InstallChannel::WindowsScoop,
+                version: info.version.clone(),
+            }];
+        }
+        let Some(name) = pick_update_asset(&info.assets, self.update_channel) else {
+            self.update_failed = true;
+            self.toast = Some(strings::UPDATE_NO_ASSET.to_string());
+            return Vec::new();
+        };
+        self.update_downloading = true;
+        self.update_progress = None;
+        self.update_failed = false;
+        vec![Effect::Call(
+            Request::DownloadUpdate { asset: name },
+            ReplyTag::UpdateDownload,
+        )]
+    }
+
+    /// 通用组开关：立即保存“启动时自动检查更新”（以已保存值为底只替换该字段）。
+    pub fn set_auto_check_update(&mut self, on: bool) -> Vec<Effect> {
+        let Some(base) = self.settings.clone() else {
+            return Vec::new();
+        };
+        if base.auto_check_update == on {
+            return Vec::new();
+        }
+        let mut dto = base;
+        dto.auto_check_update = on;
+        vec![Effect::Call(
+            Request::SetSettings { settings: dto },
+            ReplyTag::SettingsSaved,
+        )]
     }
 
     /// 回应一条浏览器请求。
@@ -2052,6 +2232,7 @@ mod tests {
             .filter_map(|e| match e {
                 Effect::Call(r, _) => Some(r),
                 Effect::EnableAutostart => None,
+                Effect::RunInstall { .. } => None,
             })
             .collect()
     }
@@ -4056,6 +4237,7 @@ mod tests {
             background_mode: BackgroundMode::Realtime,
             localsend_listening: None,
             localsend_port: 53317,
+            auto_check_update: true,
         }
     }
 
@@ -4395,6 +4577,214 @@ mod tests {
         let fx = m.web_stop();
         assert!(has(&fx, |r| matches!(r, Request::WebStop)));
         assert!(m.web.is_none() && !m.web_open);
+    }
+
+    // ===== 应用内更新（P5 T23 追加） =====
+
+    fn update_info(version: &str) -> UpdateInfo {
+        UpdateInfo {
+            version: version.into(),
+            notes: "release notes".into(),
+            published_at: 0,
+            assets: vec![
+                UpdateAsset {
+                    name: "LanMsg-1.1.0.exe".into(),
+                    size: 100,
+                    url: "u1".into(),
+                },
+                UpdateAsset {
+                    name: "install.sh".into(),
+                    size: 10,
+                    url: "u2".into(),
+                },
+                UpdateAsset {
+                    name: "lanmsg-macos.dmg".into(),
+                    size: 200,
+                    url: "u3".into(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn update_check_failure_resets_in_flight() {
+        // 检查/下载的受理失败必须复位在途标志，否则按钮永久禁用（回归测试）。
+        let mut m = Model::new();
+        let fx = m.update_check();
+        assert!(m.update_checking);
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::UpdateCheck,
+            result: Err(ApiError {
+                code: ErrorCode::Io,
+                message: "offline".into(),
+            }),
+        });
+        assert!(!m.update_checking);
+        assert!(m.update_failed);
+
+        m.update = Some(update_info("1.1.0"));
+        m.update_channel = InstallChannel::WindowsInstaller;
+        let _ = m.update_install();
+        assert!(m.update_downloading);
+        m.apply(UiMsg::Reply {
+            tag: ReplyTag::UpdateDownload,
+            result: Err(ApiError {
+                code: ErrorCode::InvalidArgument,
+                message: "busy".into(),
+            }),
+        });
+        assert!(!m.update_downloading);
+        assert!(m.update_failed);
+        let _ = fx;
+    }
+
+    #[test]
+    fn update_check_sets_flags_and_resets_on_reply() {
+        let mut m = Model::new();
+        let fx = m.update_check();
+        assert!(m.update_checking);
+        assert!(!m.update_checked);
+        assert!(has(&fx, |r| matches!(r, Request::CheckUpdate)));
+        // 检查中重复点击不重复发请求
+        assert!(m.update_check().is_empty());
+        let v = UpdateCheckView {
+            update: None,
+            current: "0.5.0".into(),
+            channel: InstallChannel::LinuxSh,
+            release_url: "https://github.com/huanfeng/lanmsg/releases/latest".into(),
+        };
+        m.apply(reply(
+            ReplyTag::UpdateCheck,
+            Response::UpdateCheck { value: v },
+        ));
+        assert!(!m.update_checking);
+        assert!(m.update_checked);
+        assert!(m.update.is_none());
+        assert_eq!(m.update_channel, InstallChannel::LinuxSh);
+    }
+
+    #[test]
+    fn update_install_picks_asset_per_channel() {
+        let mut m = Model::new();
+        let info = update_info("1.1.0");
+        let assets = info.assets.clone();
+        m.update = Some(info);
+
+        // 安装器渠道：取 .exe
+        m.update_channel = InstallChannel::WindowsInstaller;
+        let fx = m.update_install();
+        assert!(m.update_downloading);
+        assert!(has(
+            &fx,
+            |r| matches!(r, Request::DownloadUpdate { asset } if asset == "LanMsg-1.1.0.exe")
+        ));
+
+        // 下载中重复点击不重复发请求
+        assert!(m.update_install().is_empty());
+        m.update_downloading = false;
+
+        // Linux 渠道：取 install.sh
+        m.update_channel = InstallChannel::LinuxSh;
+        m.update_downloading = false;
+        let fx = m.update_install();
+        assert!(has(
+            &fx,
+            |r| matches!(r, Request::DownloadUpdate { asset } if asset == "install.sh")
+        ));
+
+        // macOS 渠道：取 .dmg
+        m.update_channel = InstallChannel::MacDmg;
+        m.update_downloading = false;
+        let fx = m.update_install();
+        assert!(has(
+            &fx,
+            |r| matches!(r, Request::DownloadUpdate { asset } if asset == "lanmsg-macos.dmg")
+        ));
+
+        // scoop 渠道：不下载，直接 RunInstall
+        m.update_channel = InstallChannel::WindowsScoop;
+        m.update_downloading = false;
+        let fx = m.update_install();
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::RunInstall {
+                path: None,
+                channel: InstallChannel::WindowsScoop,
+                ..
+            }
+        )));
+
+        // Manual 渠道：没有适配资产，置失败标志
+        m.update_channel = InstallChannel::Manual;
+        let fx = m.update_install();
+        assert!(fx.is_empty());
+        assert!(m.update_failed);
+
+        let _ = assets;
+    }
+
+    #[test]
+    fn update_finished_event_triggers_install_effect() {
+        let mut m = Model::new();
+        m.update = Some(update_info("1.1.0"));
+        m.update_channel = InstallChannel::WindowsInstaller;
+        m.update_downloading = true;
+        // 进度事件更新进度
+        m.apply(UiMsg::Event(Event::UpdateDownloadProgress {
+            asset: "LanMsg-1.1.0.exe".into(),
+            done: 50,
+            total: 100,
+        }));
+        assert_eq!(m.update_progress, Some((50, 100)));
+        // 成功：复位下载状态并生成 RunInstall
+        let fx = m.apply(UiMsg::Event(Event::UpdateDownloadFinished {
+            asset: "LanMsg-1.1.0.exe".into(),
+            ok: true,
+            path: Some("/d/updates/LanMsg-1.1.0.exe".into()),
+            error: None,
+        }));
+        assert!(!m.update_downloading);
+        assert!(m.update_progress.is_none());
+        assert!(fx.iter().any(|e| matches!(
+            e,
+            Effect::RunInstall {
+                channel: InstallChannel::WindowsInstaller,
+                ..
+            }
+        )));
+        // 失败：置失败标志并提示
+        m.update_downloading = true;
+        let fx = m.apply(UiMsg::Event(Event::UpdateDownloadFinished {
+            asset: "LanMsg-1.1.0.exe".into(),
+            ok: false,
+            path: None,
+            error: Some("boom".into()),
+        }));
+        assert!(m.update_failed);
+        assert!(m.toast.is_some());
+        assert!(fx.is_empty());
+    }
+
+    #[test]
+    fn pick_update_asset_matches_by_suffix_or_name() {
+        let assets = update_info("1").assets;
+        assert_eq!(
+            pick_update_asset(&assets, InstallChannel::WindowsInstaller).as_deref(),
+            Some("LanMsg-1.1.0.exe")
+        );
+        assert_eq!(
+            pick_update_asset(&assets, InstallChannel::LinuxSh).as_deref(),
+            Some("install.sh")
+        );
+        assert_eq!(
+            pick_update_asset(&assets, InstallChannel::MacDmg).as_deref(),
+            Some("lanmsg-macos.dmg")
+        );
+        assert_eq!(
+            pick_update_asset(&assets, InstallChannel::WindowsScoop),
+            None
+        );
+        assert_eq!(pick_update_asset(&assets, InstallChannel::Manual), None);
     }
 
     #[test]

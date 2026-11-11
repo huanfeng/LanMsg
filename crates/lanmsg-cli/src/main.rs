@@ -127,8 +127,20 @@ enum Cmd {
     Profile { name: String },
     /// 列出会话中的文件项（hash 名字 大小 状态）
     FilesOf { conv: String },
+    /// 应用内更新：`update check` 检查新版本
+    Update {
+        #[command(subcommand)]
+        action: UpdateAction,
+    },
     /// 关闭 lanmsgd
     Shutdown,
+}
+
+/// `update` 的子命令。
+#[derive(Subcommand)]
+enum UpdateAction {
+    /// 检查 GitHub Releases 上的新版本
+    Check,
 }
 
 /// 连接到 lanmsgd；失败时提示并退出 1。
@@ -678,6 +690,36 @@ async fn main() -> Result<()> {
                 other => println!("{other:?}"),
             }
         }
+        Cmd::Update { action } => match action {
+            UpdateAction::Check => {
+                let resp = client.call(Request::CheckUpdate).await.map_err(api_err)?;
+                match resp {
+                    Response::UpdateCheck { value } => {
+                        println!("current version: {}", value.current);
+                        println!("install channel: {:?}", value.channel);
+                        match value.update {
+                            Some(u) => {
+                                println!("new version available: v{}", u.version);
+                                if u.published_at > 0 {
+                                    println!("published: {}", u.published_at);
+                                }
+                                if !u.notes.is_empty() {
+                                    println!("--- release notes ---");
+                                    println!("{}", u.notes);
+                                }
+                                println!("--- assets ---");
+                                for a in &u.assets {
+                                    println!("  {} ({} bytes)", a.name, a.size);
+                                }
+                            }
+                            None => println!("already up to date"),
+                        }
+                        println!("release page: {}", value.release_url);
+                    }
+                    other => println!("{other:?}"),
+                }
+            }
+        },
         Cmd::Shutdown => {
             let resp = client.call(Request::Shutdown).await.map_err(api_err)?;
             match resp {

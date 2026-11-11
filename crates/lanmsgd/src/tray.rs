@@ -4,8 +4,9 @@
 // 注释中文，标识符英文。
 
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 
-use lanmsg_api::{Event, Request, Response, StatusDto};
+use lanmsg_api::{ApiError, Event, Request, Response, StatusDto};
 use windui::platform::{resident_available, tray_supported};
 use windui::prelude::*;
 
@@ -30,6 +31,8 @@ enum UiMsg {
     /// 防火墙放行规则的状态（来自共享的 watch）：`true` = 缺失，`false` = 已放行。
     #[cfg(windows)]
     Firewall { missing: bool },
+    /// 托盘“检查更新”的结果（后台线程检查，回 UI 线程弹通知）。
+    UpdateCheckResult(Result<Response, ApiError>),
 }
 
 /// 提权正在进行：连点菜单或通知只弹一个 UAC。
@@ -135,6 +138,11 @@ fn notice_with_fresh_status(
 pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
     let handle = rt.handle();
 
+    // 托盘“检查更新”回传通道：菜单闭包在 app.channel 建立之前创建，经 OnceLock 晚绑定。
+    let update_tx: Arc<OnceLock<Sender<UiMsg>>> = Arc::new(OnceLock::new());
+    let svc_update = rt.service.clone();
+    let h_update = handle.clone();
+
     // 初始状态与本机设备 id 来自 GetSelf。
     let (initial, self_device) = match handle.block_on(rt.service.handle(Request::GetSelf)) {
         Ok(Response::SelfInfo { value }) => (value.status, value.device_id),
@@ -199,6 +207,18 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
                         tracing::warn!("failed to launch UI for web transfer: {e}");
                     }
                 }),
+                TrayMenuItem::item(strings::TRAY_UPDATE, move |_ctx| {
+                    // 网络请求不能占 UI 线程：后台线程执行检查，结果经共享回传通道回 UI 线程弹通知。
+                    let svc = svc_update.clone();
+                    let h = h_update.clone();
+                    let tx = update_tx.clone();
+                    std::thread::spawn(move || {
+                        let result = h.block_on(svc.handle(Request::CheckUpdate));
+                        if let Some(s) = tx.get() {
+                            let _ = s.send(UiMsg::UpdateCheckResult(result));
+                        }
+                    });
+                }),
                 TrayMenuItem::separator(),
                 status_item(strings::TRAY_ONLINE, StatusDto::Online, status, &rt),
                 status_item(strings::TRAY_INVISIBLE, StatusDto::Invisible, status, &rt),
@@ -246,6 +266,27 @@ pub fn run_tray(rt: DaemonRuntime, data_dir: PathBuf) {
                     strings::NOTIFY_FIREWALL_BODY,
                     FIREWALL_TAG,
                 );
+            }
+        }
+        UiMsg::UpdateCheckResult(result) => {
+            // 结果以通知展示；点击通知打开界面，详细操作在设置页完成。
+            match result {
+                Ok(Response::UpdateCheck { value }) => match &value.update {
+                    Some(info) => tray_handle.notify(
+                        strings::NOTIFY_UPDATE_TITLE,
+                        strings::notify_update_available(&info.version),
+                    ),
+                    None => tray_handle.notify(
+                        strings::NOTIFY_UPDATE_TITLE,
+                        strings::NOTIFY_UPDATE_UPTODATE,
+                    ),
+                },
+                other => {
+                    if let Err(e) = other {
+                        tracing::warn!("update check via tray failed: {e:?}");
+                    }
+                    tray_handle.notify(strings::NOTIFY_UPDATE_TITLE, strings::NOTIFY_UPDATE_FAILED);
+                }
             }
         }
         UiMsg::Event(ev) => {

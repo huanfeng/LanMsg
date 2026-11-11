@@ -235,6 +235,14 @@ pub enum Request {
     SetUiFocus {
         conv: Option<String>,
     },
+    /// 应用内更新（P5 T23 追加）：检查 GitHub Releases 最新版并与本机版本做语义化比较。
+    CheckUpdate,
+    /// 应用内更新（P5 T23 追加）：按资产名下载到数据目录 `updates/` 下并做 SHA256 校验，
+    /// 进度与结果经 `UpdateDownload*` 事件上报。
+    DownloadUpdate {
+        /// Release 资产文件名。
+        asset: String,
+    },
     Shutdown,
 }
 
@@ -303,6 +311,10 @@ pub enum Response {
     WebSession {
         value: WebSessionInfo,
     },
+    /// 应用内更新（P5 T23 追加）：检查结果。
+    UpdateCheck {
+        value: UpdateCheckView,
+    },
 }
 
 // ===== Event =====
@@ -370,6 +382,19 @@ pub enum Event {
     },
     /// 防火墙放行规则已就绪（P5 追加）：`FirewallMissing` 之后规则被放行时推送，界面据此隐藏提示。
     FirewallOk,
+    /// 应用内更新（P5 T23 追加）：更新包下载进度（按百分比变化节流）。
+    UpdateDownloadProgress {
+        asset: String,
+        done: u64,
+        total: u64,
+    },
+    /// 应用内更新（P5 T23 追加）：更新包下载结束。成功时 `path` 为落盘文件路径；失败时 `error` 为英文排障信息。
+    UpdateDownloadFinished {
+        asset: String,
+        ok: bool,
+        path: Option<String>,
+        error: Option<String>,
+    },
 }
 
 // ===== DTO =====
@@ -838,11 +863,19 @@ pub struct SettingsDto {
     /// LocalSend 监听端口（P5 追加，默认 53317；SetSettings 校验 1024–65535）。
     #[serde(default = "default_localsend_port")]
     pub localsend_port: u16,
+    /// 启动时自动检查更新（P5 T23 追加；默认开；自动检查每天最多一次，手动检查不受限）。
+    #[serde(default = "default_auto_check_update")]
+    pub auto_check_update: bool,
 }
 
 /// `SettingsDto.localsend_port` 的默认值（旧版本保存的设置缺该字段时使用）。
 fn default_localsend_port() -> u16 {
     53317
+}
+
+/// `SettingsDto.auto_check_update` 的默认值（旧版本保存的设置缺该字段时使用）。
+fn default_auto_check_update() -> bool {
+    true
 }
 
 /// 后台模式（仅 Android 使用）。
@@ -926,6 +959,66 @@ pub struct WebSessionInfo {
     pub code: String,
     pub qr_uri: String,
     pub urls: Option<Vec<String>>,
+}
+
+// ===== 应用内更新（P5 T23 追加） =====
+
+/// 安装渠道（P5 T23 追加）：决定"下载并安装"的具体动作。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum InstallChannel {
+    /// Windows 安装器版（wind-installer 未提权时弹 UAC 自提权，静默安装并处理运行中的进程）。
+    WindowsInstaller,
+    /// Windows scoop 版（exe 在 scoop\apps\lanmsg 下，更新时弹命令行执行 scoop update lanmsg）。
+    WindowsScoop,
+    /// Linux 桌面渠道（install.sh / tarball 安装，更新时后台执行 Release 中的 install.sh --version）。
+    /// tarball 含 share/ 桌面文件时与 install.sh 渠道无法区分，按同一动作处理。
+    LinuxSh,
+    /// macOS dmg 渠道（更新时打开 dmg 提示手动拖装）。
+    MacDmg,
+    /// 其他（源码构建、无头版等）：只提示新版本与 Release 页面链接，不提供安装动作。
+    Manual,
+}
+
+/// 更新资产（GitHub Release asset）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct UpdateAsset {
+    /// 资产文件名（DownloadUpdate 按名定位；SHA256SUMS 也按此名匹配）。
+    pub name: String,
+    /// 字节数（界面显示大小）。
+    pub size: u64,
+    /// 下载 URL（Release 响应里的 browser_download_url；仅展示用，实际下载 URL 由 core 从固定的 API 响应解析）。
+    pub url: String,
+}
+
+/// 最新版信息（CheckUpdate 返回；无更新时 UpdateCheckView.update 为 None）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct UpdateInfo {
+    /// 最新版本号（不带 v 前缀）。
+    pub version: String,
+    /// 更新说明（Release body）。
+    pub notes: String,
+    /// 发布时间（Unix 毫秒；RFC3339 解析不了时为 0，界面不显示时间）。
+    pub published_at: i64,
+    /// Release 资产列表（含大小与下载 URL，供界面/CLI 展示与按名定位）。
+    pub assets: Vec<UpdateAsset>,
+}
+
+/// CheckUpdate 的结果视图：有更新时的信息、本机版本与安装渠道。
+/// `update` 为 None 表示已是最新（按语义化版本比较后远端不大于本机）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct UpdateCheckView {
+    /// 有新版本时的信息；None = 已是最新。
+    pub update: Option<UpdateInfo>,
+    /// 本机版本（core 的 workspace 版本）。
+    pub current: String,
+    /// 本机安装渠道（各端据此决定"下载并安装"的具体动作）。
+    pub channel: InstallChannel,
+    /// 发布页地址（Manual 渠道展示与跳转用）。
+    pub release_url: String,
 }
 
 #[cfg(test)]

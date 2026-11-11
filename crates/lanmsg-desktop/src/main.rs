@@ -20,6 +20,7 @@ mod strings;
 mod style;
 mod tz;
 mod ui_state;
+mod update;
 mod views;
 
 use std::cell::RefCell;

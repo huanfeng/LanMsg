@@ -110,6 +110,8 @@ pub(crate) struct Inner {
     pub(crate) scanning: std::sync::atomic::AtomicBool,
     /// 网段扫描探测的端口（默认服务端口；测试钩子可覆盖）。
     pub(crate) scan_port: std::sync::atomic::AtomicU16,
+    /// 应用内更新下载进行中标志（同一时刻只允许一个更新下载）。
+    pub(crate) update_busy: std::sync::atomic::AtomicBool,
     /// 发现触发的在途拨号地址：同一地址拨号未结束时不重复发起。
     dialing: StdMutex<HashSet<SocketAddr>>,
     /// 受信对端的重连状态（任务登记、唤醒信号、尝试计数）。
@@ -349,6 +351,7 @@ impl Service {
             address_book_sent: StdMutex::new(HashMap::new()),
             scanning: std::sync::atomic::AtomicBool::new(false),
             scan_port: std::sync::atomic::AtomicU16::new(lanmsg_proto::consts::SERVICE_PORT),
+            update_busy: std::sync::atomic::AtomicBool::new(false),
             dialing: StdMutex::new(HashSet::new()),
             redial: redial::RedialState::new(),
         });
@@ -436,6 +439,13 @@ impl Service {
     /// 订阅服务事件（容量 1024，落后时客户端应重新拉取）。
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.inner.events.subscribe()
+    }
+
+    /// 应用内更新：启动自动检查（lanmsgd / Android 启动时调用一次）。
+    /// 开关默认开、每天最多一次；结果只记日志，界面以手动 CheckUpdate 为准。
+    pub fn spawn_auto_check(&self) {
+        let inner = self.inner.clone();
+        tokio::spawn(crate::update::auto_check_tick(inner));
     }
 
     /// 打开到指定设备的数据连接（后续传输引擎与集成测试使用）。

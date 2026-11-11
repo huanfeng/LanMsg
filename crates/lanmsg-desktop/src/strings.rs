@@ -361,6 +361,46 @@ pub const SETTINGS_ABOUT_LICENSE_VALUE: &str = "GPL-3.0-or-later";
 pub const SETTINGS_ABOUT_USER_FINGERPRINT: &str = "用户指纹";
 pub const SETTINGS_ABOUT_DEVICE_FINGERPRINT: &str = "本机指纹";
 
+// ===== 应用内更新（P5 T23 追加） =====
+/// “检查更新”入口（行标签与按钮共用）。
+pub const UPDATE_CHECK: &str = "检查更新";
+/// 检查进行中。
+pub const UPDATE_CHECKING: &str = "正在检查更新…";
+/// 已是最新。
+pub const UPDATE_UPTODATE: &str = "已是最新版本";
+/// 检查或下载失败。
+pub const UPDATE_FAILED: &str = "无法完成更新，请检查网络后重试";
+/// 最新版本行（`v` 为版本号）。
+pub fn update_version_text(v: &str) -> String {
+    format!("最新版本 v{v}")
+}
+/// 下载进度（`done`/`total` 为字节）。
+pub fn update_progress_text(done: u64, total: u64) -> String {
+    format!(
+        "已下载 {:.1} / {:.1} MB",
+        done as f64 / 1048576.0,
+        total as f64 / 1048576.0
+    )
+}
+/// 下载完成、后台执行更新脚本（Linux 渠道）。
+pub const UPDATE_INSTALLING: &str = "更新脚本已在后台运行，完成后请重启 LanMsg";
+/// 已打开更新镜像（macOS 渠道）。
+pub const UPDATE_DMGS_OPENED: &str = "已打开更新镜像，请把 LanMsg 拖入应用程序文件夹";
+/// 更新包已下载但没有检查结果可执行安装动作时的提示。
+pub const UPDATE_DOWNLOADED: &str = "更新包已下载";
+/// 渠道不支持应用内安装，展示发布页链接（`url` 为发布页地址）。
+pub fn update_release_link(url: &str) -> String {
+    format!("发布页：{url}")
+}
+/// 缺少适配本渠道的安装资产。
+pub const UPDATE_NO_ASSET: &str = "未找到适配的安装包，请到发布页手动下载";
+/// “下载并安装”按钮。
+pub const UPDATE_INSTALL: &str = "下载并安装";
+/// “启动时自动检查更新”开关（通用组）。
+pub const UPDATE_AUTO_CHECK: &str = "启动时自动检查更新";
+/// 开关说明。
+pub const UPDATE_AUTO_CHECK_HINT: &str = "每天最多检查一次；发现新版本时可在“关于”里下载安装";
+
 /// 设置页地址行校验错误，`line` 为 1 起的行号。
 pub fn settings_target_invalid(line: usize, text: &str) -> String {
     format!("第 {line} 行无效：{text}")

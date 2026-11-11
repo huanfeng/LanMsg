@@ -140,6 +140,13 @@ pub(crate) async fn handle(inner: &Arc<Inner>, req: Request) -> Result<Response,
             item,
             pinned,
         } => station_set_pinned(inner, &station, &item, pinned).await,
+        Request::CheckUpdate => Ok(Response::UpdateCheck {
+            value: crate::update::check_now().await?,
+        }),
+        Request::DownloadUpdate { asset } => {
+            crate::update::start_download(inner, &asset).await?;
+            Ok(Response::Ok)
+        }
         Request::Shutdown => {
             inner.localsend.stop().await;
             inner.discovery.shutdown();
