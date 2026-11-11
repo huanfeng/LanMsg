@@ -799,6 +799,7 @@ pub fn demo_model(p: DemoPage) -> Model {
         background_mode: BackgroundMode::Realtime,
         localsend_listening: Some(true),
         localsend_port: 53317,
+        auto_check_update: true,
     });
     match p {
         DemoPage::Wizard => {

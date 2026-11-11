@@ -381,6 +381,37 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
     let targets = signal(init.unicast_targets.join("\n"));
     let auto_start = signal(autostart::is_enabled());
 
+    // 应用内更新状态（关于卡片）。
+    let up_checking = ui.derive(|m| m.update_checking);
+    let up_checked = ui.derive(|m| m.update_checked);
+    let up_failed = ui.derive(|m| m.update_failed);
+    let up_downloading = ui.derive(|m| m.update_downloading);
+    let up_has_update = ui.derive(|m| m.update.is_some());
+    let up_version = ui.derive(|m| {
+        m.update
+            .as_ref()
+            .map(|i| strings::update_version_text(&i.version))
+            .unwrap_or_default()
+    });
+    let up_notes = ui.derive(|m| {
+        m.update
+            .as_ref()
+            .map(|i| i.notes.clone())
+            .unwrap_or_default()
+    });
+    let up_progress = ui.derive(|m| {
+        m.update_progress
+            .map(|(d, t)| strings::update_progress_text(d, t))
+            .unwrap_or_default()
+    });
+    let up_release_link = ui.derive(|m| {
+        if m.update.is_some() && m.update_channel == lanmsg_api::types::InstallChannel::Manual {
+            strings::update_release_link(&m.update_release_url)
+        } else {
+            String::new()
+        }
+    });
+
     // 校验：每项一个派生信号
     let display_ok = display.map(|v| wizard_name_ok(v));
     let device_ok = device.map(|v| wizard_name_ok(v));
@@ -601,17 +632,35 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
 
     let data_dir = ui.data_dir().to_path_buf();
     let me = ui.read(|m| m.me.clone());
-    let general = card(vec![switch_row(
-        strings::SETTINGS_AUTOSTART,
-        strings::SETTINGS_AUTOSTART_HINT,
-        Element::switch(auto_start).on_switch_change(move |ctx, on| {
-            // 即时生效；失败时把开关拨回去并说明原因
-            if let Err(e) = autostart::set_enabled(on, &data_dir) {
-                auto_start.set(!on);
-                ctx.toast(format!("{}{}", strings::SETTINGS_AUTOSTART_FAILED, e));
-            }
-        }),
-    )]);
+    let auto_check = ui.derive(|m| {
+        m.settings
+            .as_ref()
+            .map(|s| s.auto_check_update)
+            .unwrap_or(true)
+    });
+    let ui_auto_check = ui.clone();
+    let general = card(vec![
+        switch_row(
+            strings::SETTINGS_AUTOSTART,
+            strings::SETTINGS_AUTOSTART_HINT,
+            Element::switch(auto_start).on_switch_change(move |ctx, on| {
+                // 即时生效；失败时把开关拨回去并说明原因
+                if let Err(e) = autostart::set_enabled(on, &data_dir) {
+                    auto_start.set(!on);
+                    ctx.toast(format!("{}{}", strings::SETTINGS_AUTOSTART_FAILED, e));
+                }
+            }),
+        ),
+        switch_row(
+            strings::UPDATE_AUTO_CHECK,
+            strings::UPDATE_AUTO_CHECK_HINT,
+            Element::switch(auto_check).on_switch_change(move |_ctx, on| {
+                // 即时生效（SetSettings 以已保存值为底只替换该字段）；失败时随重新拉取回弹。
+                let ui = ui_auto_check.clone();
+                ui.act(|m| m.set_auto_check_update(on));
+            }),
+        ),
+    ]);
 
     let (user_fp, device_fp) = match &me {
         Some(m) => (
@@ -639,6 +688,94 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
             device_fp,
         ));
     }
+
+    // 检查更新行：按钮 + 状态说明（检查中 / 已是最新 / 失败）。
+    let ui_check = ui.clone();
+    let btn_checking = up_checking;
+    let btn_downloading = up_downloading;
+    let note_checking = up_checking;
+    let note_uptodate = {
+        let (c, ck, upd, fail) = (up_checking, up_checked, up_has_update, up_failed);
+        ui.derive(move |m| {
+            let _ = m;
+            !c.get() && ck.get() && !upd.get() && !fail.get()
+        })
+    };
+    let note_failed = up_failed;
+    about_rows.push(field(
+        strings::UPDATE_CHECK,
+        Element::button(strings::UPDATE_CHECK)
+            .outline()
+            .enabled_when(move || !btn_checking.get() && !btn_downloading.get())
+            .on_click(move |_| ui_check.act(|m| m.update_check())),
+        vec![
+            Element::label(strings::UPDATE_CHECKING)
+                .font_size(style::FONT_META)
+                .fg_role(Role::TextMuted)
+                .width_match()
+                .visible_when(move || note_checking.get()),
+            note(strings::UPDATE_UPTODATE).visible_when(move || note_uptodate.get()),
+            Element::label(strings::UPDATE_FAILED)
+                .font_size(style::FONT_META)
+                .fg_role(Role::Danger)
+                .width_match()
+                .visible_when(move || note_failed.get()),
+        ],
+    ));
+
+    // 有新版本时的详情：版本号、更新说明、下载并安装、进度、Manual 渠道的发布页链接。
+    let ui_install = ui.clone();
+    let ins_downloading = up_downloading;
+    let detail_has_update = up_has_update;
+    let notes_has_update = up_has_update;
+    let btn_has_update = up_has_update;
+    let progress_has_downloading = up_downloading;
+    let detail = Element::col()
+        .weight(1.0)
+        .spacing(style::SPACE_XS)
+        .child(
+            Element::label_signal(up_version)
+                .font_size(style::FONT_META)
+                .fg_role(Role::Text)
+                .width_match()
+                .visible_signal(detail_has_update),
+        )
+        .child(
+            Element::label_signal(up_notes)
+                .font_size(style::FONT_META)
+                .fg_role(Role::TextMuted)
+                .width_match()
+                .visible_signal(notes_has_update),
+        )
+        .child(
+            Element::button(strings::UPDATE_INSTALL)
+                .outline()
+                .enabled_when(move || !ins_downloading.get())
+                .visible_signal(btn_has_update)
+                .on_click(move |_| ui_install.act(|m| m.update_install())),
+        )
+        .child(
+            Element::label_signal(up_progress)
+                .font_size(style::FONT_META)
+                .fg_role(Role::TextMuted)
+                .width_match()
+                .visible_signal(progress_has_downloading),
+        )
+        .child(
+            Element::label_signal(up_release_link)
+                .font_size(style::FONT_META)
+                .fg_role(Role::TextMuted)
+                .width_match(),
+        );
+    about_rows.push(
+        Element::row()
+            .width_match()
+            .padding(style::SPACE_LG)
+            .spacing(style::SPACE_MD)
+            .child(Element::leaf().width(LABEL_W))
+            .child(detail),
+    );
+
     let about = card(about_rows);
 
     Element::col()
@@ -735,6 +872,7 @@ mod tests {
             background_mode: lanmsg_api::types::BackgroundMode::Realtime,
             localsend_listening: None,
             localsend_port: 53317,
+            auto_check_update: true,
         }
     }
 

@@ -20,6 +20,7 @@ pub mod store;
 pub mod sync;
 pub mod thumb_cache;
 pub mod trust;
+pub mod update;
 pub mod web;
 
 #[cfg(test)]

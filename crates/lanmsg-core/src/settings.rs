@@ -24,6 +24,8 @@ pub(crate) const SETTING_DEVICE_NAME: &str = "device_name";
 pub(crate) const SETTING_JOIN_PENDING: &str = "join_pending";
 /// 已应用的最大 ProfileUpdated hlc。
 pub(crate) const SETTING_PROFILE_HLC: &str = "profile_hlc";
+/// 上次（成功的）启动自动检查更新时间戳（毫秒）；自动检查的 24 小时节流。
+pub(crate) const SETTING_UPDATE_LAST_CHECK: &str = "update_last_check";
 
 /// 默认设置：下载目录取平台下载目录下的 LanMsg 子目录（取不到则 data_dir/downloads），
 /// 自动下载阈值按 AUTO_DOWNLOAD_* 常量，wifi 才自动下载文件、LocalSend 开启、实时后台。
@@ -44,6 +46,7 @@ pub fn default_settings(data_dir: &Path, device_name: &str) -> SettingsDto {
         background_mode: BackgroundMode::Realtime,
         localsend_listening: None,
         localsend_port: lanmsg_proto::consts::LOCALSEND_PORT,
+        auto_check_update: true,
     }
 }
 
