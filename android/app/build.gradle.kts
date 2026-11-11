@@ -6,6 +6,16 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// 版本号唯一来源：根 Cargo.toml 的 [workspace.package].version（versionCode = major*10000 + minor*100 + patch）
+val workspaceVersion: String = rootProject.file("../Cargo.toml").readLines()
+    .dropWhile { it.trim() != "[workspace.package]" }
+    .drop(1)
+    .takeWhile { !it.trim().startsWith("[") }
+    .firstNotNullOfOrNull { Regex("""^\s*version\s*=\s*"([^"]+)"""").find(it)?.groupValues?.get(1) }
+    ?: throw GradleException("cannot read [workspace.package].version from Cargo.toml")
+val versionParts = Regex("""^(\d+)\.(\d+)\.(\d+)""").find(workspaceVersion)?.groupValues
+    ?: throw GradleException("workspace version is not x.y.z: $workspaceVersion")
+
 android {
     namespace = "name.apk.lanmsg"
     compileSdk = 35
@@ -14,8 +24,8 @@ android {
         applicationId = "name.apk.lanmsg"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = versionParts[1].toInt() * 10000 + versionParts[2].toInt() * 100 + versionParts[3].toInt()
+        versionName = workspaceVersion
         // 只保留实际提供原生库的三种 ABI，去掉 JNA 带入的 mips/armeabi/x86 等
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }

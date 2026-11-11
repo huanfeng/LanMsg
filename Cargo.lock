@@ -5384,6 +5384,7 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 [[package]]
 name = "windui"
 version = "0.32.0"
+source = "git+https://github.com/huanfeng/wind-ui-rust?tag=v0.32.0#78a088c90bcf8d8367bb97f347814aef2994ccb2"
 dependencies = [
  "ab_glyph_rasterizer",
  "bytemuck",

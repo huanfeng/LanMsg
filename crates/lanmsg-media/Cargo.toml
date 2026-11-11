@@ -11,7 +11,7 @@ path = "src/bin/lanmsg-thumb.rs"
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
-lanmsg-proto = { version = "0.1.0", path = "../lanmsg-proto" }
+lanmsg-proto = { path = "../lanmsg-proto" }
 serde_json = "1"
 thiserror = "2"
 

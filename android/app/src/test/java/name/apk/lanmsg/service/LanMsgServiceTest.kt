@@ -19,7 +19,10 @@ import uniffi.lanmsg_api.Request
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [34])
 class LanMsgServiceTest {
-    private val cores = mutableListOf<FakeCoreApi>()
+    // coreFactory 在服务 IO 线程上回调创建并追加，测试线程轮询遍历——
+    // mutableListOf 跨线程读写无同步会抛 ConcurrentModificationException，
+    // 用 CopyOnWriteArrayList（写少读多）消除竞争。
+    private val cores = java.util.concurrent.CopyOnWriteArrayList<FakeCoreApi>()
 
     @Before fun fakeCore() {
         ServiceLocator.coreFactory = { FakeCoreApi().also { cores += it } }

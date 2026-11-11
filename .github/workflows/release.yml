@@ -1,0 +1,360 @@
+name: Release
+
+# Triggers
+#   push tag v*        -> build every package, then create the GitHub Release and update the scoop bucket
+#   workflow_dispatch  -> build only (dry_run defaults to true); publishing needs a tag ref and dry_run=false
+#
+# Asset names carry no version (the tag expresses it). install.sh and the scoop manifest
+# template depend on them; scripts/check-packaging.sh keeps the three in sync:
+#   lanmsg-windows-{x64,arm64}-setup.exe, lanmsg-windows-{x64,arm64}.zip
+#   lanmsg-linux-{x86_64,aarch64}.tar.gz, lanmsgd-linux-{x86_64,aarch64}-musl.tar.gz
+#   lanmsg-macos-universal.dmg, lanmsg-android.apk
+#   install.sh, uninstall.sh, SHA256SUMS
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build only, do not publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  REPO_SLUG: huanfeng/lanmsg
+  # Built from source in the Windows job; must contain firewall, sendto, args and user_data support.
+  WIND_INSTALLER_TAG: v0.131.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  meta:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version
+        id: v
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          cargo_v=$(awk '/^\[/ { p = ($0 == "[workspace.package]") } p && /^version[ \t]*=/ { gsub(/[" ]/, "", $3); print $3; exit }' Cargo.toml)
+          [ -n "$cargo_v" ] || { echo "::error::cannot read workspace version from Cargo.toml"; exit 1; }
+          publish=false
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag_v="${GITHUB_REF_NAME#v}"
+            if [ "$tag_v" != "$cargo_v" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_v (run scripts/bump-version.sh first)"
+              exit 1
+            fi
+            version=$cargo_v
+            if [ "$GITHUB_EVENT_NAME" = push ] || [ "$DRY_RUN" = false ]; then publish=true; fi
+          else
+            version="$cargo_v-dev.${GITHUB_SHA:0:8}"
+          fi
+          prerelease=false
+          case $version in *-*) prerelease=true ;; esac
+          {
+            echo "version=$version"
+            echo "publish=$publish"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=$version publish=$publish prerelease=$prerelease"
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    needs: meta
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch == 'x64' && 'x86_64-pc-windows-msvc' || 'aarch64-pc-windows-msvc' }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The packaging tools are built from the pinned source tag instead of downloading a release.
+      - name: Build wind-installer tools
+        shell: pwsh
+        run: |
+          # Cloned outside the checkout: inside it cargo would treat the tools as a member of the LanMsg workspace.
+          $dir = Join-Path $env:RUNNER_TEMP "wind-installer"
+          git clone --depth 1 --branch $env:WIND_INSTALLER_TAG https://github.com/huanfeng/wind-installer $dir
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Push-Location $dir
+          cargo build --locked --release --bin wind-installer --bin wind-uninstaller
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cargo build --locked --release --bin wind-packer --features packer
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Pop-Location
+
+      - name: Build installer and zip
+        shell: pwsh
+        run: >
+          ./packaging/windows/build-dist.ps1
+          -Arch ${{ matrix.arch }}
+          -Version "${{ needs.meta.outputs.version }}"
+          -WindInstallerDir "$env:RUNNER_TEMP/wind-installer"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: |
+            target/dist/lanmsg-windows-${{ matrix.arch }}-setup.exe
+            target/dist/lanmsg-windows-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+  linux-desktop:
+    name: Linux desktop ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:20.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      # glibc 2.31 baseline: build inside ubuntu:20.04
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake curl ca-certificates git pkg-config \
+            libfontconfig1-dev libx11-dev libxkbcommon-dev libwayland-dev libdbus-1-dev
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
+
+      - name: Build tarball
+        run: sh packaging/linux/build-tarball.sh ${{ matrix.arch }}-unknown-linux-gnu lanmsg-linux-${{ matrix.arch }}.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-desktop-${{ matrix.arch }}
+          path: target/dist/lanmsg-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  linux-headless:
+    name: Linux headless ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # JavaScript actions do not run inside Alpine containers on arm64 runners, so build with docker run.
+      - name: Build tarball in rust:alpine
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work rust:alpine sh -ec '
+            apk add --no-cache build-base cmake git bash
+            git config --global --add safe.directory /work
+            sh packaging/linux/build-tarball.sh --headless ${{ matrix.arch }}-unknown-linux-musl lanmsgd-linux-${{ matrix.arch }}-musl.tar.gz
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-headless-${{ matrix.arch }}
+          path: target/dist/lanmsgd-linux-${{ matrix.arch }}-musl.tar.gz
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal
+    needs: meta
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Signing and notarization happen only when all four Apple secrets are set; otherwise the dmg is unsigned.
+      - name: Build dmg
+        env:
+          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: bash packaging/macos/build-dmg.sh "${{ needs.meta.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/dist/lanmsg-macos-universal.dmg
+          if-no-files-found: error
+
+  android:
+    name: Android APK
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platforms;android-35 build-tools;35.0.0 platform-tools ndk;28.2.13676358
+
+      - name: Export NDK path
+        run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: command -v cargo-ndk >/dev/null || cargo install cargo-ndk --locked
+
+      # Release packages must be signed with the shared key, otherwise they cannot update in place.
+      - name: Write signing config
+        env:
+          KS_B64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_SIGNING_STORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
+          KS_KEY_PASS: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
+        run: |
+          for v in KS_B64 KS_PASS KS_ALIAS KS_KEY_PASS; do
+            [ -n "${!v}" ] || { echo "::error::missing secret ($v); release APK must be signed"; exit 1; }
+          done
+          printf '%s' "$KS_B64" | base64 -d > android/release.jks
+          {
+            echo "storeFile=release.jks"
+            echo "storePassword=$KS_PASS"
+            echo "keyAlias=$KS_ALIAS"
+            echo "keyPassword=$KS_KEY_PASS"
+          } > android/keystore.properties
+          # Fail early if the key store cannot be opened
+          keytool -list -keystore android/release.jks -storepass "$KS_PASS" -alias "$KS_ALIAS" >/dev/null
+
+      - name: Build release APK
+        run: bash scripts/build-android.sh release
+
+      # The expected fingerprint is computed from the decoded key store, not hard-coded.
+      - name: Verify signing certificate matches the secrets
+        env:
+          KS_PASS: ${{ secrets.ANDROID_SIGNING_STORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
+        run: |
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          expect=$(keytool -list -keystore android/release.jks -storepass "$KS_PASS" -alias "$KS_ALIAS" \
+                   | grep -oE '\(SHA-256\): [0-9A-F:]+' | tr -d ':' | cut -d' ' -f2 | tr 'A-F' 'a-f')
+          actual=$("$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk" \
+                   | grep -oE 'certificate SHA-256 digest: [0-9a-f]+' | head -1 | cut -d' ' -f4)
+          echo "expect=$expect"
+          echo "actual=$actual"
+          [ -n "$expect" ] && [ "$expect" = "$actual" ] || { echo "::error::APK signing certificate does not match the secrets key"; exit 1; }
+          mkdir -p dist
+          cp "$apk" dist/lanmsg-android.apk
+
+      - name: Remove signing files
+        if: always()
+        run: rm -f android/release.jks android/keystore.properties
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/lanmsg-android.apk
+          if-no-files-found: error
+
+  release:
+    name: Publish
+    needs: [meta, windows, linux-desktop, linux-headless, macos, android]
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble assets
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          cp packaging/linux/install.sh packaging/linux/uninstall.sh dist/
+          cd dist
+          ls -l
+          sha256sum -- * > ../SHA256SUMS
+          mv ../SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Generate scoop manifest
+        run: |
+          mkdir -p manifest
+          OUT_DIR=manifest REPO_SLUG="$REPO_SLUG" bash packaging/scoop/update-manifest.sh "$VERSION" dist/SHA256SUMS
+          cat manifest/lanmsg.json
+
+      - name: Create release
+        env:
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+        run: |
+          bash scripts/changelog-section.sh "$VERSION" > notes.md
+          flags=()
+          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "LanMsg $VERSION" --notes-file notes.md "${flags[@]}" dist/*
+
+      # The repository itself is the scoop bucket: bucket/lanmsg.json lives on main.
+      - uses: actions/checkout@v4
+        if: needs.meta.outputs.prerelease == 'false'
+        with:
+          ref: main
+          path: bucket-main
+
+      - name: Commit scoop manifest to main
+        if: needs.meta.outputs.prerelease == 'false'
+        working-directory: bucket-main
+        run: |
+          mkdir -p bucket
+          cp ../manifest/lanmsg.json bucket/lanmsg.json
+          if git diff --quiet -- bucket/lanmsg.json && [ -z "$(git ls-files --others --exclude-standard -- bucket)" ]; then
+            echo "scoop manifest unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- bucket/lanmsg.json
+          git commit -m "chore(release): update scoop manifest to $VERSION" --only -- bucket/lanmsg.json
+          git pull --rebase origin main
+          git push origin HEAD:main
