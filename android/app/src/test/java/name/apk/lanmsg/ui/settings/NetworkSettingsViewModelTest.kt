@@ -29,7 +29,7 @@ import uniffi.lanmsg_api.SettingsDto
 class NetworkSettingsViewModelTest {
     @get:Rule val main = MainDispatcherRule()
 
-    private var settings = SettingsDto("n", "/d", 0uL, 0uL, false, true, emptyList(), BackgroundMode.REALTIME, true, 53317u)
+    private var settings = SettingsDto("n", "/d", 0uL, 0uL, false, true, emptyList(), BackgroundMode.REALTIME, true, 53317u, true)
     private var addError: ErrorCode? = null
     private var scanError: ErrorCode? = null
     private var peers = listOf(ManualPeerView("192.168.1.9:53320", null))
@@ -185,6 +185,16 @@ class NetworkSettingsViewModelTest {
         assertTrue(NetworkSettingsViewModel.isValidPort(65535))
         assertFalse(NetworkSettingsViewModel.isValidPort(1023))
         assertFalse(NetworkSettingsViewModel.isValidPort(65536))
+    }
+
+    /** 全角数字被 Char.isDigit 放行，过滤规则必须只留 ASCII 数字（全角直接滤掉，不转换）。 */
+    @Test fun port_input_strips_fullwidth_digits() = runTest {
+        val vm = NetworkSettingsViewModel(fake())
+        advanceUntilIdle()
+        vm.editPort("５３３１７")
+        assertEquals("", vm.state.value.portText)
+        vm.editPort("53３1")
+        assertEquals("531", vm.state.value.portText)
     }
 
     @Test fun core_rejection_of_port_reported_as_error_code() = runTest {

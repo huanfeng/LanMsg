@@ -144,12 +144,13 @@ class MainActivity : ComponentActivity() {
         private const val MAX_LOGGED_ROUTE_LENGTH = 64
 
         /**
-         * 外部 intent 可设置 route extra（Activity 是 exported 的），只放行通知会发出的两种：
-         * requests 与 chat/<非空会话>（解码后非空、不含 '/'）。其余一律拒绝；长度超过 [MAX_ROUTE_LENGTH] 也拒绝。
+         * 外部 intent 可设置 route extra（Activity 是 exported 的），只放行通知会发出的三种：
+         * requests、settings（更新通知点击进设置页）与 chat/<非空会话>（解码后非空、不含 '/'）。
+         * 其余一律拒绝；长度超过 [MAX_ROUTE_LENGTH] 也拒绝。
          */
         fun isAllowedDeepLink(route: String): Boolean {
             if (route.length > MAX_ROUTE_LENGTH) return false
-            if (route == Routes.REQUESTS) return true
+            if (route == Routes.REQUESTS || route == Routes.SETTINGS) return true
             val prefix = "chat/"
             if (!route.startsWith(prefix)) return false
             val conv = Uri.decode(route.removePrefix(prefix))

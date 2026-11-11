@@ -127,7 +127,8 @@ class NetworkSettingsViewModel(private val core: CoreApi) : ViewModel() {
 
     fun editPort(text: String) {
         portEdited = true
-        _state.update { it.copy(portText = text.filter(Char::isDigit).take(5), portInvalid = false) }
+        // 只留 ASCII 数字：Char.isDigit 会放行全角数字（如１２３），提交时解析失败
+        _state.update { it.copy(portText = text.filter { ch -> ch in '0'..'9' }.take(5), portInvalid = false) }
     }
 
     /** 提交端口；范围错误只在本地提示，core 侧的拒绝按 ErrorCode 报告。 */

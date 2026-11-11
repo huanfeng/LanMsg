@@ -35,7 +35,7 @@ class SettingsViewModelTest {
     private val initial = SettingsDto(
         deviceName = "phone", downloadDir = "/d", autoImageMax = 10uL, autoFileMax = 0uL,
         autoFileWifiOnly = true, localsendEnabled = false, unicastTargets = emptyList(),
-        backgroundMode = BackgroundMode.REALTIME, localsendListening = null, localsendPort = 53317u,
+        backgroundMode = BackgroundMode.REALTIME, localsendListening = null, localsendPort = 53317u, autoCheckUpdate = true,
     )
     private var failSet = false
     private var stations = emptyList<uniffi.lanmsg_api.StationView>()

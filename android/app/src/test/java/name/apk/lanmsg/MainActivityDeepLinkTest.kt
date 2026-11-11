@@ -10,6 +10,8 @@ import org.junit.runner.RunWith
 class MainActivityDeepLinkTest {
     @Test fun allows_requests_and_chat_with_conversation() {
         assertTrue(MainActivity.isAllowedDeepLink("requests"))
+        // 更新通知点击进设置页（T23b）
+        assertTrue(MainActivity.isAllowedDeepLink("settings"))
         assertTrue(MainActivity.isAllowedDeepLink("chat/c1"))
         assertTrue(MainActivity.isAllowedDeepLink("chat/a%20b"))
         // %252F 单次解码后是字面量 "%2F"（不含 '/'），按现有语义放行；此行固定该行为，防止改成多次解码
@@ -18,7 +20,6 @@ class MainActivityDeepLinkTest {
     }
 
     @Test fun rejects_other_pages_and_malformed_chat() {
-        assertFalse(MainActivity.isAllowedDeepLink("settings"))
         assertFalse(MainActivity.isAllowedDeepLink("pair/host"))
         assertFalse(MainActivity.isAllowedDeepLink("forward/x"))
         assertFalse(MainActivity.isAllowedDeepLink("chat/"))

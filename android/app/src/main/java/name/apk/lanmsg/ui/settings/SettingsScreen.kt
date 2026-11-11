@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,11 +19,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -57,6 +60,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import kotlinx.coroutines.launch
+import name.apk.lanmsg.BuildConfig
 import name.apk.lanmsg.R
 import name.apk.lanmsg.ServiceLocator
 import name.apk.lanmsg.service.BatteryGuidance
@@ -70,6 +74,7 @@ import name.apk.lanmsg.ui.theme.LanMsgButtons
 import name.apk.lanmsg.ui.theme.LanMsgColors
 import name.apk.lanmsg.ui.theme.LanMsgControls
 import uniffi.lanmsg_api.BackgroundMode
+import uniffi.lanmsg_api.UpdateCheckView
 
 @Composable
 fun SettingsScreen(onBack: () -> Unit, onOpenNetwork: () -> Unit) {
@@ -78,18 +83,31 @@ fun SettingsScreen(onBack: () -> Unit, onOpenNetwork: () -> Unit) {
             initializer { SettingsViewModel(ServiceLocator.coreHolder.api, ServiceLocator.localPrefs, ServiceLocator.importer) }
         },
     )
+    val uv: UpdateViewModel = viewModel(
+        factory = viewModelFactory {
+            initializer { UpdateViewModel(ServiceLocator.coreHolder.api) }
+        },
+    )
     val state by vm.state.collectAsStateWithLifecycle()
+    val ustate by uv.state.collectAsStateWithLifecycle()
     // 从网络设置页返回时，LocalSend 等设置可能已被改写，重新读取避免整体回写时覆盖
     LifecycleResumeEffect(Unit) {
         vm.reload()
         onPauseOrDispose {}
     }
-    SettingsContent(state, vm, onBack, onOpenNetwork)
+    SettingsContent(state, vm, ustate, uv, onBack, onOpenNetwork)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onBack: () -> Unit, onOpenNetwork: () -> Unit) {
+fun SettingsContent(
+    state: SettingsViewModel.UiState,
+    vm: SettingsViewModel,
+    ustate: UpdateViewModel.UiState,
+    uv: UpdateViewModel,
+    onBack: () -> Unit,
+    onOpenNetwork: () -> Unit,
+) {
     val c = LanMsgColors.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -102,6 +120,17 @@ fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onB
             snackbar.showSnackbar(clearedText)
             vm.clearedShown()
         }
+    }
+    // 检查更新结果里的两种“无对话框”情况：已是最新 / 检查失败
+    val upToDateText = stringResource(R.string.settings_check_update_up_to_date)
+    val failedText = stringResource(R.string.settings_check_update_failed)
+    LaunchedEffect(ustate.upToDate, ustate.failed) {
+        when {
+            ustate.upToDate -> snackbar.showSnackbar(upToDateText)
+            ustate.failed -> snackbar.showSnackbar(failedText)
+            else -> return@LaunchedEffect
+        }
+        uv.shown()
     }
 
     val needLocation = stringResource(R.string.settings_trusted_wifi_need_location)
@@ -225,6 +254,18 @@ fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onB
                     stringResource(R.string.settings_clear_outbox_desc, Format.size(state.outboxBytes)),
                 ) { confirmClear = true }
             }
+
+            SectionHeader(stringResource(R.string.settings_about))
+            Group {
+                SwitchRow(
+                    stringResource(R.string.settings_auto_update),
+                    settings.autoCheckUpdate,
+                    { v -> vm.update { it.copy(autoCheckUpdate = v) } },
+                    stringResource(R.string.settings_auto_update_desc),
+                )
+                Divider()
+                UpdateRow(ustate.checking, onClick = uv::checkUpdate)
+            }
             Box(Modifier.padding(bottom = 24.dp))
         }
 
@@ -245,6 +286,76 @@ fun SettingsContent(state: SettingsViewModel.UiState, vm: SettingsViewModel, onB
                 onDismiss = { confirmClear = false },
             )
         }
+        if (ustate.view != null) {
+            UpdateDialog(
+                view = ustate.view,
+                onOpenRelease = { url ->
+                    uv.dialogShown()
+                    openRelease(ctx, url)
+                },
+                onDismiss = uv::dialogShown,
+            )
+        }
+    }
+}
+
+/** 打开发布页（浏览器下载 APK）；无浏览器时提示失败。 */
+private fun openRelease(ctx: Context, url: String) {
+    try {
+        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (e: ActivityNotFoundException) {
+        Log.w("SettingsScreen", "No browser available for release page", e)
+    }
+}
+
+/** “有新版本”对话框：新版本号、更新说明，以及打开发布页的引导。 */
+@Composable
+private fun UpdateDialog(view: UpdateCheckView?, onOpenRelease: (String) -> Unit, onDismiss: () -> Unit) {
+    val c = LanMsgColors.current
+    val info = view?.update ?: return
+    val notes = info.notes.trim()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.update_available_title, info.version)) },
+        text = {
+            Column {
+                if (notes.isNotEmpty()) {
+                    Text(stringResource(R.string.update_notes_title), color = c.inkMuted, style = MaterialTheme.typography.labelLarge)
+                    Text(notes, color = c.ink, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onOpenRelease(view.releaseUrl) }, colors = LanMsgButtons.text()) {
+                Text(stringResource(R.string.update_available_open_release))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, colors = LanMsgButtons.text()) {
+                Text(stringResource(R.string.update_available_later))
+            }
+        },
+    )
+}
+
+/** “检查更新”行：左侧标题与当前版本，右侧检查中显示进度圈。 */
+@Composable
+private fun UpdateRow(checking: Boolean, onClick: () -> Unit) {
+    val c = LanMsgColors.current
+    Row(
+        Modifier.fillMaxWidth().clickable(enabled = !checking, onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(stringResource(R.string.settings_check_update), color = c.ink, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                stringResource(R.string.settings_current_version, BuildConfig.VERSION_NAME),
+                color = c.inkMuted,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        if (checking) CircularProgressIndicator(color = LanMsgControls.progress, modifier = Modifier.size(20.dp))
     }
 }
 
