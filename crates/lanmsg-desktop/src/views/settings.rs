@@ -101,10 +101,27 @@ pub fn storage_dto(
     Some(dto)
 }
 
-/// 网络组：只替换 LocalSend 开关与单播通告目标；目标有非法行返回 None。
-pub fn network_dto(base: &SettingsDto, localsend: bool, targets: &str) -> Option<SettingsDto> {
+/// LocalSend 端口可填范围（与 core 的 SetSettings 校验一致）。
+const LS_PORT_RANGE: std::ops::RangeInclusive<u16> = 1024..=65535;
+
+/// 解析 LocalSend 端口输入：1024–65535 的整数，其余为 None。
+pub fn parse_ls_port(s: &str) -> Option<u16> {
+    s.trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|p| LS_PORT_RANGE.contains(p))
+}
+
+/// 网络组：只替换 LocalSend 开关、端口与单播通告目标；目标有非法行或端口非法返回 None。
+pub fn network_dto(
+    base: &SettingsDto,
+    localsend: bool,
+    port: &str,
+    targets: &str,
+) -> Option<SettingsDto> {
     let mut dto = base.clone();
     dto.localsend_enabled = localsend;
+    dto.localsend_port = parse_ls_port(port)?;
     dto.unicast_targets = parse_targets(targets).ok()?;
     Some(dto)
 }
@@ -360,6 +377,7 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
     let file_mb = signal(mb_text(init.auto_file_max));
     let wifi_only = signal(init.auto_file_wifi_only);
     let localsend = signal(init.localsend_enabled);
+    let ls_port = signal(init.localsend_port.to_string());
     let targets = signal(init.unicast_targets.join("\n"));
     let auto_start = signal(autostart::is_enabled());
 
@@ -376,6 +394,7 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
         let saved_file = saved.map(|s| s.as_ref().map_or(0, |s| s.auto_file_max));
         file_mb.map(move |v| resolve_mb(v, saved_file.get()).is_some())
     };
+    let ls_port_ok = ls_port.map(|p| parse_ls_port(p).is_some());
     let targets_err = targets.map(|v| parse_targets(v).err().unwrap_or_default());
     let targets_ok = targets_err.map(|e| e.is_empty());
     let not = |ok: Signal<bool>| ok.map(|v| !*v);
@@ -422,7 +441,7 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
             match saved.get() {
                 None => GroupState::Clean,
                 Some(b) => group_state(
-                    network_dto(&b, localsend.get(), &targets.get()).as_ref(),
+                    network_dto(&b, localsend.get(), &ls_port.get(), &targets.get()).as_ref(),
                     &b,
                     false,
                 ),
@@ -551,6 +570,16 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
         ),
         localsend_busy_note(ui),
         field(
+            strings::SETTINGS_LS_PORT,
+            Element::text_input(ls_port, "53317")
+                .height(style::CONTROL_H)
+                .width(120),
+            vec![
+                note(strings::SETTINGS_LS_PORT_HINT),
+                error_note(strings::SETTINGS_LS_PORT_INVALID, not(ls_port_ok)),
+            ],
+        ),
+        field(
             strings::SETTINGS_TARGETS,
             Element::text_input(targets, strings::SETTINGS_TARGETS_PLACEHOLDER)
                 .multiline()
@@ -563,7 +592,7 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
         ),
         group_footer(network_state, move |_| {
             let Some(b) = saved.get() else { return };
-            if let Some(dto) = network_dto(&b, localsend.get(), &targets.get()) {
+            if let Some(dto) = network_dto(&b, localsend.get(), &ls_port.get(), &targets.get()) {
                 let name = saved_name.get();
                 ui_network.act(|m| m.save_settings(dto, &name));
             }
@@ -788,13 +817,29 @@ mod tests {
         assert_eq!(s.localsend_enabled, base.localsend_enabled);
         assert_eq!(s.unicast_targets, base.unicast_targets);
 
-        let n = network_dto(&base, false, "10.1.1.1\n10.2.0.0/24").expect("合法");
+        let n = network_dto(&base, false, "53317", "10.1.1.1\n10.2.0.0/24").expect("合法");
         assert!(!n.localsend_enabled);
         assert_eq!(n.unicast_targets, vec!["10.1.1.1", "10.2.0.0/24"]);
         assert_eq!(n.download_dir, base.download_dir);
         assert_eq!(n.auto_file_max, base.auto_file_max);
         assert_eq!(n.device_name, base.device_name);
-        assert!(network_dto(&base, true, "bad").is_none());
+        assert!(network_dto(&base, true, "53317", "bad").is_none());
+    }
+
+    #[test]
+    fn parse_ls_port_accepts_1024_to_65535_only() {
+        assert_eq!(parse_ls_port("53317"), Some(53317));
+        assert_eq!(parse_ls_port(" 1024 "), Some(1024));
+        assert_eq!(parse_ls_port("65535"), Some(65535));
+        for bad in ["1023", "0", "65536", "-1", "abc", "", "80.5"] {
+            assert_eq!(parse_ls_port(bad), None, "{bad}");
+        }
+        let base = dto();
+        assert!(network_dto(&base, true, "1023", "").is_none());
+        assert_eq!(
+            network_dto(&base, true, "40000", "").map(|d| d.localsend_port),
+            Some(40000)
+        );
     }
 
     #[test]
@@ -804,7 +849,7 @@ mod tests {
         // 显示名改了但 DTO 没变（个人组）
         assert_eq!(group_state(Some(&base), &base, true), GroupState::Dirty);
         assert_eq!(group_state(None, &base, false), GroupState::Invalid);
-        let n = network_dto(&base, true, "10.0.0.1").expect("合法");
+        let n = network_dto(&base, true, "53317", "10.0.0.1").expect("合法");
         assert_eq!(group_state(Some(&n), &base, false), GroupState::Clean);
     }
 

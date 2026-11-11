@@ -776,3 +776,35 @@ async fn open_dm_with_a_localsend_pseudo_device_creates_the_conversation() {
         other => panic!("期望 Conversations，实际 {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn blocked_localsend_peer_is_hidden_from_peer_list_and_cannot_be_opened() {
+    let mut n = started().await;
+    let app = App::start("PhoneApp").await;
+    app.announce_to(&n).await;
+    let device = match n
+        .wait_event(|e| matches!(e, Event::PeerOnline { .. }), 5)
+        .await
+    {
+        Event::PeerOnline { peer } => peer.device_id,
+        other => panic!("期望 PeerOnline，实际 {other:?}"),
+    };
+    // 对端发来请求并被屏蔽；它在发现表里仍然在线
+    let result = spawn_send_text(&app, &n, "spam");
+    let req = incoming_request(&mut n).await;
+    n.call(Request::RespondRequest {
+        request: req.request,
+        action: RequestAction::Block,
+    })
+    .await;
+    let _ = result.await;
+    match n.call(Request::ListPeers).await {
+        Response::Peers { value } => assert!(!value.iter().any(|p| p.device_id == device)),
+        other => panic!("期望 Peers，实际 {other:?}"),
+    }
+    let err = n
+        .try_call(Request::OpenDm { user: device })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotFound);
+}

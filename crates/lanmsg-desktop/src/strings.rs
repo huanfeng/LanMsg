@@ -475,8 +475,17 @@ pub const TUNNEL_TAILSCALE: &str = "Tailscale";
 pub const TUNNEL_ZEROTIER: &str = "ZeroTier";
 pub const TUNNEL_WIREGUARD: &str = "WireGuard";
 pub const TUNNEL_OTHER: &str = "隧道";
-pub const LOCALSEND_PORT_BUSY: &str =
-    "53317 端口被占用（可能正在运行 LocalSend），只能向 LocalSend 设备发送";
+pub const SETTINGS_LS_PORT: &str = "LocalSend 端口";
+pub const SETTINGS_LS_PORT_HINT: &str =
+    "默认 53317；改端口后，使用默认端口的设备可能无法自动发现本机";
+pub const SETTINGS_LS_PORT_INVALID: &str = "端口须在 1024–65535 之间";
+
+/// LocalSend 端口被占用的提示（带实际端口）：本机可能正在运行 LocalSend，可改用其他端口。
+pub fn localsend_port_busy(port: u16) -> String {
+    format!(
+        "{port} 端口被占用（本机可能正在运行 LocalSend），暂时只能向 LocalSend 设备发送；可在下方改用其他端口"
+    )
+}
 
 /// 扫描进行中的提示。
 pub fn net_scanning(cidr: &str) -> String {

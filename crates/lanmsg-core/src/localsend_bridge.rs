@@ -334,7 +334,7 @@ impl LocalSendBridge {
     }
 
     /// 按伪设备 ID（`PeerView.device_id`）打开 LocalSend 会话：在线对端按需建立会话，
-    /// 库里已有的对端直接返回；都不是返回 `None`。
+    /// 库里已有的对端直接返回；都不是返回 `None`；已屏蔽的对端返回 `NotFound`。
     pub fn open_by_pseudo(&self, device: &DeviceId) -> Result<Option<ConvId>, CoreError> {
         let found = {
             let g = lock(&self.inner.seen);
@@ -343,18 +343,27 @@ impl LocalSendBridge {
                 .map(|(fp, s)| (fp.clone(), s.peer.clone()))
         };
         if let Some((fp, peer)) = found {
+            // 已屏蔽的对端不能再被打开会话（它仍可能在发现表里在线）
+            if self
+                .inner
+                .deps
+                .store
+                .get_ls_peer(&fp)?
+                .is_some_and(|r| r.blocked)
+            {
+                return Err(CoreError::NotFound("peer is blocked".into()));
+            }
             self.inner.ensure_peer(&peer, &fp, false, true)?;
             return Ok(Some(ConvId::localsend(&fp)));
         }
-        Ok(self
-            .inner
-            .deps
-            .store
-            .ls_peer_by_pseudo(device)?
-            .map(|r| ConvId::localsend(&r.fingerprint)))
+        match self.inner.deps.store.ls_peer_by_pseudo(device)? {
+            Some(r) if r.blocked => Err(CoreError::NotFound("peer is blocked".into())),
+            Some(r) => Ok(Some(ConvId::localsend(&r.fingerprint))),
+            None => Ok(None),
+        }
     }
 
-    /// 当前在线的 LocalSend 设备（并入 `ListPeers`）。
+    /// 当前在线的 LocalSend 设备（并入 `ListPeers`）；已屏蔽的对端不列出。
     pub fn online_peer_views(&self) -> Vec<PeerView> {
         let list: Vec<(String, LsPeer)> = lock(&self.inner.seen)
             .iter()
@@ -362,13 +371,17 @@ impl LocalSendBridge {
             .map(|(fp, s)| (fp.clone(), s.peer.clone()))
             .collect();
         list.into_iter()
-            .map(|(fp, peer)| {
+            .filter_map(|(fp, peer)| {
                 let existing = self.inner.deps.store.get_ls_peer(&fp).ok().flatten();
+                // 已屏蔽的对端不再出现在在线设备列表里
+                if existing.as_ref().is_some_and(|r| r.blocked) {
+                    return None;
+                }
                 let row = self
                     .inner
                     .row_from_peer(&peer, &fp, existing.as_ref(), false);
                 let addr = std::net::SocketAddr::new(peer.ip, peer.info.port).to_string();
-                self.inner.peer_view(&row, addr)
+                Some(self.inner.peer_view(&row, addr))
             })
             .collect()
     }

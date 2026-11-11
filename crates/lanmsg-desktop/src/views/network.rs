@@ -64,14 +64,19 @@ pub fn scan_cidr_for(iface: &InterfaceView) -> String {
     }
 }
 
-/// LocalSend 端口被占用的提示（开关下方）；监听状态由 core 的 `localsend_listening` 给出。
+/// LocalSend 是否因端口被占用而没在监听：开关已开且 core 报告 `localsend_listening == Some(false)`。
+pub fn localsend_port_busy(s: &lanmsg_api::types::SettingsDto) -> bool {
+    s.localsend_enabled && s.localsend_listening == Some(false)
+}
+
+/// LocalSend 端口被占用的提示（开关下方，带实际端口）；监听状态由 core 的 `localsend_listening` 给出。
 pub fn localsend_busy_note(ui: &UiState) -> Element {
-    let busy = ui.derive(|m| {
-        m.settings
-            .as_ref()
-            .is_some_and(|s| s.localsend_enabled && s.localsend_listening == Some(false))
+    let text = ui.derive(|m| match &m.settings {
+        Some(s) if localsend_port_busy(s) => strings::localsend_port_busy(s.localsend_port),
+        _ => String::new(),
     });
-    Element::label(strings::LOCALSEND_PORT_BUSY)
+    let busy = text.map(|t| !t.is_empty());
+    Element::label_signal(text)
         .font_size(style::FONT_META)
         .fg_role(Role::Warning)
         .width_match()
@@ -295,6 +300,24 @@ mod tests {
             prefix,
             tunnel_kind: None,
         }
+    }
+
+    #[test]
+    fn localsend_port_busy_only_when_enabled_and_not_listening() {
+        let mut s = crate::fixtures::demo_model(crate::fixtures::DemoPage::Settings)
+            .settings
+            .expect("settings");
+        s.localsend_enabled = true;
+        s.localsend_listening = Some(false);
+        assert!(localsend_port_busy(&s));
+        s.localsend_listening = Some(true);
+        assert!(!localsend_port_busy(&s));
+        // 未知（None）或开关关闭都不提示
+        s.localsend_listening = None;
+        assert!(!localsend_port_busy(&s));
+        s.localsend_listening = Some(false);
+        s.localsend_enabled = false;
+        assert!(!localsend_port_busy(&s));
     }
 
     #[test]

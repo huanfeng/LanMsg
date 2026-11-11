@@ -862,6 +862,10 @@ pub fn demo_model(p: DemoPage) -> Model {
         }
         DemoPage::Network => {
             m.page = Page::Settings;
+            // 端口被占用：显示 LocalSend 提示
+            if let Some(s) = m.settings.as_mut() {
+                s.localsend_listening = Some(false);
+            }
             m.scan_result = Some(crate::strings::net_scan_result(253, 2));
         }
         DemoPage::Devices => {
