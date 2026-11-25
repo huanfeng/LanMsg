@@ -48,11 +48,13 @@
 | `main` 的 CI（Linux / Windows / Android 三 job） | `b3a797f` 上全绿；之后的 `1983e3c` 因账单问题未能运行（见第 6 节） |
 | Release 流水线 dry-run（`workflow_dispatch`，`dry_run=true`） | `main` 上 8 个构建 job 全绿（Linux 桌面与无头 × 双架构、Android APK、macOS 通用、Windows × 双架构），Publish 按预期跳过 |
 | `scripts/e2e-acceptance.sh`（合入全部收尾后的 main，先重新构建二进制） | ACCEPTANCE OK，13 个场景全部 PASS（文字、二维码/短码配对、离线补齐、陌生人请求、文件/文件夹传输与续传、吊销、撤回已读、回环吞吐） |
+| 网页临时会话真实浏览器端到端（Chromium headless，非 CI；`docs/superpowers/reports/p5-web-e2e/`） | key 模式 11/11、code 模式 13/13：握手与宿主允许、双向文字、3.5 MB 中文名加密上传、5 MB 宿主文件解密下载（SHA-256 均一致）、宿主停止后页面显示“已结束”、无 console 错误 |
 
 ## 3. 独立审阅与安全结论
 
 - 每个任务 2–5 个提交（含审阅修复轮），审阅发现并修复的典型问题：LocalSend 桥的 HTTPS 证书 pin 与 IP 绑定、PeerOnline 事件绕过屏蔽、Web 会话 seq 窗口与握手 IP 绑定、地址簿防滥用上限、`netsh` 输出 OEM 解码与规则块判断、Windows 命名管道“已有实例”识别。
 - T23a（应用内更新）单独做了安全审阅：安装动作全部为数组式 argv、无 shell 拼接；下载先校验 SHA256 再落盘（缺校验和直接拒绝，fail-closed）；下载地址默认硬编码 GitHub 固定仓库，`LANMSG_UPDATE_URL` 仅作环境变量覆盖；rustls 统一 aws-lc-rs，依赖树中已无 ring。已知信任边界：`SHA256SUMS` 与安装包同源，无独立签名（与 wind-installer 现有约束一致）。
+- 真实浏览器首轮跑出的唯一问题：自动请求 `/favicon.ico` 得到 404（无害的 console 噪声）。已加同源 `favicon.svg` 并在页面引用（CSP 的 `img-src` 不含 `data:`），带单测。这也是网页端 JS 第一次在真实浏览器里整条链路运行，此前只有密码学向量与 Rust 侧集成测试。
 - 实施中发现的运行时必败缺陷（审阅与冒烟初看都漏掉）：更新客户端的 TLS 构造在 `rustls-tls-no-provider` 下缺根证书，更新检查与下载全部失败；已补 `webpki-roots` 并带回归测试。教训：新增外部调用必须做真实运行冒烟，而不是只看编译与单测。
 - 收尾审阅：`LANMSG_KEYSTORE=file`（为 Windows CI 并发凭据写入而加的测试开关）收敛为仅 debug 构建生效；`SHA256SUMS` 解析容错与资产名路径校验；LocalSend 屏蔽判定在存储出错时 fail-closed。
 - 遗留低项（均不阻塞）：`localsend_bridge.rs` 另有 3 处 `.ok().flatten()` 仍是 fail-open；Windows 资产名未拦保留名/`:`（只有发布者能触发）；`SHA256SUMS` 的 `*` 二进制模式前缀未兼容（当前流水线用文本模式，不触发）；Android 保存按钮复用 `net_unicast_save` 键名；更新断线复位后 core 侧 `update_busy` 可能仍为真（可恢复错误）。
@@ -92,7 +94,7 @@ P5 功能对内存的影响（同一进程，单独运行）：启动 2.3 MB；�
 以下为 P5 计划“阶段验收”中的手工项，**均未执行**，需要你在真机上完成并记录设备型号与版本：
 
 1. **LocalSend 互操作**：LanMsg ↔ LocalSend 官方 App（Android 与 Windows 各一）互发文字与 3 个文件（含中文名、一个大于 1 GB）；LocalSend 侧能看到 LanMsg 设备；本机同时运行 LocalSend 时设置页出现端口占用提示且仍可向 LocalSend 发送。
-2. **Web 临时会话**：Android Chrome 扫码（key 模式）与 iOS Safari 手输配对码（code 模式）各完成一次双向传输；30 分钟空闲后页面显示“会话已结束”；访客需在本机逐个允许。
+2. **Web 临时会话**：Android Chrome 扫码（key 模式）与 iOS Safari 手输配对码（code 模式）各完成一次双向传输；30 分钟空闲后页面显示“会话已结束”；访客需在本机逐个允许。（桌面 Chromium 上的两种模式与“宿主停止后已结束”已由第 2 节的浏览器 e2e 覆盖；仍需真机浏览器、真实 Wi-Fi 与 30 分钟空闲、大于 1 GB 文件的确认弹窗。）
 3. **中转站**：台式机建站放入 3 个文件（引用与复制各有）→ Android 查看清单并下载；台式机关机后 Android 显示“源离线”；Android 往中转站上传一张照片，台式机目录出现该文件。
 4. **跨网段**：两台经 Tailscale 等互通但不在同一局域网的电脑，手动添加后互发消息，联系人行显示“VPN”角标；第三台本人设备经地址交换自动连上。
 5. **安装渠道**：Windows 安装包与 scoop（`scoop install <本地 json>`）各装一次，并核对防火墙一键放行（`netsh` 的显示/添加/删除，安装器重复运行幂等，中文目录）；Ubuntu `curl | sh` 安装、NAS（或容器）无头版安装；Android APK 安装；macOS 记为外部依赖。
