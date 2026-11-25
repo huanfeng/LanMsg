@@ -23,6 +23,10 @@ if command -v actionlint >/dev/null 2>&1; then
 else
     echo "actionlint not found; skipping workflow lint"
 fi
+# CI 与 Release 的 cargo-ndk 版本必须一致
+ndk_ci=$(grep -o 'cargo-ndk --locked --force --version [0-9.]*' .github/workflows/ci.yml | awk '{print $NF}')
+ndk_rel=$(grep -o 'cargo-ndk --locked --force --version [0-9.]*' .github/workflows/release.yml | awk '{print $NF}')
+[ -n "$ndk_ci" ] && [ "$ndk_ci" = "$ndk_rel" ] || fail "cargo-ndk version mismatch or unpinned (ci=$ndk_ci release=$ndk_rel)"
 # 发布资产名必须同时出现在 release.yml 与引用它们的脚本/模板中
 for name in lanmsg-windows-x64.zip lanmsg-windows-arm64.zip; do
     grep -q "$name" packaging/scoop/lanmsg.json || fail "scoop template lacks $name"
