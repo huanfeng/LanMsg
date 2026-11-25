@@ -26,6 +26,12 @@ pub const WEB_PORT: u16 = 53321;
 /// LocalSend 适配端口。
 pub const LOCALSEND_PORT: u16 = 53317;
 
+/// LocalSend 端口可配置范围的下界（含）。
+pub const LOCALSEND_PORT_MIN: u16 = 1024;
+
+/// LocalSend 端口可配置范围的上界（含）。
+pub const LOCALSEND_PORT_MAX: u16 = 65535;
+
 /// LocalSend 组播地址。
 pub const LOCALSEND_MCAST: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 167);
 
