@@ -227,14 +227,35 @@ pub enum Effect {
 }
 
 /// 按渠道挑选 Release 资产名；没有适配的资产返回 None。
-/// 规则：安装器版取 .exe（wind-installer 产物）、Linux 渠道取 install.sh、macOS 取 .dmg；
-/// scoop 渠道不需要下载（scoop 自行获取）。
+/// 规则：安装器版按 CPU 架构取 `lanmsg-windows-<x64|arm64>-setup.exe`，找不到精确名时
+/// 回退“唯一的 .exe”（多个 .exe 且无精确名则返回 None）；Linux 渠道取 install.sh、
+/// macOS 取 .dmg；scoop 渠道不需要下载（scoop 自行获取）。
 pub fn pick_update_asset(assets: &[UpdateAsset], channel: InstallChannel) -> Option<String> {
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    };
+    pick_update_asset_for_arch(assets, channel, arch)
+}
+
+fn pick_update_asset_for_arch(
+    assets: &[UpdateAsset],
+    channel: InstallChannel,
+    arch: &str,
+) -> Option<String> {
     match channel {
-        InstallChannel::WindowsInstaller => assets
-            .iter()
-            .find(|a| a.name.ends_with(".exe"))
-            .map(|a| a.name.clone()),
+        InstallChannel::WindowsInstaller => {
+            let exact = format!("lanmsg-windows-{arch}-setup.exe");
+            if let Some(a) = assets.iter().find(|a| a.name == exact) {
+                return Some(a.name.clone());
+            }
+            let mut exes = assets.iter().filter(|a| a.name.ends_with(".exe"));
+            match (exes.next(), exes.next()) {
+                (Some(only), None) => Some(only.name.clone()),
+                _ => None,
+            }
+        }
         InstallChannel::LinuxSh => assets
             .iter()
             .find(|a| a.name == "install.sh")
@@ -609,6 +630,10 @@ impl Model {
         self.manual_connecting = false;
         self.web = None;
         self.web_open = false;
+        // 更新检查/下载的回复在断线后不会再来，不复位会让设置页按钮永久禁用。
+        self.update_checking = false;
+        self.update_downloading = false;
+        self.update_progress = None;
     }
 
     /// 连接（重连）后的全量刷新。
@@ -4785,6 +4810,49 @@ mod tests {
             None
         );
         assert_eq!(pick_update_asset(&assets, InstallChannel::Manual), None);
+    }
+
+    #[test]
+    fn pick_update_asset_prefers_exact_arch_name() {
+        let mk = |n: &str| UpdateAsset {
+            name: n.into(),
+            size: 1,
+            url: String::new(),
+        };
+        let both = vec![
+            mk("other.exe"),
+            mk("lanmsg-windows-arm64-setup.exe"),
+            mk("lanmsg-windows-x64-setup.exe"),
+        ];
+        let ch = InstallChannel::WindowsInstaller;
+        assert_eq!(
+            pick_update_asset_for_arch(&both, ch, "x64").as_deref(),
+            Some("lanmsg-windows-x64-setup.exe")
+        );
+        assert_eq!(
+            pick_update_asset_for_arch(&both, ch, "arm64").as_deref(),
+            Some("lanmsg-windows-arm64-setup.exe")
+        );
+        // 无精确名：唯一 .exe 回退，多个 .exe 返回 None。
+        let one = vec![mk("a.exe"), mk("install.sh")];
+        assert_eq!(
+            pick_update_asset_for_arch(&one, ch, "x64").as_deref(),
+            Some("a.exe")
+        );
+        let many = vec![mk("a.exe"), mk("b.exe")];
+        assert_eq!(pick_update_asset_for_arch(&many, ch, "x64"), None);
+    }
+
+    #[test]
+    fn disconnect_resets_update_in_flight_flags() {
+        let mut m = Model::new();
+        m.update_checking = true;
+        m.update_downloading = true;
+        m.update_progress = Some((1, 2));
+        m.apply(UiMsg::Disconnected("gone".into()));
+        assert!(!m.update_checking);
+        assert!(!m.update_downloading);
+        assert!(m.update_progress.is_none());
     }
 
     #[test]
