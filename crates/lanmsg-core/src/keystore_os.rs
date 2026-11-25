@@ -317,6 +317,11 @@ impl KeyStore for OsKeyStore {
     }
 }
 
+/// 是否强制使用文件密钥库：仅 debug 构建且环境变量为 `file` 时成立。
+fn file_forced(env: Option<&str>, debug: bool) -> bool {
+    debug && env == Some("file")
+}
+
 /// 构造平台密钥库：服务名 `LanMsg-<blake3(规范化 data_dir) 前 8 位 hex>`，
 /// 文件库目录为 `<data_dir>/keys`，后端标记为 `<data_dir>/keystore.backend`。
 ///
@@ -330,12 +335,15 @@ pub fn os_keystore(data_dir: &Path) -> Arc<dyn KeyStore> {
     // LANMSG_KEYSTORE=file：强制只用文件库（primary=None，resolve 恒走文件分支，
     // 不写后端标记）。CI 并发环境下 Windows 凭据 API 可瞬时 Access denied，probe
     // 成功后 os 模式读写仍可能失败，daemon 随即启动失败；文件库不受影响。
-    // 注意：数据目录已选定系统库（标记=os）的用户误设此变量会让旧密钥不可见
-    // （文件库为空时将重新生成身份），仅供测试与特殊环境使用。
+    // 该开关仅在 debug 构建生效：release 构建忽略，避免误设的用户静默重建身份。
+    let env = std::env::var("LANMSG_KEYSTORE").ok();
     let primary: Option<Box<dyn SecretBackend>> =
-        if std::env::var("LANMSG_KEYSTORE").ok().as_deref() == Some("file") {
+        if file_forced(env.as_deref(), cfg!(debug_assertions)) {
             None
         } else {
+            if env.as_deref() == Some("file") {
+                tracing::warn!("LANMSG_KEYSTORE=file is ignored in release builds");
+            }
             Some(Box::new(KeyringBackend::new(service)))
         };
     Arc::new(OsKeyStore::new(
@@ -348,6 +356,14 @@ pub fn os_keystore(data_dir: &Path) -> Arc<dyn KeyStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_forced_only_in_debug_with_file_value() {
+        assert!(file_forced(Some("file"), true));
+        assert!(!file_forced(Some("file"), false));
+        assert!(!file_forced(Some("os"), true));
+        assert!(!file_forced(None, true));
+    }
     use std::collections::HashMap;
     use std::sync::atomic::AtomicUsize;
 
