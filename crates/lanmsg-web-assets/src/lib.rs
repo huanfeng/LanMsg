@@ -32,6 +32,17 @@ mod tests {
     }
 
     #[test]
+    fn favicon_is_served_and_linked_from_index() {
+        // 浏览器会自动请求图标；页面显式引用同源 SVG，避免 CSP 下的 404/违规噪声。
+        let (icon, mime) = get("/favicon.svg").expect("favicon.svg embedded");
+        assert_eq!(mime, "image/svg+xml");
+        assert!(icon.starts_with(b"<svg"));
+        let (index, _) = get("/").expect("index embedded");
+        let html = std::str::from_utf8(index).expect("index is utf-8");
+        assert!(html.contains(r#"href="favicon.svg""#));
+    }
+
+    #[test]
     fn traversal_rejected() {
         assert!(get("/../Cargo.toml").is_none());
     }
