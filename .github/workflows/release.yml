@@ -118,6 +118,7 @@ jobs:
   linux-desktop:
     name: Linux desktop ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    # focal 已过标准支持期：apt 归档可用性与 glibc 基线（切 22.04 会抬高）需在后续发布前复核
     container: ubuntu:20.04
     strategy:
       fail-fast: false
@@ -238,7 +239,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-ndk
-        run: command -v cargo-ndk >/dev/null || cargo install cargo-ndk --locked
+        run: cargo ndk --version 2>/dev/null | grep -q " 4.1.2$" || cargo install cargo-ndk --locked --force --version 4.1.2
 
       # Release packages must be signed with the shared key, otherwise they cannot update in place.
       - name: Write signing config

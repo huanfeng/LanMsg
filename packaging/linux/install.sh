@@ -116,7 +116,11 @@ main() {
 
     work=$(mktemp -d)
     echo "Downloading $tarball"
-    fetch "$base/$tarball" "$work/$tarball" || { echo "error: failed to download $tarball" >&2; exit 1; }
+    fetch "$base/$tarball" "$work/$tarball" || {
+        echo "error: failed to download $tarball" >&2
+        echo "hint: possible causes: the repository is private (anonymous download returns 404), the network is unreachable, LANMSG_BASE_URL is wrong, or the requested version does not exist. Set LANMSG_BASE_URL to a mirror or a local directory (file:// URL or http server) to install from elsewhere." >&2
+        exit 1
+    }
     fetch "$base/SHA256SUMS" "$work/SHA256SUMS" || { echo "error: failed to download SHA256SUMS" >&2; exit 1; }
     grep "  $tarball\$" "$work/SHA256SUMS" > "$work/SHA256SUMS.one" \
         || { echo "error: $tarball not listed in SHA256SUMS" >&2; exit 1; }
