@@ -387,11 +387,7 @@ pub(crate) async fn check_now() -> Result<UpdateCheckView, CoreError> {
 /// 失败路径都释放忙碌标志；返回 Ok 后结果经 `UpdateDownload*` 事件上报。
 pub(crate) async fn start_download(inner: &Arc<Inner>, asset: &str) -> Result<(), CoreError> {
     let asset = asset.trim();
-    if asset.is_empty() {
-        return Err(CoreError::InvalidArgument(
-            "asset name must not be empty".into(),
-        ));
-    }
+    validate_asset_name(asset)?;
     // 同一时刻只允许一个更新下载。
     if inner
         .update_busy
@@ -456,6 +452,8 @@ async fn download_task(inner: Arc<Inner>, asset: String) {
 
 /// 下载一个资产到 data_dir/updates/ 下：流式写 .part 并算 SHA256，校验通过后改名。
 async fn download_inner(inner: &Inner, asset: &str) -> Result<PathBuf, CoreError> {
+    // 纵深防御：.part 与改名目标都由资产名拼出，先拒绝可逃出 updates/ 的名字。
+    validate_asset_name(asset)?;
     // 重新拉取 release：保证 URL 与校验和新鲜。
     let release = fetch_release(&resolve_api_url()).await?;
     let Some(found) = release.assets.iter().find(|a| a.name == asset) else {
@@ -548,12 +546,29 @@ async fn download_inner(inner: &Inner, asset: &str) -> Result<PathBuf, CoreError
     Ok(final_path)
 }
 
+/// 资产名必须是单个安全文件名：非空、无路径分隔符、非 `.`/`..`、无 NUL。
+fn validate_asset_name(asset: &str) -> Result<(), CoreError> {
+    if asset.is_empty() {
+        return Err(CoreError::InvalidArgument(
+            "asset name must not be empty".into(),
+        ));
+    }
+    if asset == "." || asset == ".." || asset.contains(['/', '\\', '\0']) {
+        return Err(CoreError::InvalidArgument(format!(
+            "invalid asset name: {asset:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// 解析 SHA256SUMS 文本：行格式 `<64位hex>  <文件名>`（sha256sum 输出格式），按文件名匹配返回小写 hex。
 fn parse_sha256sums(text: &str, name: &str) -> Option<String> {
     for line in text.lines() {
+        // 空行、注释行或无法解析的行直接跳过，不影响后续条目。
         let mut it = line.split_whitespace();
-        let hash = it.next()?;
-        let fname = it.next()?;
+        let (Some(hash), Some(fname)) = (it.next(), it.next()) else {
+            continue;
+        };
         if fname == name && hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
             return Some(hash.to_ascii_lowercase());
         }
@@ -744,6 +759,22 @@ mod tests {
         assert_eq!(parse_sha256sums("nothex!!  a.zip\n", "a.zip"), None);
         assert_eq!(parse_sha256sums("deadbeef  b.zip\n", "b.zip"), None);
         let _ = text;
+    }
+
+    #[test]
+    fn sha256sums_skips_blank_comment_and_crlf_lines() {
+        let h = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let text = format!("\r\n# comment\r\n\r\nlonely\r\n{h}  a.zip\r\n\r\n");
+        assert_eq!(parse_sha256sums(&text, "a.zip").as_deref(), Some(h));
+        assert_eq!(parse_sha256sums("\n\n", "a.zip"), None);
+    }
+
+    #[test]
+    fn asset_name_validation_rejects_unsafe_names() {
+        for bad in ["", ".", "..", "a/b", "a\\b", "../x", "a\0b"] {
+            assert!(validate_asset_name(bad).is_err(), "{bad:?}");
+        }
+        assert!(validate_asset_name("lanmsg-windows-x64.zip").is_ok());
     }
 
     #[test]
