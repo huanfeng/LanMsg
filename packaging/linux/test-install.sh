@@ -105,6 +105,13 @@ if sh "$here/install.sh" --headless --version v0.0.0 --prefix "$tmp/prefix5" >/d
     fail "nonexistent version was accepted"
 fi
 
+echo "== download failure shows hint"
+if dl_out=$(LANMSG_BASE_URL="http://127.0.0.1:1/none" sh "$here/install.sh" --headless --prefix "$tmp/prefix7" 2>&1); then
+    fail "install from unreachable base url succeeded"
+fi
+echo "$dl_out" | grep -q "LANMSG_BASE_URL" || fail "download failure lacks LANMSG_BASE_URL hint"
+echo "$dl_out" | grep -q "private" || fail "download failure lacks private-repo hint"
+
 echo "== unsafe prefix rejected"
 for bad in "$tmp/with space" "$tmp/a|b" "$tmp/a&b" "$tmp/a\\b"; do
     if sh "$here/install.sh" --headless --prefix "$bad" >/dev/null 2>&1; then
