@@ -101,8 +101,9 @@ pub fn storage_dto(
     Some(dto)
 }
 
-/// LocalSend 端口可填范围（与 core 的 SetSettings 校验一致）。
-const LS_PORT_RANGE: std::ops::RangeInclusive<u16> = 1024..=65535;
+/// LocalSend 端口可填范围（常量定义在 proto，与 core 的 SetSettings 校验共用）。
+const LS_PORT_RANGE: std::ops::RangeInclusive<u16> =
+    lanmsg_proto::consts::LOCALSEND_PORT_MIN..=lanmsg_proto::consts::LOCALSEND_PORT_MAX;
 
 /// 解析 LocalSend 端口输入：1024–65535 的整数，其余为 None。
 pub fn parse_ls_port(s: &str) -> Option<u16> {
@@ -603,6 +604,7 @@ fn form(ui: &UiState, init: SettingsDto, remove_confirm: ConfirmState) -> Elemen
         field(
             strings::SETTINGS_LS_PORT,
             Element::text_input(ls_port, "53317")
+                .numeric()
                 .height(style::CONTROL_H)
                 .width(120),
             vec![

@@ -9,7 +9,7 @@ use lanmsg_api::types::{
     ApiError, ErrorCode, Event, InitMode, PairMethod, PairTarget, Request, Response, SelfInfo,
     SettingsDto, StatusDto,
 };
-use lanmsg_proto::consts::PAIR_TOKEN_TTL;
+use lanmsg_proto::consts::{LOCALSEND_PORT_MAX, LOCALSEND_PORT_MIN, PAIR_TOKEN_TTL};
 use lanmsg_proto::frame::Frame;
 use lanmsg_proto::ids::{BlobHash, ConvId, DeviceId, MsgId, UserId};
 use lanmsg_proto::types::{DeviceType, MsgBody, PairMethodWire, Status, SystemEvent};
@@ -842,7 +842,7 @@ async fn set_settings(inner: &Inner, settings: SettingsDto) -> Result<Response, 
     if settings.download_dir.trim().is_empty() {
         return Err(invalid_arg("download directory must not be empty".into()));
     }
-    if !(1024..=65535).contains(&settings.localsend_port) {
+    if !(LOCALSEND_PORT_MIN..=LOCALSEND_PORT_MAX).contains(&settings.localsend_port) {
         return Err(invalid_arg("localsend port must be 1024-65535".into()));
     }
 

@@ -378,7 +378,14 @@ impl LocalSendBridge {
             .collect();
         list.into_iter()
             .filter_map(|(fp, peer)| {
-                let existing = self.inner.deps.store.get_ls_peer(&fp).ok().flatten();
+                // fail-closed：查不到屏蔽状态时宁可不列出，与 open_by_pseudo 的 `?` 语义一致。
+                let existing = match self.inner.deps.store.get_ls_peer(&fp) {
+                    Ok(row) => row,
+                    Err(e) => {
+                        tracing::warn!("failed to load localsend peer, hiding it: {e}");
+                        return None;
+                    }
+                };
                 // 已屏蔽的对端不再出现在在线设备列表里
                 if existing.as_ref().is_some_and(|r| r.blocked) {
                     return None;
