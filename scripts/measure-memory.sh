@@ -6,7 +6,13 @@
 # 环境变量：
 #   LANMSG_BIN_DIR   二进制目录（默认 <仓库>/target/release；建议 release 构建）
 #   CPU_SECONDS      lanmsgd 空闲 CPU 观察窗口秒数（默认 30，0 跳过）
-#   THRESHOLD_KB     lanmsgd private 内存阈值（默认 15360）
+#   HEAP_THRESHOLD_KB  lanmsgd 匿名堆内存（Private_Dirty）阈值，超过即失败（默认 8192）。
+#                    这是真正由 LanMsg 代码持有的内存，增长就是回归；2026-11-25 同机实测
+#                    P3 版 ≈3.0 MB、P5 后 ≈3.7 MB（写入 1000 条消息后）。
+#   THRESHOLD_KB     lanmsgd private 总量（Private_Clean+Private_Dirty）参考线（默认 15360），
+#                    超过只告警不失败：其中 Private_Clean 含只被本进程映射的二进制代码页，
+#                    读数取决于“当时是否有别的进程同时映射同一个二进制”（同一状态实测在
+#                    2.2~15.8 MB 间摆动），不是可靠的回归信号；二进制变大（P5 后 +5 MB）也会抬高它。
 #   MSG_COUNT        第二次测量前写入的消息条数（默认 1000）
 #   RESULT_JSON      若设置，机器可读结果（JSON）另存到该文件
 #
@@ -14,8 +20,9 @@
 # 空闲 CPU 窗口 → 向“我的设备”会话写 MSG_COUNT 条 → 再等 <seconds> 秒测一次 →
 # 界面进程：有 DISPLAY 时真窗口常驻 10 秒后测量并 SIGTERM 验证 5 秒内退出；
 # 无 DISPLAY 时退化为离屏截图模式（--demo chats --screenshot）的峰值，仅作参考，不等于真窗口常驻内存。
-# 输出：首行显示缩放；每次测量一行 `lanmsgd private_kb=<n> pss_kb=<n> rss_kb=<n>`；
-# 末尾 `RESULT {json}`。lanmsgd private 超阈值或界面进程 5 秒内未退出则非零退出。
+# 输出：首行显示缩放；每次测量一行 `lanmsgd private_kb=<n> pss_kb=<n> rss_kb=<n> dirty_kb=<n>`；
+# 末尾 `RESULT {json}`。lanmsgd 匿名堆（dirty_kb）超 HEAP_THRESHOLD_KB 或界面进程 5 秒内未退出则非零退出；
+# private 总量超 THRESHOLD_KB 只打印 WARN。
 set -euo pipefail
 
 DATA_DIR="${1:?用法: measure-memory.sh <data_dir> [seconds=60]}"
@@ -28,6 +35,7 @@ e2e_resolve_bins release   # 目录：LANMSG_BIN_DIR > $CARGO_TARGET_DIR/release
 BIN_UI="$BIN_DIR/lanmsg"
 CPU_SECONDS="${CPU_SECONDS:-30}"
 THRESHOLD_KB="${THRESHOLD_KB:-15360}"
+HEAP_THRESHOLD_KB="${HEAP_THRESHOLD_KB:-8192}"
 MSG_COUNT="${MSG_COUNT:-1000}"
 
 for b in "$BIN_D" "$BIN_CLI" "$BIN_UI"; do
@@ -57,22 +65,24 @@ sample() {
     local pid="$1" pc pd
     pc=$(field "$pid" Private_Clean)
     pd=$(field "$pid" Private_Dirty)
-    echo "$((pc + pd)) $(field "$pid" Pss) $(field "$pid" Rss)"
+    echo "$((pc + pd)) $(field "$pid" Pss) $(field "$pid" Rss) $pd"
 }
 # CPU 时间（clock tick）：utime+stime。comm 可含空格，先去掉到最后一个 ')'。
 cpu_ticks() { sed 's/^.*) //' "/proc/$1/stat" | awk '{print $12 + $13}'; }
 
 RESULTS=()
 DPRIV_MAX=0
-record() { # name private pss rss
-    echo "$1 private_kb=$2 pss_kb=$3 rss_kb=$4"
-    RESULTS+=("{\"name\":\"$1\",\"private_kb\":$2,\"pss_kb\":$3,\"rss_kb\":$4}")
+DDIRTY_MAX=0
+record() { # name private pss rss [dirty]
+    echo "$1 private_kb=$2 pss_kb=$3 rss_kb=$4 dirty_kb=${5:-0}"
+    RESULTS+=("{\"name\":\"$1\",\"private_kb\":$2,\"pss_kb\":$3,\"rss_kb\":$4,\"dirty_kb\":${5:-0}}")
 }
 measure_daemon() { # label
-    local p s r
-    read -r p s r < <(sample "$DPID")
-    record "lanmsgd[$1]" "$p" "$s" "$r"
+    local p s r d
+    read -r p s r d < <(sample "$DPID")
+    record "lanmsgd[$1]" "$p" "$s" "$r" "$d"
     [ "$p" -gt "$DPRIV_MAX" ] && DPRIV_MAX=$p
+    [ "$d" -gt "$DDIRTY_MAX" ] && DDIRTY_MAX=$d
     return 0
 }
 
@@ -117,7 +127,7 @@ if [ -n "${DISPLAY:-}" ]; then
     UPID=$!
     sleep 10
     if kill -0 "$UPID" 2>/dev/null; then
-        read -r p s r < <(sample "$UPID")
+        read -r p s r _ < <(sample "$UPID")
         record "lanmsg[window,10s]" "$p" "$s" "$r"
         t0=$(cpu_ticks "$UPID")
         sleep 10
@@ -144,7 +154,7 @@ else
     mp=0; ms=0; mr=0; hwm=0
     while kill -0 "$UPID" 2>/dev/null; do
         if out=$(sample "$UPID" 2>/dev/null) && [ -n "$out" ]; then
-            read -r p s r <<<"$out"
+            read -r p s r _ <<<"$out"
             [ "$p" -gt "$mp" ] && mp=$p
             [ "$s" -gt "$ms" ] && ms=$s
             [ "$r" -gt "$mr" ] && mr=$r
@@ -166,9 +176,12 @@ JSON="{\"lanmsgd_mode\":\"$MODE\",\"display\":\"${DISPLAY:-}\",\"gdk_scale\":\"$
 echo "RESULT $JSON"
 [ -n "${RESULT_JSON:-}" ] && echo "$JSON" >"$RESULT_JSON"
 
-if [ "$DPRIV_MAX" -gt "$THRESHOLD_KB" ]; then
-    echo "FAIL: lanmsgd private ${DPRIV_MAX} KB 超过阈值 ${THRESHOLD_KB} KB" >&2
+if [ "$DDIRTY_MAX" -gt "$HEAP_THRESHOLD_KB" ]; then
+    echo "FAIL: lanmsgd 匿名堆 ${DDIRTY_MAX} KB 超过阈值 ${HEAP_THRESHOLD_KB} KB" >&2
     exit 1
+fi
+if [ "$DPRIV_MAX" -gt "$THRESHOLD_KB" ]; then
+    echo "WARN: lanmsgd private 总量 ${DPRIV_MAX} KB 超过参考线 ${THRESHOLD_KB} KB（含二进制代码页，读数随并发进程数摆动；以匿名堆 ${DDIRTY_MAX} KB 为准）" >&2
 fi
 [ "$UI_FAIL" = 0 ] || exit 1
 echo "MEASURE OK"
