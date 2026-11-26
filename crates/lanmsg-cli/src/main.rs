@@ -21,6 +21,7 @@ type EventRx = tokio::sync::broadcast::Receiver<Event>;
 #[derive(Parser)]
 #[command(
     name = "lanmsg-cli",
+    version,
     about = "LanMsg command-line client (lanmsgd must be running)"
 )]
 struct Cli {
@@ -999,6 +1000,15 @@ async fn download_and_wait(client: &IpcClient, hash: String) {
 mod tests {
     use super::*;
     use lanmsg_api::types::{BlobState, FileItemView};
+
+    #[test]
+    fn version_flag_reports_the_workspace_version() {
+        // 排障第一问是“你用的哪个版本”：--version 必须可用，且取自 Cargo.toml 的单一版本源。
+        let err = Cli::try_parse_from(["lanmsg-cli", "--version"]).err();
+        let err = err.expect("--version short-circuits parsing");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(err.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
 
     fn item(name: &str, size: u64) -> FileItemView {
         FileItemView {
