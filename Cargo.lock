@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "lanmsg-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bytes",
@@ -2135,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "lanmsg-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2148,7 +2148,7 @@ dependencies = [
 
 [[package]]
 name = "lanmsg-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "blake3",
@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "lanmsg-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "image",
@@ -2215,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "lanmsg-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "lanmsg-api",
  "lanmsg-core",
@@ -2230,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "lanmsg-localsend"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "axum-server",
@@ -2252,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "lanmsg-media"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "image",
  "lanmsg-proto",
@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "lanmsg-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bytes",
@@ -2281,11 +2281,11 @@ dependencies = [
 
 [[package]]
 name = "lanmsg-web-assets"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "lanmsgd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
