@@ -68,9 +68,11 @@ pub(crate) async fn serve_connection(
     let fw_task = {
         let sink = sink.clone();
         let mut rx = firewall;
+        // 基线必须在 spawn 之前同步读取：任务被调度的时刻不确定，若在任务里才读，连接建立到任务
+        // 运行之间发生的状态变化会被当成基线而不会推送（客户端永远收不到那次变化）。
+        let mut missing = firewall_missing_now(&mut rx);
+        let mut announce = missing;
         tokio::spawn(async move {
-            let mut missing = firewall_missing_now(&mut rx);
-            let mut announce = missing;
             loop {
                 if announce {
                     let ev = if missing {

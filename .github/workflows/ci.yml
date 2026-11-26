@@ -104,10 +104,16 @@ jobs:
         run: bash scripts/build-android-core.sh debug
 
       # Robolectric 每次运行都会从 Maven Central 下载 Android SDK 的 jar 到 ~/.m2；网络抖动时一批测试
-      # 会以 MavenArtifactFetcher 的 IOException 失败（与代码无关，2026-11-26 连续两次出现）。
+      # 会以 MavenArtifactFetcher 的 IOException 失败（与代码无关，2026-11-26 连续三次出现）。
       # 按 Robolectric 版本缓存，版本不变就命中；不设 restore-keys，避免版本变了还用旧 jar。
-      - name: Cache Robolectric SDK jars
-        uses: actions/cache@v4
+      # 缓存分成 restore 与 save 两步，save 用 always()：actions/cache 默认在 job 失败时不保存，
+      # 而下载失败本身就会让 job 失败，于是缓存永远存不下来、一直循环失败。
+      # 这样保存是安全的：Robolectric 先下载到临时文件，完成后才移动到最终路径，
+      # 路径里只会有完整的 jar，失败的 job 也不会留下残缺文件。
+      # 注意缓存按分支隔离：特性分支保存的缓存 main 读不到，要在 main 上跑一次才会生效。
+      - name: Restore Robolectric SDK jars
+        id: robolectric-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.m2/repository/org/robolectric
           key: robolectric-${{ runner.os }}-${{ hashFiles('android/gradle/libs.versions.toml') }}
@@ -115,3 +121,10 @@ jobs:
       - name: Gradle unit tests
         working-directory: android
         run: ./gradlew :app:testDebugUnitTest --no-daemon
+
+      - name: Save Robolectric SDK jars
+        if: always() && steps.robolectric-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-${{ runner.os }}-${{ hashFiles('android/gradle/libs.versions.toml') }}
