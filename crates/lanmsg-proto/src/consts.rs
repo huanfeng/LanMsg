@@ -160,6 +160,14 @@ pub const KEYSTORE_BACKEND_FILE: &str = "file";
 /// 探测系统密钥库可用性时读写的临时条目名。
 pub const KEYSTORE_PROBE_NAME: &str = "lanmsg-probe";
 
+/// 首次选定密钥库后端时，等待系统密钥库响应的最长时间。
+///
+/// 钥匙环被锁定（如桌面自动登录）时，Secret Service 会等用户在桌面上解锁，调用方可能永远
+/// 收不到返回；此时没有可丢失的身份，超时后本次回退到文件库且不写标记，下次启动再试。
+/// 取值偏短是因为超时只是“本次回退”，不是永久决定。已选定 `os` 后端后的读写不受此限制：
+/// 那时回退文件库会重建身份，必须等用户解锁。
+pub const KEYSTORE_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// 用户显示名最大字符数（trim 后，按 Unicode 标量值计）。
 pub const DISPLAY_NAME_MAX_CHARS: usize = 32;
 
