@@ -146,3 +146,12 @@ P5 功能对内存的影响（同一进程，单独运行）：启动 2.3 MB；�
 
 **在调试机上的一次同类失误**：为确认二进制能运行，我在没有隔离 `HOME`/`XDG_*` 的情况下执行了 `lanmsg --help`；它会先自动拉起同目录的 `lanmsgd`（用默认数据目录），再因为没有 DISPLAY 而报错退出，于是在用户的 `~/.local/share/lanmsg` 下留下了一个孤儿 daemon 和刚创建的数据（确认目录创建于同一分钟、探查时不存在、无既有数据）。发现后立即终止进程并删除该目录，之后所有测试都在完全隔离的环境里进行。调试机收尾时核对：无 lanmsg 进程与监听端口、`/tmp` 无残留、用户目录与 systemd 无新增，用户自己运行的 windui 演示程序没有被碰。另外，我曾把窗口列表里的一个 `windui — 文件拖出` 窗口当成可能的 LanMsg 缺陷，查进程归属后确认是用户三天前自己启动的演示程序，不属于 LanMsg，没有记为缺陷。
 
+## 9. 发布后修复的 CI 脆弱点（2026-11-26）
+
+v0.1.0 发布并修复钥匙环缺陷后，`main` 的 CI 连续出现偶发失败，查出两个不同的根因，都与功能代码无关，但会让 CI 随机变红、掩盖真正的失败：
+
+- **Android 单元测试：Robolectric 每次联网下载 Android SDK jar。** 失败表现为 `MavenArtifactFetcher` → `IOException`，一批无关测试（先是 `MediaStoreSaverTest`，再是 `MainActivity*`）恰好落在下载窗口里失败，此前 7 次运行都是绿的，且出问题的提交只改了文档。第一次修复（给 `~/.m2/repository/org/robolectric` 加 `actions/cache`）**下得过早**：我只在特性分支上验证了“首次未命中、重跑命中”，而 GitHub Actions 的缓存**按分支隔离**，特性分支保存的缓存 `main` 读不到；并且 `actions/cache` 默认在 job 失败时不保存，下载失败本身就让 job 失败，缓存永远存不下来。合入 `main` 后 Android 照旧失败（缓存未命中）才暴露这一点。最终修法：拆成 `actions/cache/restore` 与 `always()` 的 `actions/cache/save`（已命中则跳过）。这样保存是安全的：反编译确认 `MavenArtifactFetcher` 先下载到临时文件，完成后才 `Files.move` 到最终位置，路径里只有完整的 jar。**在 `main` 上验证**：第一次运行未命中并保存 455 MB，重跑命中（`Cache restored from key: robolectric-Linux-…`），三个 job 全绿。没有加自动重试，那会把真实的偶发测试失败也吞掉。
+- **`lanmsgd` 的 `firewall_ok_is_pushed_when_rule_becomes_present` 偶发超时：服务端的真实竞态。** `serve_connection` 把读取防火墙状态基线（`firewall_missing_now`）放在 `tokio::spawn` 出去的任务里，任务被调度的时刻不确定，连接建立到任务运行之间发生的状态变化会被当成基线而不推送，客户端永远收不到那次变化。测试只是在 CI 的 2 核 runner 上更容易撞上。把基线读取挪到 `spawn` 之前。限 2 核（`taskset -c 0,1`）反复运行该测试：修复前 80 次失败 3 次（约 4%），修复后 300 次 0 次失败。（中间我曾因 zsh 通配符没匹配到测试二进制路径，得到“失败 60 次”的无效数据，发现后重做，没有采用。）没有为它写专门的回归测试：确定性地构造“状态变化落在任务被调度之前”需要控制 `tokio::spawn` 的调度，测试会很脆弱；现有测试在修复后不再偶发失败，并在代码里留下了说明基线为何必须在 `spawn` 之前读取的注释。
+
+教训（已写入记忆）：改 CI/缓存/环境类的东西，验证必须放到它真正起作用的环境（`main` 分支、对应 OS、真实桌面），特性分支或模拟环境上的成功只证明机制能工作；CI 偶发失败先看根因链，用“限核反复运行”区分真实竞态与外部网络，而不是“重跑到绿”。
+
