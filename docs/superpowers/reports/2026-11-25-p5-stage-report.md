@@ -115,7 +115,7 @@ P5 功能对内存的影响（同一进程，单独运行）：启动 2.3 MB；�
 
 **删除重发。** 修复合入后，用户选择删除已公开的 v0.1.0（Release 与 tag）并在修复后的提交上重新发布同一版本号，而不是发 v0.1.1。后果：重发的资产哈希与首次发布不同（除 `uninstall.sh` 外全部重新构建，另新增两个安装器），**首次发布期间下载过资产的人，其校验和与现在的 `SHA256SUMS` 对不上**；scoop 清单由重发流程自动更新为新哈希（已核对一致）。首次发布与重发之间约 40 分钟没有可用的 Release（`latest` 为 404）。
 
-**没有验证到的**：Windows 安装器与 scoop 安装（本机是 Linux，只验证了文件名、PE 头、嵌入的清单版本与哈希，没有运行）；macOS dmg 的挂载与运行；真机上的 Android（只在模拟器上验证）；Windows 与 macOS 上的桌面 GUI（真窗口只在 Linux 上验证）；升级路径（第 7 节第 6 项）。
+**没有验证到的**：Windows 安装器与 scoop 在真实 Windows 上的安装（本机是 Linux；v0.1.1 发布后用 Wine 运行过安装器，见第 11 节，但那不是真实 Windows）；macOS dmg 的挂载与运行；真机上的 Android（只在模拟器上验证）；Windows 与 macOS 上的桌面 GUI（真窗口只在 Linux 上验证）；升级路径（第 7 节第 6 项）。
 
 **发布版 APK 在模拟器上的实测**（Android 16 / x86_64，AVD `lanmsg-test`，安装的是从发布页匿名下载的正式签名 APK，截图在 `reports/p5-release-apk/`）：安装、启动、向导（填名字、选“这是我的第一台设备”）、创建身份、授予通知权限、进入主界面全程无崩溃（logcat 无 `FATAL`/`UnsatisfiedLink`），说明 Rust core 经 UniFFI 在 Android 上正常加载。App 内“我 → 设置 → 网络”页有 LocalSend 开关与端口（默认 53317）、手动添加设备、单播通告目标、网段扫描，网卡列表正确；联系人页有“新的请求”与“附近的人”。
 
@@ -170,4 +170,18 @@ v0.1.0 发布并修复钥匙环缺陷后，`main` 的 CI 连续出现偶发失�
 - 小问题：`update check` 的 `published` 字段输出的是毫秒时间戳而不是可读日期。
 
 **仍未验证**：各渠道的“安装”动作本身（Windows 安装器静默安装、scoop 版弹命令行窗口、Linux 执行 `install.sh`、macOS dmg）；Windows 安装器与 scoop 的真机安装、macOS dmg、Windows/macOS 上的桌面 GUI；真机 Android；NAT 后手机往电脑发文件。
+
+## 11. Windows 安装器在 Wine 里的运行（2026-11-26）
+
+本机有 Wine（缺 wine32，64 位程序不受影响）。用**全新的独立前缀**（`WINEPREFIX=/tmp/...`，完全不碰用户自己的 `~/.wine`，结束后核对其修改时间未变、里面没有任何 LanMsg 文件）运行**从 v0.1.1 发布页下载、哈希已校验**的 `lanmsg-windows-x64-setup.exe` 与 zip。
+
+**验证到的**：
+- Windows 版 `lanmsg-cli.exe` 与 `lanmsgd.exe`（来自 zip，以及安装后的）都能运行，输出 `0.1.1`。
+- **静默安装** `setup.exe --silent`：12 个步骤走完（准备环境、停止旧进程、解压、释放文件、写卸载器清单、开机自启动、防火墙、快捷方式、卸载信息、启动服务、安装回执、完成），退出码 0；文件装到 `C:\Program Files\LanMsg\`（`lanmsg.exe`、`lanmsgd.exe`、`lanmsg-cli.exe`、`lanmsg-thumb.exe`、`LICENSE`、`uninstall.exe`）；桌面与开始菜单快捷方式（含中文名的 `卸载 LanMsg.lnk`）创建；服务被启动并在 `%APPDATA%\lanmsg\LanMsg\data\` 下创建了数据库，**这正是 README 里更正过的 Windows 数据目录，现在被真实安装器与真实 `lanmsgd.exe` 验证了**。
+- **注册表**（用 `wine reg query` 查，我最初用 grep 注册表文件没找到，是因为 Wine 对键名里的反斜杠做了双重转义，不是没写）：`HKLM\…\Uninstall\LanMsg` 含 `DisplayName`、`DisplayVersion=0.1.1`、`InstallLocation`、`Publisher`、`UninstallString`，以及 `QuietUninstallString = "…\uninstall.exe" --silent --keep-user-data --reboot-as-success`，与 wind-installer README 的契约逐字一致；`HKCU\…\Run\LanMsg` 开机自启动项路径带引号。
+- **覆盖安装（升级场景）**：旧 `lanmsgd.exe` 正在运行时再装一次，退出码 0，输出 `[2/12] 正在停止旧进程...`，文件与用户数据都在。
+- **静默卸载**（用注册表里记录的 `QuietUninstallString`）：7 个步骤走完，退出码 0；程序文件、桌面与开始菜单快捷方式、`Uninstall\LanMsg` 键、`Run\LanMsg` 键全部清除，**`--keep-user-data` 生效，用户数据目录 7 个文件保留**。
+- 首次启动时 `keystore.backend = os`：Wine 实现了凭据管理器，所以系统库探测成功，这顺带说明 Windows 的凭据后端在首次选定路径（含新的限时 `bounded` 线程）上能工作。
+
+**不能由此证明的（Wine 不是 Windows）**：真实 Windows 上的 UAC 提示（`--silent` 未提权时会弹 UAC）；防火墙那一步 `[7/12]` 只是“走了这一步”，Wine 里没有 `netsh` 与 Windows 防火墙，**规则是否真的放行没有验证**，也没有验证中文系统上 `netsh` 输出的 OEM 解码；Windows Defender/SmartScreen 对未签名安装器的拦截；开机自启动是否真的在登录时拉起；scoop 的行为（scoop 本身、`scoop update lanmsg`、弹命令行窗口）完全没有验证；Windows 上的桌面 GUI 窗口（本次无图形）。另外我用 `grep` 进程名统计 `lanmsgd.exe` 得到的“3”不能解读为实例数（Wine 会为一个 Windows 进程起多个宿主进程），覆盖安装前后进程数不变也无法据此判断旧进程是否被停掉，所以我没有据此下结论。
 
