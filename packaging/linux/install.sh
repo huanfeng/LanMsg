@@ -59,6 +59,8 @@ main() {
                 ;;
             -h | --help)
                 echo "usage: install.sh [--headless] [--version vX.Y.Z] [--prefix DIR]"
+                echo "env:   LANMSG_NO_SYSTEMD=1  do not enable or start the systemd user service"
+                echo "       LANMSG_BASE_URL      mirror or local directory to download from"
                 exit 0
                 ;;
             *) echo "error: unknown option: $1" >&2; exit 2 ;;

@@ -76,7 +76,7 @@ fn init_tracing(data_dir: &std::path::Path, level: &str) -> Result<()> {
 }
 
 #[derive(Parser)]
-#[command(name = "lanmsgd", about = "LanMsg daemon")]
+#[command(name = "lanmsgd", version, about = "LanMsg daemon")]
 pub(crate) struct Args {
     /// 数据目录（默认平台数据目录 C8）
     #[arg(long)]
