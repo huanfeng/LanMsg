@@ -97,6 +97,25 @@ fn instance_id(data_dir: &Path) -> String {
     format!("lanmsg-gui-{}", &hex.as_str()[..8])
 }
 
+/// Linux 上是否明显没有图形显示：`DISPLAY` 与 `WAYLAND_DISPLAY` 都为空，且不是 demo、不是离屏截图。
+///
+/// 窗口要到 `run()` 才会真正连显示服务器，而 `Bridge::start` 在那之前就会在后台线程里拉起 `lanmsgd`；
+/// 没有显示时窗口随后报错退出，就会留下一个按默认数据目录运行的孤儿 daemon。所以在拉起之前先预检。
+/// 只拦“明显没有显示”这一种最确定的情形，连不连得上显示服务器仍由 windui 自己报告。
+/// 离屏截图（`--screenshot`）与 demo 不需要显示，不能被拦住。
+fn missing_display(
+    args: &[String],
+    env: &dyn Fn(&str) -> Option<String>,
+    demo: bool,
+    is_linux: bool,
+) -> bool {
+    if !is_linux || demo || args.iter().any(|a| a == "--screenshot") {
+        return false;
+    }
+    let unset = |k: &str| env(k).is_none_or(|v| v.is_empty());
+    unset("DISPLAY") && unset("WAYLAND_DISPLAY")
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -126,6 +145,19 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    // 没有显示就别拉起后台服务（见 missing_display）。
+    if missing_display(
+        &args,
+        &|k| std::env::var(k).ok(),
+        demo.is_some(),
+        cfg!(target_os = "linux"),
+    ) {
+        eprintln!(
+            "[lanmsg] no display: neither DISPLAY nor WAYLAND_DISPLAY is set; \
+             run lanmsg from a graphical session (use lanmsg-cli or lanmsgd --headless without one)"
+        );
+        std::process::exit(1);
     }
     decoders::register_media_decoders();
 
@@ -243,6 +275,27 @@ mod tests {
 
     fn argv(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn missing_display_only_blocks_a_plain_linux_launch_without_any_display_env() {
+        let none = |_: &str| None;
+        let empty = |_: &str| Some(String::new());
+        let x11 = |k: &str| (k == "DISPLAY").then(|| ":0".to_string());
+        let wayland = |k: &str| (k == "WAYLAND_DISPLAY").then(|| "wayland-0".to_string());
+        let plain = argv(&["lanmsg"]);
+        // 明显没有显示：拦截（变量缺失或为空都算）。
+        assert!(missing_display(&plain, &none, false, true));
+        assert!(missing_display(&plain, &empty, false, true));
+        // 任一显示变量存在：放行，连不连得上交给 windui 报告。
+        assert!(!missing_display(&plain, &x11, false, true));
+        assert!(!missing_display(&plain, &wayland, false, true));
+        // 离屏截图与 demo 不需要显示：不能被拦（截图测试与 CI 靠它）。
+        let shot = argv(&["lanmsg", "--demo", "chats", "--screenshot", "/tmp/a.png"]);
+        assert!(!missing_display(&shot, &none, false, true));
+        assert!(!missing_display(&plain, &none, true, true));
+        // 非 Linux：Windows/macOS 恒有图形会话。
+        assert!(!missing_display(&plain, &none, false, false));
     }
 
     #[test]
