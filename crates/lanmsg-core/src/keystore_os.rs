@@ -5,10 +5,13 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use lanmsg_proto::consts::{
     KEYSTORE_BACKEND_FILE, KEYSTORE_BACKEND_MARKER, KEYSTORE_BACKEND_OS, KEYSTORE_PROBE_NAME,
+    KEYSTORE_PROBE_TIMEOUT,
 };
 
 use crate::error::KeyStoreError;
@@ -83,13 +86,17 @@ enum Mode {
 ///   （否则登录时 Secret Service 尚未解锁会导致身份被重建）。
 /// - 标记不存在：持 `keystore.lock` 文件锁重读标记后再选择；文件库已有密钥（老用户）则尝试迁移（写入后读回比对一致才删文件），
 ///   文件库为空则探测系统库；成功选 `os`，否则选 `file`。
+///   首次选定时对系统库的调用是限时的（`probe_timeout`）：钥匙环被锁定时调用方可能永远收不到返回，
+///   超时则**本次**用文件库、**不写标记**，下次启动再试（已有的文件库密钥届时会被迁移）。
 pub struct OsKeyStore {
-    primary: Option<Box<dyn SecretBackend>>,
+    primary: Option<Arc<dyn SecretBackend>>,
     fallback: FileKeyStore,
     marker: PathBuf,
     mode: Mutex<Option<Mode>>,
     /// 迁移后删旧文件失败的 warn 只记一次，避免刷屏。
     warned: AtomicBool,
+    /// 首次选定后端时等待系统库响应的最长时间。
+    probe_timeout: Duration,
 }
 
 impl OsKeyStore {
@@ -100,12 +107,21 @@ impl OsKeyStore {
         marker: PathBuf,
     ) -> Self {
         Self {
-            primary,
+            // 限时调用要把后端移进辅助线程，所以内部用 Arc 持有。
+            primary: primary.map(Arc::from),
             fallback,
             marker,
             mode: Mutex::new(None),
             warned: AtomicBool::new(false),
+            probe_timeout: KEYSTORE_PROBE_TIMEOUT,
         }
+    }
+
+    /// 测试用：缩短首次选定时的等待时间。
+    #[cfg(test)]
+    fn with_probe_timeout(mut self, timeout: Duration) -> Self {
+        self.probe_timeout = timeout;
+        self
     }
 
     fn warn_once(&self, msg: &str, err: &KeyStoreError) {
@@ -132,9 +148,10 @@ impl OsKeyStore {
 
     /// 取得（必要时选定并持久化）后端。
     fn resolve(&self) -> Result<(Mode, &dyn SecretBackend), KeyStoreError> {
-        let Some(primary) = self.primary.as_deref() else {
+        let Some(primary_arc) = self.primary.as_ref() else {
             return Ok((Mode::File, &NoBackend));
         };
+        let primary: &dyn SecretBackend = primary_arc.as_ref();
         let mut guard = self.mode.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(mode) = *guard {
             return Ok((mode, primary));
@@ -142,7 +159,7 @@ impl OsKeyStore {
         // 已有标记的快路径不加锁；无标记则在跨进程文件锁内重读、选择、写标记。
         let mode = match self.read_marker()? {
             Some(mode) => mode,
-            None => self.select_locked(primary)?,
+            None => self.select_locked(primary_arc)?,
         };
         if mode == Mode::Os {
             self.cleanup_legacy(primary);
@@ -152,7 +169,7 @@ impl OsKeyStore {
     }
 
     /// 持有 `keystore.lock` 独占锁完成首次选择，避免两进程同时首次启动互相覆盖。
-    fn select_locked(&self, primary: &dyn SecretBackend) -> Result<Mode, KeyStoreError> {
+    fn select_locked(&self, primary: &Arc<dyn SecretBackend>) -> Result<Mode, KeyStoreError> {
         let dir = self.marker.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(dir)?;
         let lock = std::fs::OpenOptions::new()
@@ -194,7 +211,16 @@ impl OsKeyStore {
     }
 
     /// 标记不存在时的首次选定（调用方须已持有文件锁）。
-    fn select_backend(&self, primary: &dyn SecretBackend) -> Result<Mode, KeyStoreError> {
+    ///
+    /// 对系统库的所有调用都是限时的：超时（钥匙环被锁定、没人能响应解锁）时本次用文件库且**不写标记**。
+    /// 此时还没选定过后端，文件库就是当前唯一的身份来源，所以超时分支不删除任何文件库密钥，
+    /// 也不回滚系统库（辅助线程里的写入若之后才完成，写入的是与文件库相同的值，下次启动会读回比对后正常迁移）。
+    ///
+    /// 已知的两个窄窗口（概率很低，数据不会被销毁，只会留下旧值或分歧，接受并记录）：
+    /// - 超时后进程仍在运行期间，另一个进程恰好在钥匙环被解锁后做首次选定，两者可能各自产生一份身份；
+    /// - 被放弃的辅助线程若在很久之后才完成写入，写入的是当时文件库里的旧值，可能覆盖系统库里
+    ///   后来迁移进去的值（只有该进程运行期间文件库密钥被改过才会不同，身份密钥通常只写一次）。
+    fn select_backend(&self, primary: &Arc<dyn SecretBackend>) -> Result<Mode, KeyStoreError> {
         let mut legacy = Vec::new();
         for name in [KEY_DEVICE, KEY_USER] {
             if let Some(v) = self.fallback.load(name)? {
@@ -202,10 +228,17 @@ impl OsKeyStore {
             }
         }
         if legacy.is_empty() {
-            return match probe(primary) {
+            return match bounded(primary, self.probe_timeout, probe) {
                 Ok(()) => {
                     self.write_marker(KEYSTORE_BACKEND_OS)?;
                     Ok(Mode::Os)
+                }
+                Err(e) if is_transient(&e) => {
+                    tracing::warn!(
+                        "system keystore did not answer ({e}; is the keyring locked?); \
+                         using the file keystore for this run and retrying on the next start"
+                    );
+                    Ok(Mode::File)
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -218,34 +251,105 @@ impl OsKeyStore {
         }
         // 迁移：先全部写入并读回比对，全部一致才写标记（已 fsync）；
         // 旧文件由 resolve 随后的 cleanup_legacy 在确认系统库值一致后删除。
-        let migrated: Result<(), KeyStoreError> = legacy.iter().try_for_each(|(name, v)| {
-            primary.set(name, v)?;
-            match primary.get(name)? {
-                Some(back) if back == *v => Ok(()),
-                _ => Err(KeyStoreError::Corrupt(format!(
-                    "key {name} read back from the system keystore does not match what was written"
-                ))),
-            }
+        let to_migrate = legacy.clone();
+        let migrated = bounded(primary, self.probe_timeout, move |p| {
+            to_migrate.iter().try_for_each(|(name, v)| {
+                p.set(name, v)?;
+                match p.get(name)? {
+                    Some(back) if back == *v => Ok(()),
+                    _ => Err(KeyStoreError::Corrupt(format!(
+                        "key {name} read back from the system keystore does not match what was written"
+                    ))),
+                }
+            })
         });
         match migrated {
             Ok(()) => {
                 self.write_marker(KEYSTORE_BACKEND_OS)?;
                 Ok(Mode::Os)
             }
+            Err(e) if is_transient(&e) => {
+                tracing::warn!(
+                    "system keystore did not answer ({e}; is the keyring locked?); \
+                     keeping the file keystore for this run and retrying the migration on the next start"
+                );
+                Ok(Mode::File)
+            }
             Err(e) => {
                 tracing::warn!(
                     "failed to migrate key into system keystore, keeping file keystore: {e}"
                 );
-                for (name, v) in &legacy {
-                    // 仅当条目值等于本次写入的值才回滚，避免误删他人写入。
-                    if matches!(primary.get(name), Ok(Some(cur)) if cur == *v) {
-                        let _ = primary.remove(name);
-                    }
+                for (name, v) in legacy {
+                    // 仅当条目值等于本次写入的值才回滚，避免误删他人写入。回滚同样限时，超时就放弃。
+                    let _ = bounded(primary, self.probe_timeout, move |p| {
+                        if matches!(p.get(name), Ok(Some(cur)) if cur == v) {
+                            let _ = p.remove(name);
+                        }
+                        Ok(())
+                    });
                 }
                 self.write_marker(KEYSTORE_BACKEND_FILE)?;
                 Ok(Mode::File)
             }
         }
+    }
+}
+
+/// 限时调用的超时错误。
+fn timeout_error(timeout: Duration) -> KeyStoreError {
+    KeyStoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("system keystore did not respond within {timeout:?}"),
+    ))
+}
+
+/// 辅助线程没能给出结果（创建失败或中途 panic）：和超时一样是瞬时问题，不是后端明确报告“不可用”。
+fn helper_error(msg: impl Into<String>) -> KeyStoreError {
+    KeyStoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::Interrupted,
+        msg.into(),
+    ))
+}
+
+/// 瞬时错误：首次选定时遇到它，本次回退文件库但**不写标记**（下次启动再试）。
+/// 靠 `ErrorKind` 识别；keyring 的真实错误一律映射为 `ErrorKind::Other`（见 `to_store_err`），
+/// 所以不会被误判成瞬时错误而绕过“后端不可用 → 写 file 标记”的原有行为。
+fn is_transient(e: &KeyStoreError) -> bool {
+    matches!(
+        e,
+        KeyStoreError::Io(io)
+            if matches!(io.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted)
+    )
+}
+
+/// 在辅助线程里调用系统库并限时等待。
+///
+/// 钥匙环被锁定时 Secret Service 会等用户解锁，调用线程可能永远收不到返回，且无法取消；
+/// 所以把调用放进独立线程，超时就放弃等待。放弃后线程继续阻塞，它不持有我们的任何锁，
+/// 进程退出时随之结束；它之后若完成，结果无人接收（`send` 的错误被忽略）。
+fn bounded<T, F>(
+    primary: &Arc<dyn SecretBackend>,
+    timeout: Duration,
+    f: F,
+) -> Result<T, KeyStoreError>
+where
+    T: Send + 'static,
+    F: FnOnce(&dyn SecretBackend) -> Result<T, KeyStoreError> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    let backend = Arc::clone(primary);
+    std::thread::Builder::new()
+        .name("keystore-probe".into())
+        .spawn(move || {
+            let _ = tx.send(f(backend.as_ref()));
+        })
+        .map_err(|e| helper_error(format!("failed to start the keystore helper thread: {e}")))?;
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => Err(timeout_error(timeout)),
+        Err(RecvTimeoutError::Disconnected) => Err(helper_error(
+            "system keystore helper thread exited without a result",
+        )),
     }
 }
 
@@ -440,6 +544,193 @@ mod tests {
 
     fn marker_text(dir: &Path) -> String {
         std::fs::read_to_string(marker(dir)).unwrap()
+    }
+
+    /// 模拟被锁定的钥匙环：每个调用都阻塞到 `release` 被置位（或等够 `max_block`）才返回，
+    /// 对应 Secret Service 在等用户解锁、调用方永远收不到返回的情形。
+    #[derive(Clone)]
+    struct HangBackend {
+        inner: FakeBackend,
+        release: Arc<AtomicBool>,
+        max_block: Duration,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl HangBackend {
+        fn new(max_block: Duration) -> Self {
+            Self {
+                inner: FakeBackend::default(),
+                release: Arc::new(AtomicBool::new(false)),
+                max_block,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn block(&self) {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let start = std::time::Instant::now();
+            while !self.release.load(Ordering::Relaxed) && start.elapsed() < self.max_block {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    impl SecretBackend for HangBackend {
+        fn get(&self, name: &str) -> Result<Option<Vec<u8>>, KeyStoreError> {
+            self.block();
+            self.inner.get(name)
+        }
+        fn set(&self, name: &str, bytes: &[u8]) -> Result<(), KeyStoreError> {
+            self.block();
+            self.inner.set(name, bytes)
+        }
+        fn remove(&self, name: &str) -> Result<(), KeyStoreError> {
+            self.block();
+            self.inner.remove(name)
+        }
+    }
+
+    fn open_hang(dir: &Path, b: &HangBackend, timeout: Duration) -> OsKeyStore {
+        OsKeyStore::new(
+            Some(Box::new(b.clone())),
+            FileKeyStore::new(keys_dir(dir)),
+            marker(dir),
+        )
+        .with_probe_timeout(timeout)
+    }
+
+    #[test]
+    fn locked_keyring_at_first_selection_times_out_without_writing_marker() {
+        // 钥匙环锁定 + 首次安装：必须限时返回，本次用文件库，且不写标记（不永久锁定文件库）。
+        let dir = tempfile::tempdir().unwrap();
+        let hang = HangBackend::new(Duration::from_secs(30));
+        let ks = open_hang(dir.path(), &hang, Duration::from_millis(200));
+        let t0 = std::time::Instant::now();
+        ks.save(KEY_DEVICE, b"secret").unwrap();
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "selection must give up after the timeout, took {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            !marker(dir.path()).exists(),
+            "a timeout must not persist a backend choice"
+        );
+        assert!(keys_dir(dir.path()).join(KEY_DEVICE).exists());
+        assert_eq!(
+            ks.load(KEY_DEVICE).unwrap().as_deref(),
+            Some(&b"secret"[..])
+        );
+        // 放开后台线程，避免它一直占着 30 秒。
+        hang.release.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn locked_keyring_with_existing_file_keys_keeps_them_intact() {
+        // 老用户（文件库已有身份密钥）+ 钥匙环锁定：迁移超时后密钥必须原样保留并可读，
+        // 绝不能丢（那会重建身份）；也不写标记。
+        let dir = tempfile::tempdir().unwrap();
+        let fallback = FileKeyStore::new(keys_dir(dir.path()));
+        fallback.save(KEY_DEVICE, b"old-d").unwrap();
+        fallback.save(KEY_USER, b"old-u").unwrap();
+        let hang = HangBackend::new(Duration::from_secs(30));
+        let ks = open_hang(dir.path(), &hang, Duration::from_millis(200));
+        assert_eq!(ks.load(KEY_DEVICE).unwrap().as_deref(), Some(&b"old-d"[..]));
+        assert_eq!(ks.load(KEY_USER).unwrap().as_deref(), Some(&b"old-u"[..]));
+        assert!(!marker(dir.path()).exists());
+        assert!(keys_dir(dir.path()).join(KEY_DEVICE).exists());
+        assert!(keys_dir(dir.path()).join(KEY_USER).exists());
+        hang.release.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn timeout_is_not_permanent_keyring_unlocked_next_start_migrates() {
+        // “本次回退”必须可逆：第一次启动钥匙环锁定 → 文件库；第二次启动钥匙环已解锁 →
+        // 把文件库里的密钥迁移进去并写 os 标记，之后身份不变。
+        let dir = tempfile::tempdir().unwrap();
+        let hang = HangBackend::new(Duration::from_secs(30));
+        let first = open_hang(dir.path(), &hang, Duration::from_millis(200));
+        first.save(KEY_DEVICE, b"identity").unwrap();
+        assert!(!marker(dir.path()).exists());
+        hang.release.store(true, Ordering::Relaxed);
+
+        let unlocked = FakeBackend::default();
+        let second = open(dir.path(), &unlocked);
+        assert_eq!(
+            second.load(KEY_DEVICE).unwrap().as_deref(),
+            Some(&b"identity"[..]),
+            "identity must survive the switch"
+        );
+        assert_eq!(marker_text(dir.path()), KEYSTORE_BACKEND_OS);
+        assert_eq!(
+            unlocked.get(KEY_DEVICE).unwrap().as_deref(),
+            Some(&b"identity"[..])
+        );
+    }
+
+    #[test]
+    fn os_mode_is_not_bounded_by_the_selection_timeout() {
+        // 已选定 os：系统库慢/锁定时必须等，不能超时后回退文件库（那会重建身份）。
+        let dir = tempfile::tempdir().unwrap();
+        let mem = FakeBackend::default();
+        open(dir.path(), &mem).save(KEY_DEVICE, b"k").unwrap();
+        assert_eq!(marker_text(dir.path()), KEYSTORE_BACKEND_OS);
+
+        let slow = HangBackend {
+            inner: mem,
+            release: Arc::new(AtomicBool::new(false)),
+            max_block: Duration::from_millis(600),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        // 选定超时只有 100ms，但 os 模式的读取要 600ms 才返回：必须照样拿到值。
+        let ks = open_hang(dir.path(), &slow, Duration::from_millis(100));
+        assert_eq!(ks.load(KEY_DEVICE).unwrap().as_deref(), Some(&b"k"[..]));
+    }
+
+    #[test]
+    fn real_backend_errors_are_not_mistaken_for_transient_ones() {
+        // 后端真实报错仍然走“不可用 → 写 file 标记”，不能被当成可重试的瞬时错误。
+        let e = KeyStoreError::Io(std::io::Error::other("boom"));
+        assert!(!is_transient(&e));
+        assert!(is_transient(&timeout_error(Duration::from_secs(1))));
+        assert!(is_transient(&helper_error("helper gone")));
+    }
+
+    /// 调用时 panic 的后端：辅助线程会消失，调用方只会看到通道断开。
+    struct PanicBackend;
+
+    impl SecretBackend for PanicBackend {
+        fn get(&self, _: &str) -> Result<Option<Vec<u8>>, KeyStoreError> {
+            panic!("simulated keyring crash")
+        }
+        fn set(&self, _: &str, _: &[u8]) -> Result<(), KeyStoreError> {
+            panic!("simulated keyring crash")
+        }
+        fn remove(&self, _: &str) -> Result<(), KeyStoreError> {
+            panic!("simulated keyring crash")
+        }
+    }
+
+    #[test]
+    fn helper_thread_failure_does_not_persist_a_file_marker() {
+        // 辅助线程没能给出结果（这里用 panic 模拟）是瞬时问题，不是后端明确报告“不可用”：
+        // 本次回退文件库，但绝不能永久写下 file 标记，否则以后钥匙环可用了也再不会使用。
+        let dir = tempfile::tempdir().unwrap();
+        let ks = OsKeyStore::new(
+            Some(Box::new(PanicBackend)),
+            FileKeyStore::new(keys_dir(dir.path())),
+            marker(dir.path()),
+        )
+        .with_probe_timeout(Duration::from_secs(5));
+        ks.save(KEY_DEVICE, b"secret").unwrap();
+        assert_eq!(
+            ks.load(KEY_DEVICE).unwrap().as_deref(),
+            Some(&b"secret"[..])
+        );
+        assert!(
+            !marker(dir.path()).exists(),
+            "a vanished helper thread must not persist a backend choice"
+        );
     }
 
     #[test]
