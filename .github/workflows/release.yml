@@ -107,6 +107,17 @@ jobs:
           -Version "${{ needs.meta.outputs.version }}"
           -WindInstallerDir "$env:RUNNER_TEMP/wind-installer"
 
+      # upload-artifact 的 if-no-files-found 只在所有路径都不存在时才报错，缺一个文件会静默通过
+      # （v0.1.0 就因此漏发了安装器），所以逐个核对。
+      - name: Verify installer and zip exist
+        shell: pwsh
+        run: |
+          foreach ($f in @("lanmsg-windows-${{ matrix.arch }}-setup.exe", "lanmsg-windows-${{ matrix.arch }}.zip")) {
+            $p = Join-Path "target/dist" $f
+            if (-not (Test-Path $p)) { Write-Host "::error::missing $p"; exit 1 }
+            Write-Host ("{0}  {1:N1} MB" -f $f, ((Get-Item $p).Length / 1MB))
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-${{ matrix.arch }}
@@ -292,9 +303,27 @@ jobs:
           path: dist/lanmsg-android.apk
           if-no-files-found: error
 
+  # 干跑（dry_run）时 Publish 会被跳过，这个 job 让“资产清单是否完整”在每次构建里都被检查，而不是第一次真发布才暴露。
+  assets:
+    name: Verify asset set
+    needs: [meta, windows, linux-desktop, linux-headless, macos, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Check assets
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          cp packaging/linux/install.sh packaging/linux/uninstall.sh dist/
+          ls -l dist
+          bash scripts/check-release-assets.sh dist
+
   release:
     name: Publish
-    needs: [meta, windows, linux-desktop, linux-headless, macos, android]
+    needs: [meta, assets, windows, linux-desktop, linux-headless, macos, android]
     if: needs.meta.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -314,6 +343,8 @@ jobs:
           mkdir -p dist
           find artifacts -type f -exec cp {} dist/ \;
           cp packaging/linux/install.sh packaging/linux/uninstall.sh dist/
+          # 发布前核对完整资产清单：少一个就失败，而不是发出一个残缺的 Release。
+          bash scripts/check-release-assets.sh dist
           cd dist
           ls -l
           sha256sum -- * > ../SHA256SUMS

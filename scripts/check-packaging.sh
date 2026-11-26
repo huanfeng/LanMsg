@@ -34,6 +34,27 @@ for name in lanmsg-windows-x64.zip lanmsg-windows-arm64.zip; do
 done
 grep -qF 'lanmsg-windows-${{ matrix.arch }}.zip' .github/workflows/release.yml || fail "release.yml does not publish lanmsg-windows-<arch>.zip"
 grep -qF 'lanmsg-windows-${{ matrix.arch }}-setup.exe' .github/workflows/release.yml || fail "release.yml does not publish the windows setup"
+# 安装器必须以固定文件名产出：wind-packer 默认输出带版本号的名字（v0.1.0 因此漏发了安装器）
+grep -qE -- '--output[[:space:]]+\$Setup' packaging/windows/build-dist.ps1 || fail "build-dist.ps1 must pass --output to wind-packer build"
+grep -qF 'lanmsg-windows-$Arch-setup.exe' packaging/windows/build-dist.ps1 || fail "build-dist.ps1 does not name the installer lanmsg-windows-<arch>-setup.exe"
+
+# 发布资产清单脚本：每个资产名都应出现在 release.yml 的文件头注释里（两处不能各改各的），并且脚本真能抓出缺失
+while read -r a; do
+    case "$a" in
+        lanmsg-windows-*-setup.exe) pat='lanmsg-windows-{x64,arm64}-setup.exe' ;;
+        lanmsg-windows-*.zip) pat='lanmsg-windows-{x64,arm64}.zip' ;;
+        lanmsg-linux-*.tar.gz) pat='lanmsg-linux-{x86_64,aarch64}.tar.gz' ;;
+        lanmsgd-linux-*-musl.tar.gz) pat='lanmsgd-linux-{x86_64,aarch64}-musl.tar.gz' ;;
+        *) pat="$a" ;;
+    esac
+    head -20 .github/workflows/release.yml | grep -qF -- "$pat" || fail "release.yml header does not list $a ($pat)"
+done < <(bash scripts/check-release-assets.sh --list)
+assets_tmp=$(mktemp -d)
+while read -r a; do echo x > "$assets_tmp/$a"; done < <(bash scripts/check-release-assets.sh --list)
+bash scripts/check-release-assets.sh "$assets_tmp" >/dev/null || fail "check-release-assets.sh rejects a complete asset set"
+rm -f "$assets_tmp/lanmsg-windows-x64-setup.exe"
+if bash scripts/check-release-assets.sh "$assets_tmp" >/dev/null 2>&1; then fail "check-release-assets.sh accepts a set without the windows installer"; fi
+rm -rf "$assets_tmp"
 grep -qF 'lanmsg-linux-$arch.tar.gz' packaging/linux/install.sh || fail "install.sh does not use lanmsg-linux-<arch>.tar.gz"
 grep -qF 'lanmsgd-linux-$arch-musl.tar.gz' packaging/linux/install.sh || fail "install.sh does not use lanmsgd-linux-<arch>-musl.tar.gz"
 grep -qF 'lanmsg-linux-${{ matrix.arch }}.tar.gz' .github/workflows/release.yml || fail "release.yml does not publish lanmsg-linux-<arch>.tar.gz"

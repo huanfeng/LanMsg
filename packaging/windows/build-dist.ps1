@@ -122,8 +122,14 @@ try {
     & $Packer prep-uninstaller --config $manifest
     if ($LASTEXITCODE -ne 0) { Fail "prep-uninstaller failed" }
     Write-Step "Packing installer"
-    & $Packer build --config $manifest --stub $Stub
+    # wind-packer 默认把安装器命名为 <output_name>-<version>.exe（带版本号），而发布资产名、scoop 与应用内更新
+    # 都约定不带版本号的 lanmsg-windows-<arch>-setup.exe，所以必须显式指定输出路径。
+    $Setup = Join-Path $Dist "lanmsg-windows-$Arch-setup.exe"
+    if (Test-Path $Setup) { Remove-Item -Force $Setup }
+    & $Packer build --config $manifest --stub $Stub --output $Setup
     if ($LASTEXITCODE -ne 0) { Fail "wind-packer build failed" }
+    # 打包器退出码为 0 也不等于产物在约定位置：缺了就在这里失败，而不是等发布时才发现少一个资产。
+    if (-not (Test-Path $Setup)) { Fail "installer not found at expected path: $Setup" }
 } finally {
     Remove-Item -Force -ErrorAction SilentlyContinue $uninstallDest
     Remove-Item -Force -ErrorAction SilentlyContinue $manifest
