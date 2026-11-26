@@ -1,16 +1,16 @@
 {
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "局域网聊天式文件互传",
   "homepage": "https://github.com/huanfeng/lanmsg",
   "license": "GPL-3.0-or-later",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/huanfeng/lanmsg/releases/download/v0.1.0/lanmsg-windows-x64.zip",
-      "hash": "a44c44afb3c770bd3851d70b6d124dc25f5f4ac8e7179e95851f326cd16a7d42"
+      "url": "https://github.com/huanfeng/lanmsg/releases/download/v0.1.1/lanmsg-windows-x64.zip",
+      "hash": "5851dda93cae63e379c9bf61ebd9cf12c6eaa2988a640974d3d8678c68d1d2ac"
     },
     "arm64": {
-      "url": "https://github.com/huanfeng/lanmsg/releases/download/v0.1.0/lanmsg-windows-arm64.zip",
-      "hash": "8e77f2669a85d9f82ca7ecb80110381ffb41cce87753ce31ec5abef0fe9bae69"
+      "url": "https://github.com/huanfeng/lanmsg/releases/download/v0.1.1/lanmsg-windows-arm64.zip",
+      "hash": "247215b026c17b085b4ef0c49e040e83c181ffa18b0279bb3041834b470a723e"
     }
   },
   "bin": ["lanmsg-cli.exe"],
