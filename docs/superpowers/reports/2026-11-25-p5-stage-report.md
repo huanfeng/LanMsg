@@ -98,7 +98,7 @@ P5 功能对内存的影响（同一进程，单独运行）：启动 2.3 MB；�
 3. **中转站**：台式机建站放入 3 个文件（引用与复制各有）→ Android 查看清单并下载；台式机关机后 Android 显示“源离线”；Android 往中转站上传一张照片，台式机目录出现该文件。
 4. **跨网段**：两台经 Tailscale 等互通但不在同一局域网的电脑，手动添加后互发消息，联系人行显示“VPN”角标；第三台本人设备经地址交换自动连上。
 5. **安装渠道**：Windows 安装包与 scoop（`scoop install <本地 json>`）各装一次，并核对防火墙一键放行（`netsh` 的显示/添加/删除，安装器重复运行幂等，中文目录）；Ubuntu `curl | sh` 安装、NAS（或容器）无头版安装；Android APK 安装；macOS 记为外部依赖。
-6. **应用内更新**：v0.1.0 已发布，但目前没有更旧的版本可以升级，所以“检查到新版本 → 下载 → 校验 → 安装”的整条链路还没有真实走过（只验证了对真实 Release 的检查、semver 比较与“已是最新”）。需要发布下一个版本后，用 0.1.0 验证各渠道安装（scoop 版应弹出命令行窗口执行 `scoop update lanmsg` 后退出）。
+6. **应用内更新**：v0.1.1 发布后，已用发布出来的 0.1.0 二进制在隔离环境里验证了检查、下载与校验（见第 10 节）；仍未验证的是各渠道的“安装”动作本身：Windows 安装器版静默安装、scoop 版弹出命令行窗口执行 `scoop update lanmsg` 后退出、Linux 执行 `install.sh`、macOS 打开 dmg，需要对应系统的真机。
 
 ## 8. v0.1.0 发布与发布后验证（2026-11-26）
 
@@ -154,4 +154,20 @@ v0.1.0 发布并修复钥匙环缺陷后，`main` 的 CI 连续出现偶发失�
 - **`lanmsgd` 的 `firewall_ok_is_pushed_when_rule_becomes_present` 偶发超时：服务端的真实竞态。** `serve_connection` 把读取防火墙状态基线（`firewall_missing_now`）放在 `tokio::spawn` 出去的任务里，任务被调度的时刻不确定，连接建立到任务运行之间发生的状态变化会被当成基线而不推送，客户端永远收不到那次变化。测试只是在 CI 的 2 核 runner 上更容易撞上。把基线读取挪到 `spawn` 之前。限 2 核（`taskset -c 0,1`）反复运行该测试：修复前 80 次失败 3 次（约 4%），修复后 300 次 0 次失败。（中间我曾因 zsh 通配符没匹配到测试二进制路径，得到“失败 60 次”的无效数据，发现后重做，没有采用。）没有为它写专门的回归测试：确定性地构造“状态变化落在任务被调度之前”需要控制 `tokio::spawn` 的调度，测试会很脆弱；现有测试在修复后不再偶发失败，并在代码里留下了说明基线为何必须在 `spawn` 之前读取的注释。
 
 教训（已写入记忆）：改 CI/缓存/环境类的东西，验证必须放到它真正起作用的环境（`main` 分支、对应 OS、真实桌面），特性分支或模拟环境上的成功只证明机制能工作；CI 偶发失败先看根因链，用“限核反复运行”区分真实竞态与外部网络，而不是“重跑到绿”。
+
+## 10. v0.1.1 发布与升级路径验证（2026-11-26）
+
+用户决定发布 v0.1.1。内容（只写用户能感知到的）：锁定钥匙环时 `lanmsgd` 首次启动不再无限阻塞；防火墙状态在界面刚连上后端的瞬间变化时界面偶尔收不到。流程与 v0.1.0 相同：`main` CI 三个 job 全绿后在该提交（`1bcb984`）上打 annotated tag，Release 流水线全绿（9 个构建 job、`Verify asset set` 资产清单守卫、`Publish`）。
+
+**发布后验证（匿名下载）**：13 个资产（12 个约定资产 + `SHA256SUMS`，含两个 `setup.exe`，守卫没有被触发），12 个文件哈希与清单一致，`latest` 指向 v0.1.1；APK 由正式证书签名（指纹与 keystore 一致），`versionName 0.1.1`、`versionCode 101`；scoop 清单由机器人自动提交回 `main`，版本、URL 与两个架构的哈希都与发布一致。
+
+**一处更正（我的错误）**：我最初把“`lanmsg-cli` 与 `lanmsgd` 支持 `--version`”写进了 0.1.1 的更新说明，并随 Release 公开发布；随后在对发布版 0.1.0 做升级测试时发现它的 `lanmsgd --version` 就已经输出 `0.1.0`——该改动（`3074af6`）和 Windows 安装器修复一起合入后才重发的 v0.1.0。我之前只核对了 `install.sh` 的改动是否已在 v0.1.0，漏了同一批提交里的这一项。用 `git merge-base --is-ancestor` 逐个核对后更正：钥匙环修复（`b354a74`）与防火墙基线修复（`4353b41`）确实不在 v0.1.0，保留；`--version` 在，去掉。已用 `gh release edit` 把已发布的 Release 说明改成更正后的内容（只改说明，tag 与资产没动），并提交 `CHANGELOG.md` 更正（`55fb365`）。
+
+**升级路径（首次真实验证）**，全部在隔离的 `HOME`/`XDG_*` 下用**发布出来的 0.1.0 无头二进制**完成：
+- **检查**：对真实 GitHub Release，`update check` 报告 `new version available: v0.1.1`，显示的是更正后的说明；渠道识别为 `Manual`。
+- **下载与校验**：经 IPC 发 `DownloadUpdate{asset:"install.sh"}`，收到进度事件与 `UpdateDownloadFinished ok=true`，文件落在 `data/updates/`，SHA-256 与发布清单一致、字节与发布的 `install.sh` 相同、无 `.part` 残留。
+- **fail-closed（用本地假 Release 服务器，`LANMSG_UPDATE_URL` 指向 127.0.0.1）**：资产内容与 `SHA256SUMS` 不符 → 拒绝（`checksum mismatch`），不留文件；`SHA256SUMS` 里没有该资产 → 拒绝（`has no entry for install.sh`），不留文件；资产名 `../evil.sh` → `InvalidArgument`，目录外无文件。T23a 安全审阅时这几条只靠代码阅读与单测确认过，现在在发布出来的二进制上端到端验证了。
+- 小问题：`update check` 的 `published` 字段输出的是毫秒时间戳而不是可读日期。
+
+**仍未验证**：各渠道的“安装”动作本身（Windows 安装器静默安装、scoop 版弹命令行窗口、Linux 执行 `install.sh`、macOS dmg）；Windows 安装器与 scoop 的真机安装、macOS dmg、Windows/macOS 上的桌面 GUI；真机 Android；NAT 后手机往电脑发文件。
 
