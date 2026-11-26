@@ -103,6 +103,15 @@ jobs:
       - name: Build native libraries and Kotlin bindings
         run: bash scripts/build-android-core.sh debug
 
+      # Robolectric 每次运行都会从 Maven Central 下载 Android SDK 的 jar 到 ~/.m2；网络抖动时一批测试
+      # 会以 MavenArtifactFetcher 的 IOException 失败（与代码无关，2026-11-26 连续两次出现）。
+      # 按 Robolectric 版本缓存，版本不变就命中；不设 restore-keys，避免版本变了还用旧 jar。
+      - name: Cache Robolectric SDK jars
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-${{ runner.os }}-${{ hashFiles('android/gradle/libs.versions.toml') }}
+
       - name: Gradle unit tests
         working-directory: android
         run: ./gradlew :app:testDebugUnitTest --no-daemon
