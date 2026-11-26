@@ -6,11 +6,11 @@
   "architecture": {
     "64bit": {
       "url": "https://github.com/huanfeng/lanmsg/releases/download/v0.1.0/lanmsg-windows-x64.zip",
-      "hash": "0b1c049ad1c83f7a913a2c24d7e9a0307d6546c3aea9f2e5cc4dad045c0125be"
+      "hash": "a44c44afb3c770bd3851d70b6d124dc25f5f4ac8e7179e95851f326cd16a7d42"
     },
     "arm64": {
       "url": "https://github.com/huanfeng/lanmsg/releases/download/v0.1.0/lanmsg-windows-arm64.zip",
-      "hash": "9f633d8dc7339d2588d3f4ff5632d06c673b1a10725549ee0997af0bf2957932"
+      "hash": "8e77f2669a85d9f82ca7ecb80110381ffb41cce87753ce31ec5abef0fe9bae69"
     }
   },
   "bin": ["lanmsg-cli.exe"],
