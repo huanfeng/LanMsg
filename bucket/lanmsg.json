@@ -1,0 +1,27 @@
+{
+  "version": "0.1.0",
+  "description": "局域网聊天式文件互传",
+  "homepage": "https://github.com/huanfeng/lanmsg",
+  "license": "GPL-3.0-or-later",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/huanfeng/lanmsg/releases/download/v0.1.0/lanmsg-windows-x64.zip",
+      "hash": "0b1c049ad1c83f7a913a2c24d7e9a0307d6546c3aea9f2e5cc4dad045c0125be"
+    },
+    "arm64": {
+      "url": "https://github.com/huanfeng/lanmsg/releases/download/v0.1.0/lanmsg-windows-arm64.zip",
+      "hash": "9f633d8dc7339d2588d3f4ff5632d06c673b1a10725549ee0997af0bf2957932"
+    }
+  },
+  "bin": ["lanmsg-cli.exe"],
+  "shortcuts": [["lanmsg.exe", "LanMsg"]],
+  "notes": "首次运行若提示防火墙，请在托盘菜单中点击「允许 LanMsg 通过防火墙」。",
+  "checkver": { "github": "https://github.com/huanfeng/lanmsg" },
+  "autoupdate": {
+    "architecture": {
+      "64bit": { "url": "https://github.com/huanfeng/lanmsg/releases/download/v$version/lanmsg-windows-x64.zip" },
+      "arm64": { "url": "https://github.com/huanfeng/lanmsg/releases/download/v$version/lanmsg-windows-arm64.zip" }
+    },
+    "hash": { "url": "$baseurl/SHA256SUMS" }
+  }
+}
