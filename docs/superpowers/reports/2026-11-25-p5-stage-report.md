@@ -1,6 +1,6 @@
 # LanMsg P5（扩展与发布）阶段验收报告（2026-11-25）
 
-结论：P5 计划的 23 个任务（Task 1–23，含 3B）全部完成并合入 `main`，每个任务经独立审阅（实施与审阅均为 sonnet 子代理，审阅不通过即进入修复轮；安全相关任务按安全视角审阅），审阅发现的应修项均已修复并复核。自动化检查全部通过；发布流水线在 `main` 上做过一次完整 dry-run（8 个构建 job 全绿）。**尚未发布任何 Release**：仓库仍为私有，用户已决定“先不发布、继续打磨”。剩余为需要真机的手工互操作验收（第 7 节）与 GitHub Actions 账单问题（第 6 节）。
+结论：P5 计划的 23 个任务（Task 1–23，含 3B）全部完成并合入 `main`，每个任务经独立审阅（实施与审阅均为 sonnet 子代理，审阅不通过即进入修复轮；安全相关任务按安全视角审阅），审阅发现的应修项均已修复并复核。自动化检查全部通过；发布流水线在 `main` 上做过一次完整 dry-run（8 个构建 job 全绿）。**v0.1.0 已于 2026-11-26 公开发布**（仓库已转公开，GitHub Actions 账单限制随之解除）。剩余为需要真机的手工互操作验收（第 7 节）；发布过程中发现并修复的缺陷见第 8 节。
 
 ## 1. 提交清单
 
@@ -45,8 +45,8 @@
 | `node --test web/test/*.test.mjs` | 14 通过 |
 | `bash scripts/check-packaging.sh --fast`、`bash packaging/linux/test-install.sh` | OK |
 | 占位符扫描（`todo!`/`unimplemented!`/`#[ignore]`/`TODO`，仅跟踪文件） | 无命中（`lanmsg_ffi.kt` 为 uniffi 生成物，已被 gitignore） |
-| `main` 的 CI（Linux / Windows / Android 三 job） | `b3a797f` 上全绿；之后的 `1983e3c` 因账单问题未能运行（见第 6 节） |
-| Release 流水线 dry-run（`workflow_dispatch`，`dry_run=true`） | `main` 上 8 个构建 job 全绿（Linux 桌面与无头 × 双架构、Android APK、macOS 通用、Windows × 双架构），Publish 按预期跳过 |
+| `main` 的 CI（Linux / Windows / Android 三 job） | 全绿：`b3a797f`、`e797380`、`5a4dd19`、`bbc1acf`（`1983e3c` 当时因账单问题未能运行，仓库转公开后随后续提交一并验证，见第 6 节） |
+| Release 流水线（首次 dry-run、修复后 dry-run、真实 tag 发布） | 三次均全绿；dry-run 为 `main` 上 8 个构建 job 全绿（Linux 桌面与无头 × 双架构、Android APK、macOS 通用、Windows × 双架构），Publish 按预期跳过 |
 | `scripts/e2e-acceptance.sh`（合入全部收尾后的 main，先重新构建二进制） | ACCEPTANCE OK，13 个场景全部 PASS（文字、二维码/短码配对、离线补齐、陌生人请求、文件/文件夹传输与续传、吊销、撤回已读、回环吞吐） |
 | 网页临时会话真实浏览器端到端（Chromium headless，非 CI；`docs/superpowers/reports/p5-web-e2e/`） | key 模式 11/11、code 模式 13/13：握手与宿主允许、双向文字、3.5 MB 中文名加密上传、5 MB 宿主文件解密下载（SHA-256 均一致）、宿主停止后页面显示“已结束”、无 console 错误 |
 
@@ -87,7 +87,7 @@ P5 功能对内存的影响（同一进程，单独运行）：启动 2.3 MB；�
 
 ## 6. GitHub Actions 账单
 
-2026-11-25 把收尾合入 `main`（`1983e3c`）后，CI 三个 job 均“未启动”，注释为 *recent account payments have failed or your spending limit needs to be increased*。这是账号侧限制，不是代码问题；私有仓库的 Actions 分钟数按量计费，本阶段的完整 Release dry-run（8 个 job，含 macOS 与 Windows）和多轮 CI 消耗较大。恢复前该提交没有远端 CI 验证，已用本地 fmt / clippy / 测试替代（第 2 节）。
+2026-11-25 把收尾合入 `main`（`1983e3c`）后，CI 三个 job 均“未启动”，注释为 *recent account payments have failed or your spending limit needs to be increased*，原因是私有仓库的 Actions 分钟数按量计费，本阶段的完整 Release dry-run（8 个 job，含 macOS 与 Windows）和多轮 CI 消耗较大。2026-11-26 用户把仓库转为公开后限制解除，`main` 的 CI 恢复运行并全绿。
 
 ## 7. 需真机验收项（用户手工）
 
@@ -98,4 +98,24 @@ P5 功能对内存的影响（同一进程，单独运行）：启动 2.3 MB；�
 3. **中转站**：台式机建站放入 3 个文件（引用与复制各有）→ Android 查看清单并下载；台式机关机后 Android 显示“源离线”；Android 往中转站上传一张照片，台式机目录出现该文件。
 4. **跨网段**：两台经 Tailscale 等互通但不在同一局域网的电脑，手动添加后互发消息，联系人行显示“VPN”角标；第三台本人设备经地址交换自动连上。
 5. **安装渠道**：Windows 安装包与 scoop（`scoop install <本地 json>`）各装一次，并核对防火墙一键放行（`netsh` 的显示/添加/删除，安装器重复运行幂等，中文目录）；Ubuntu `curl | sh` 安装、NAS（或容器）无头版安装；Android APK 安装；macOS 记为外部依赖。
-6. **应用内更新**：公开仓库并发布首个版本后，用旧版本验证检查、下载校验、各渠道安装（scoop 版应弹出命令行窗口执行 `scoop update lanmsg` 后退出）。
+6. **应用内更新**：v0.1.0 已发布，但目前没有更旧的版本可以升级，所以“检查到新版本 → 下载 → 校验 → 安装”的整条链路还没有真实走过（只验证了对真实 Release 的检查、semver 比较与“已是最新”）。需要发布下一个版本后，用 0.1.0 验证各渠道安装（scoop 版应弹出命令行窗口执行 `scoop update lanmsg` 后退出）。
+
+## 8. v0.1.0 发布与发布后验证（2026-11-26）
+
+流程：`bump-version` 前发现 `CHANGELOG.md` 里有一节从未发布的 `[0.1.0]` 占位（会让脚本拒绝升版本），先删除，再把 `[Unreleased]` 归档为 `[0.1.0] - 2026-11-26`；`main` CI 绿后打 tag `v0.1.0`，Release 流水线全绿并发布。
+
+**真实匿名下载验证**（不带 token）：全部资产 SHA-256 与 `SHA256SUMS` 一致；APK 由正式签名证书签名（指纹与 keystore 一致，`versionCode 100`）；`curl | sh` 无头安装与 `uninstall.sh` 卸载可用；Linux 桌面包无缺失库、glibc 要求 ≥ 2.30；scoop 清单由机器人自动提交回 `main`，版本、URL、哈希与发布一致；应用内更新检查对真实 Release 返回“已是最新”，安装渠道识别为 `Manual`（这也是上周 T23a 里 `builder error` 的最终确认：TLS 客户端修复后对真实 GitHub 正常）。
+
+**发现的缺陷与处理**
+
+- **A（影响发布）——Windows 安装器漏发。** 首次发布缺少 `lanmsg-windows-{x64,arm64}-setup.exe`：`wind-packer` 默认把安装器命名为 `<output_name>-<version>.exe`（带版本号），而发布资产、scoop 与应用内更新都约定不带版本号的名字；`actions/upload-artifact` 的 `if-no-files-found: error` 只在**所有**路径都缺失时才报错，zip 在就静默通过，所以 Windows job 与发布 job 都是绿的。此前 `check-packaging.sh` 只校验了清单里的 `output_name`，从未校验打包器**实际产出**的文件名。修复：`build-dist.ps1` 给 `wind-packer build` 显式传 `--output` 并立即检查产物存在；Windows job 上传前逐个核对；新增 `scripts/check-release-assets.sh` 与 `assets` job（dry-run 里也会跑，因为 Publish 在 dry-run 时被跳过，守卫不能只在第一次真发布时才执行）；`check-packaging.sh` 校验清单与 `release.yml` 文件头一致，并正反测试该脚本确实能抓出缺失。修复分支先在 Windows runner 上 dry-run 验证，再下载 artifact 实测文件名与 PE 头。
+- **B（体验）——`install.sh --prefix` 试装会启用真实 systemd 服务。** 其实脚本早就有 `LANMSG_NO_SYSTEMD=1` 开关，只是 `--help` 没提；已补上。仍遗留：设了该开关时脚本依然会把 unit 文件写进 `~/.config/systemd/user/`（不启用）。
+- **C（小）——`lanmsg-cli` 与 `lanmsgd` 不认 `--version`。** 已加（取自单一版本源），并有测试。
+- ARM64 安装器被 `file` 识别为 x86-64 是**有意的**：wind-installer 只发布 x64 的 stub，ARM64 Windows 通过仿真运行它，安装进去的文件是真正的 ARM64 构建（`build-dist.ps1` 里有注释说明）。
+
+**删除重发。** 修复合入后，用户选择删除已公开的 v0.1.0（Release 与 tag）并在修复后的提交上重新发布同一版本号，而不是发 v0.1.1。后果：重发的资产哈希与首次发布不同（除 `uninstall.sh` 外全部重新构建，另新增两个安装器），**首次发布期间下载过资产的人，其校验和与现在的 `SHA256SUMS` 对不上**；scoop 清单由重发流程自动更新为新哈希（已核对一致）。首次发布与重发之间约 40 分钟没有可用的 Release（`latest` 为 404）。
+
+**没有验证到的**：Windows 安装器与 scoop 安装（本机是 Linux，只验证了文件名、PE 头、嵌入的清单版本与哈希，没有运行）；macOS dmg 的挂载与运行；Android APK 的安装与运行；升级路径（第 7 节第 6 项）。
+
+**过程中的一次越界副作用**：用 `--prefix` 试装 `install.sh` 时，脚本在真实用户会话里启用并启动了 systemd 用户服务，并创建了默认数据目录 `~/.local/share/lanmsg`（确认是 02:13 新建、此前不存在，无既有数据）；已用发布的 `uninstall.sh` 卸载服务并删除该目录。之后的安装验证都在隔离的 `HOME`/`XDG_*` 下带 `LANMSG_NO_SYSTEMD=1` 进行，并核对用户环境未被触碰。
+
